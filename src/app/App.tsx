@@ -1,6 +1,5 @@
 import { useEffect, useReducer, useState } from "react";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
-import { NotesList } from "../components/notes-list/NotesList";
 import { RecoveryBanner } from "../components/recorder/RecoveryBanner";
 import { Sidebar } from "../components/sidebar/Sidebar";
 import {
@@ -8,6 +7,7 @@ import {
   bootstrapApp,
   createFolder,
   createNote,
+  deleteNote,
   finishRecording,
   getRecordingStatus,
   getNote,
@@ -30,11 +30,19 @@ export function App() {
     createInitialState,
   );
   const [error, setError] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const selectedNote = state.selectedNote;
 
   useEffect(() => {
     bootstrapApp()
-      .then((payload) => dispatch({ type: "bootstrapLoaded", payload }))
+      .then(async (payload) => {
+        dispatch({ type: "bootstrapLoaded", payload });
+        const firstNoteId = payload.notes[0]?.id;
+        if (firstNoteId) {
+          const note = await getNote(firstNoteId);
+          dispatch({ type: "noteLoaded", note });
+        }
+      })
       .catch((err: unknown) => setError(messageFromError(err)));
   }, []);
 
@@ -99,6 +107,25 @@ export function App() {
     }
   }
 
+  async function handleDeleteNote(noteId: string) {
+    if (state.recordingStatus) {
+      setError("Stop the current recording before deleting a note.");
+      return;
+    }
+    try {
+      await deleteNote(noteId);
+      const response = await listNotes(state.selectedFolderId);
+      dispatch({ type: "notesLoaded", notes: response.items });
+      const nextNoteId = response.items[0]?.id;
+      if (nextNoteId) {
+        const note = await getNote(nextNoteId);
+        dispatch({ type: "noteLoaded", note });
+      }
+    } catch (err) {
+      setError(messageFromError(err));
+    }
+  }
+
   async function handleUpdateNote(
     patch: Partial<Pick<NoteDto, "title" | "editedContent">>,
   ) {
@@ -152,15 +179,27 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main
+      className="app-shell"
+      data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"}
+    >
+      <div className="titlebar-drag" aria-hidden />
       <Sidebar
         folders={state.folders}
+        notes={state.notes}
+        selectedNoteId={state.selectedNoteId}
         selectedFolderId={state.selectedFolderId}
         onCreateFolder={() => void handleCreateFolder()}
+        onCreateNote={() => void handleCreateNote()}
         onSelectAll={() => void handleSelectFolder(undefined)}
         onSelectFolder={(folderId) => void handleSelectFolder(folderId)}
+        onSelectNote={(noteId) => void handleSelectNote(noteId)}
+        onDeleteNote={(noteId) => void handleDeleteNote(noteId)}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
       <section className="main-panel">
+       <div className="main-panel-body">
         {error ? <p className="error-banner">{error}</p> : null}
         <RecoveryBanner
           recoveries={state.activeRecoveries}
@@ -181,13 +220,7 @@ export function App() {
               .catch((err: unknown) => setError(messageFromError(err)))
           }
         />
-        <div className="app-shell">
-          <NotesList
-            notes={state.notes}
-            selectedNoteId={state.selectedNoteId}
-            onSelectNote={(noteId) => void handleSelectNote(noteId)}
-            onCreateNote={() => void handleCreateNote()}
-          />
+        <div className="workspace">
           {selectedNote ? (
             <NoteEditor
               note={selectedNote}
@@ -246,6 +279,7 @@ export function App() {
             </section>
           )}
         </div>
+       </div>
       </section>
     </main>
   );

@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { NotesList } from "../components/notes-list/NotesList";
@@ -34,30 +34,56 @@ const notes: NoteListItemDto[] = [
 ];
 
 describe("folders UI", () => {
-  it("renders required sidebar items and selects folders", async () => {
+  it("renders notes in the sidebar and filters them", async () => {
     const user = userEvent.setup();
-    const onSelectFolder = vi.fn();
+    const onSelectNote = vi.fn();
     render(
       <Sidebar
         folders={folders}
+        notes={notes}
+        selectedNoteId="note-2"
         selectedFolderId={undefined}
         onCreateFolder={vi.fn()}
+        onCreateNote={vi.fn()}
         onSelectAll={vi.fn()}
-        onSelectFolder={onSelectFolder}
+        onSelectFolder={vi.fn()}
+        onSelectNote={onSelectNote}
+        onDeleteNote={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("OS Notetaker")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "+ New Folder" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "All Notes" }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Notetaker")).toBeInTheDocument();
+    expect(screen.getByText("Second")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Ideas" }));
+    await user.type(screen.getByPlaceholderText("Search notes"), "second");
+    await user.click(screen.getAllByRole("button", { name: /Second/ })[0]);
 
-    expect(onSelectFolder).toHaveBeenCalledWith("folder-1");
+    expect(screen.queryByText("New note")).not.toBeInTheDocument();
+    expect(onSelectNote).toHaveBeenCalledWith("note-2");
+  });
+
+  it("opens note actions from right click and deletes", async () => {
+    const user = userEvent.setup();
+    const onDeleteNote = vi.fn();
+    render(
+      <Sidebar
+        folders={folders}
+        notes={notes}
+        selectedNoteId="note-2"
+        selectedFolderId={undefined}
+        onCreateFolder={vi.fn()}
+        onCreateNote={vi.fn()}
+        onSelectAll={vi.fn()}
+        onSelectFolder={vi.fn()}
+        onSelectNote={vi.fn()}
+        onDeleteNote={onDeleteNote}
+      />,
+    );
+
+    fireEvent.contextMenu(screen.getByText("Second").closest("article")!);
+    await user.click(screen.getByRole("menuitem", { name: "Delete note" }));
+
+    expect(onDeleteNote).toHaveBeenCalledWith("note-2");
   });
 
   it("shows notes with placeholders and empty folder action", () => {

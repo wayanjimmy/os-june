@@ -1,17 +1,38 @@
+@import "./tokens.css";
+
+@font-face {
+  font-family: "ABC Diatype";
+  src: url("/ABCDiatype-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "ABC Diatype";
+  src: url("/ABCDiatype-Medium.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Martina Plantijn";
+  src: url("/martina-plantijn-light.woff2") format("woff2");
+  font-weight: 300 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  color: #171717;
-  background: #f4f5f7;
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  color: var(--foreground);
+  background: var(--sidebar);
+  font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: var(--fs-md);
 }
 
 * {
@@ -20,8 +41,14 @@
 
 body {
   margin: 0;
-  min-width: 900px;
+  min-width: 720px;
   min-height: 100vh;
+  background: var(--sidebar);
+  color: var(--foreground);
+}
+
+::selection {
+  background: var(--selection);
 }
 
 button,
@@ -31,303 +58,1140 @@ select {
   font: inherit;
 }
 
+button {
+  color: inherit;
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.note-title,
+.note-body {
+  outline: none;
+}
+
+.note-title:focus,
+.note-body:focus,
+.note-title:focus-visible,
+.note-body:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Quiet scrollbars — match Fellow. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: transparent; border-radius: 9999px; }
+*:hover::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb { background: var(--border); }
+
+/* App shell — sidebar tint outside, white card inset for the main area. */
+
+/* Shell is pinned to the viewport; the two panels each own their scroll. */
 .app-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  min-height: 100vh;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+  background: var(--sidebar);
+  transition: grid-template-columns var(--t-med) var(--ease-out);
 }
+
+.app-shell[data-sidebar="collapsed"] {
+  grid-template-columns: var(--sidebar-w-collapsed) minmax(0, 1fr);
+}
+
+/* Sidebar ------------------------------------------------------------ */
 
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 24px 18px;
-  border-right: 1px solid rgba(40, 42, 48, 0.12);
-  background: rgba(255, 255, 255, 0.62);
-  backdrop-filter: blur(18px) saturate(1.35);
-}
-
-.sidebar h1 {
-  margin: 0 0 16px;
-  font-size: 19px;
-  font-weight: 650;
-}
-
-.sidebar button,
-.primary-action {
-  min-height: 36px;
-  border: 1px solid rgba(36, 38, 43, 0.12);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.76);
-  color: #171717;
-  cursor: pointer;
-}
-
-.folder-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.sidebar .active {
-  background: rgba(28, 99, 214, 0.12);
-  border-color: rgba(28, 99, 214, 0.18);
-}
-
-.main-panel {
-  display: flex;
-  flex-direction: column;
+  gap: var(--sp-4);
   min-width: 0;
-  padding: 32px;
+  height: 100vh;
+  padding: calc(var(--sp-3) + var(--titlebar-h)) var(--sp-3) var(--sp-3);
+  background: var(--sidebar);
+  color: var(--sidebar-foreground);
+  overflow: hidden;
 }
 
-.app-shell {
-  display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  gap: 24px;
-  width: 100%;
-  min-height: calc(100vh - 64px);
+/* Empty strip behind the macOS traffic lights — the sidebar and the inset
+ * card both start below it, so this never overlaps interactive UI and can
+ * stay a full drag region. */
+.titlebar-drag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h);
+  z-index: 100;
+  -webkit-app-region: drag;
 }
 
-.notes-list,
-.notes-empty {
+/* The macOS traffic lights float above this row (the sidebar reserves
+ * --titlebar-h of top padding), so the brand can sit flush-left. */
+.sidebar-header {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-}
-
-.notes-empty {
-  justify-content: center;
   align-items: center;
-  border: 1px solid rgba(31, 35, 42, 0.1);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.44);
+  justify-content: space-between;
+  gap: var(--sp-2);
+  position: relative;
+  padding: 0 var(--sp-1);
+  min-height: 28px;
+  flex-wrap: nowrap;
 }
 
-.notes-list > button:not(.primary-action) {
+.sidebar-brand {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  color: var(--foreground);
+  text-decoration: none;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.sidebar-brand img {
+  display: block;
+  height: 16px;
+  width: auto;
+}
+
+.sidebar[data-collapsed="true"] .sidebar-header {
+  padding: var(--sp-1) 0 0;
+  justify-content: center;
+}
+
+.sidebar[data-collapsed="true"] .sidebar-brand {
+  display: none;
+}
+
+/* Collapsed rail: every hit target is the same rounded square. */
+.sidebar[data-collapsed="true"] .sidebar-toggle,
+.sidebar[data-collapsed="true"] .sidebar-search-collapsed,
+.sidebar[data-collapsed="true"] .note-row {
+  width: 38px;
+  height: 38px;
+  margin: 0 auto;
+  border-radius: var(--r-md);
+}
+
+.sidebar[data-collapsed="true"] .note-row-main {
+  width: 100%;
+  height: 100%;
+}
+
+/* Sidebar toggle — two icons crossfade in the same 18×18 box so the
+ * header layout never reflows. Borrowed pattern from Fellow's
+ * SidebarCollapseTrigger. */
+.sidebar-toggle {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-md);
+  height: var(--control-md);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.sidebar-toggle:hover {
+  background: var(--sidebar-accent);
+  color: var(--foreground);
+}
+
+.sidebar-toggle-icon {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.sidebar-toggle-icon > span {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    transform var(--t-fast) var(--ease-out);
+  will-change: opacity, transform;
+}
+
+.sidebar-toggle-icon > span[data-active="false"] {
+  opacity: 0;
+  transform: scale(0.92);
+}
+
+.sidebar-toggle-icon > span[data-active="true"] {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* Icon button — used inside the inset card too. */
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-md);
+  height: var(--control-md);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.icon-button:hover {
+  background: var(--sidebar-accent);
+  color: var(--foreground);
+}
+
+/* Sidebar search ---------------------------------------------------- */
+
+.sidebar-search {
   display: grid;
-  gap: 5px;
-  min-height: 68px;
-  padding: 12px;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--control-xl);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+
+.sidebar-search:focus-within {
+  border-color: var(--ring);
+}
+
+.sidebar-search input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+}
+
+.sidebar-search input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.sidebar[data-collapsed="true"] .sidebar-search {
+  display: none;
+}
+
+/* Sidebar section --------------------------------------------------- */
+
+.sidebar-section {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+  min-height: var(--control-md);
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+
+.section-title-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.section-count {
+  color: var(--muted-foreground);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.section-add {
+  width: var(--control-sm);
+  height: var(--control-sm);
+}
+
+.sidebar[data-collapsed="true"] .section-title-label,
+.sidebar[data-collapsed="true"] .section-add {
+  display: none;
+}
+
+/* Notes nav with bottom fade ---------------------------------------- */
+
+.notes-nav-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.notes-nav {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  padding-right: 2px;
+  padding-bottom: var(--sp-6);
+  /* Fade the bottom edge as long lists scroll past. */
+  mask-image: linear-gradient(
+    to bottom,
+    black 0,
+    black calc(100% - 32px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    black 0,
+    black calc(100% - 32px),
+    transparent 100%
+  );
+}
+
+.note-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  border-radius: var(--r-md);
+}
+
+.note-row:hover,
+.note-row[data-selected="true"] {
+  background: var(--sidebar-accent);
+}
+
+.note-row-main {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: var(--sp-3);
+  align-items: center;
+  min-width: 0;
+  min-height: 30px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  background: transparent;
   text-align: left;
-  border: 1px solid rgba(31, 35, 42, 0.1);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.58);
   cursor: pointer;
+  color: inherit;
 }
 
-.notes-list .selected {
-  border-color: rgba(28, 99, 214, 0.22);
-  background: rgba(28, 99, 214, 0.1);
+.note-row-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--muted-foreground);
 }
 
-.notes-list span {
-  font-weight: 650;
-}
-
-.notes-list small {
-  color: #646a73;
+.note-row-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  font-weight: 400;
 }
 
-.primary-action {
-  padding: 0 18px;
-  font-weight: 650;
+.note-row[data-selected="true"] .note-row-title {
+  font-weight: 500;
 }
 
-.recorder-bar {
-  display: grid;
-  grid-template-columns: 88px minmax(220px, 360px) 88px;
-  gap: 14px;
+.note-row-menu {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: 0 3px 0 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.note-row:hover .note-row-menu,
+.note-row-menu:focus-visible,
+.note-row[data-selected="true"] .note-row-menu {
+  opacity: 1;
+}
+
+.note-row-menu:hover {
+  background: oklch(0% 0 none / 6%);
+  color: var(--foreground);
+}
+
+.sidebar[data-collapsed="true"] .note-row-menu,
+.sidebar[data-collapsed="true"] .note-row-title {
+  display: none;
+}
+
+.sidebar[data-collapsed="true"] .note-row-main {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  padding: var(--sp-2);
+}
+
+/* Context menu ------------------------------------------------------ */
+
+.context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 156px;
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-lg);
+}
+
+.context-menu button {
+  display: flex;
   align-items: center;
-  padding: 12px;
-  border: 1px solid rgba(28, 31, 38, 0.14);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.66);
-  box-shadow: 0 18px 48px rgba(33, 37, 45, 0.12);
-  backdrop-filter: blur(22px) saturate(1.35);
-}
-
-.recorder-meter {
-  display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
-}
-
-.elapsed {
-  font-variant-numeric: tabular-nums;
-  font-weight: 650;
-}
-
-.waveform {
-  display: grid;
-  grid-template-columns: repeat(24, 1fr);
-  gap: 3px;
-  align-items: center;
-  min-height: 34px;
-}
-
-.waveform span {
-  display: block;
+  gap: var(--sp-3);
+  width: 100%;
   min-height: 28px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #3074f0, #17a672);
-  transform-origin: center;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--fs-md);
 }
 
-.done-button {
-  color: #ffffff;
-  border-color: rgba(22, 95, 47, 0.25);
-  background: #168843;
+.context-menu button:hover {
+  background: var(--muted);
 }
 
-.recorder-warning {
-  grid-column: 1 / -1;
-  margin: 0;
-  color: #9a4d00;
-  font-size: 13px;
-  text-align: center;
+.context-menu .destructive {
+  color: var(--destructive);
+}
+
+.context-menu .destructive:hover {
+  background: var(--destructive-soft);
+}
+
+.sidebar-empty {
+  display: grid;
+  place-items: center;
+  min-height: 80px;
+  color: var(--muted-foreground);
+  font-size: var(--fs-md);
+}
+
+/* Inset main card --------------------------------------------------- */
+
+/* The white card is pinned: fixed height, never grows past the viewport.
+ * Its body scrolls internally so content is always clipped by the card. */
+.main-panel {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  margin: calc(var(--titlebar-h) + var(--sp-2)) var(--sp-3) var(--sp-3) 0;
+  border-radius: var(--r-2xl);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow:
+    var(--shadow-sm),
+    var(--shadow-inset);
+  overflow: hidden;
+}
+
+.app-shell[data-sidebar="collapsed"] .main-panel {
+  margin-left: 0;
+}
+
+.main-panel-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--sp-8) var(--sp-5);
+}
+
+/* Fade content into the card floor as it scrolls behind the record button. */
+.main-panel::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 96px;
+  background: linear-gradient(to bottom, transparent, var(--card) 78%);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.workspace {
+  display: grid;
+  flex: 1;
+  min-width: 0;
 }
 
 .note-editor {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 18px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: var(--sp-5);
   width: 100%;
-  min-height: calc(100vh - 64px);
+  max-width: 720px;
+  min-height: calc(100vh - 60px);
+  margin: 0 auto;
+  padding: var(--sp-10) 0 var(--sp-5);
 }
 
-.editor-empty {
+.editor-header {
   display: grid;
+  justify-items: start;
+  gap: var(--sp-3);
+}
+
+/* Overline — quiet metadata row sitting above the title. Date is plain
+ * text; the folder chip is the one actionable affordance. */
+.note-overline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--muted-foreground);
+}
+
+.note-overline-date {
+  font-variant-numeric: tabular-nums;
+}
+
+.note-overline-dot {
+  color: var(--muted-foreground);
+  opacity: 0.6;
+}
+
+.folder-chip-wrap {
+  position: relative;
+}
+
+.folder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: 22px;
+  margin: 0 calc(-1 * var(--sp-1));
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.folder-chip:hover,
+.folder-chip[aria-expanded="true"] {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.folder-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  min-width: 180px;
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--popover);
+  box-shadow: var(--shadow-lg);
+}
+
+.folder-popover button {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 28px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--popover-foreground);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-popover button:hover {
+  background: var(--muted);
+}
+
+.folder-popover-check {
+  display: inline-grid;
   place-items: center;
-  min-height: 100%;
+  width: 14px;
+  color: var(--foreground);
+}
+
+.folder-popover-empty {
+  margin: 0;
+  padding: var(--sp-2);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.note-overline-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--muted-foreground);
+}
+
+.note-overline-status .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--record);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 .note-title {
   width: 100%;
   border: 0;
-  outline: none;
   background: transparent;
-  color: #121417;
-  font-size: 40px;
-  font-weight: 700;
-  letter-spacing: 0;
+  color: var(--foreground);
+  font-family: var(--font-serif);
+  font-size: var(--fs-display);
+  font-weight: 400;
+  letter-spacing: -0.005em;
+  line-height: 1.15;
 }
 
-.tabs {
+.note-title::placeholder {
+  color: var(--muted-foreground);
+}
+
+/* Segmented control ------------------------------------------------- */
+
+.segmented {
+  position: relative;
   display: inline-flex;
-  width: max-content;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid rgba(31, 35, 42, 0.12);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.58);
-}
-
-.tabs button {
-  min-width: 104px;
-  min-height: 32px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  cursor: pointer;
-}
-
-.tabs [aria-selected="true"] {
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 5px 14px rgba(17, 24, 39, 0.08);
-}
-
-.folder-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.folder-picker label {
-  display: inline-flex;
-  gap: 6px;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid rgba(31, 35, 42, 0.12);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.58);
-  font-size: 13px;
+  gap: 2px;
+  height: 30px;
+  padding: 3px;
+  border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  color: var(--muted-foreground);
+}
+
+.segmented-indicator {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  border-radius: var(--r-sm);
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
+  transition:
+    transform var(--t-slow) var(--ease-spring),
+    width var(--t-slow) var(--ease-spring);
+  pointer-events: none;
+}
+
+.segmented button {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 0 var(--sp-4);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-out);
+}
+
+.segmented button[aria-pressed="true"] {
+  color: var(--foreground);
+}
+
+.segmented button:hover {
+  color: var(--foreground);
+}
+
+/* Editor body ------------------------------------------------------- */
+
+.editor-content {
+  min-height: 0;
 }
 
 .note-body,
 .transcript-view {
   width: 100%;
-  min-height: 0;
-  border: 1px solid rgba(31, 35, 42, 0.12);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.56);
-  backdrop-filter: blur(18px) saturate(1.22);
+  min-height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
 }
 
 .note-body {
   resize: none;
-  padding: 20px;
-  line-height: 1.55;
-  outline: none;
+  padding: var(--sp-2) 0 140px;
+  font-size: var(--fs-lg);
+  line-height: 1.6;
+}
+
+.note-body::placeholder {
+  color: var(--muted-foreground);
 }
 
 .transcript-view {
   overflow: auto;
-  padding: 20px;
-  line-height: 1.55;
+  padding: var(--sp-2) 0 140px;
+  font-size: var(--fs-lg);
+  line-height: 1.6;
 }
+
+.transcript-view p {
+  max-width: 720px;
+  margin: 0;
+}
+
+/* Note preview (rendered markdown) --------------------------------- */
+
+.note-preview {
+  padding: var(--sp-2) 0 140px;
+  font-size: var(--fs-lg);
+  line-height: 1.7;
+  color: var(--foreground);
+}
+
+/* Headings — sans (Diatype), only a notch larger than body, medium weight. */
+.note-preview h1,
+.note-preview h2 {
+  margin: var(--sp-6) 0 var(--sp-2);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: -0.003em;
+  line-height: 1.3;
+}
+
+.note-preview h1 {
+  font-size: 18px;
+}
+
+.note-preview h2 {
+  font-size: var(--fs-xl);
+}
+
+.note-preview > h1:first-child,
+.note-preview > h2:first-child {
+  margin-top: 0;
+}
+
+.note-preview p {
+  margin: 0 0 var(--sp-4);
+  color: var(--foreground);
+}
+
+.note-preview ul {
+  margin: 0 0 var(--sp-4);
+  padding-left: var(--sp-6);
+  list-style: disc;
+  color: var(--foreground);
+}
+
+.note-preview li {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-1);
+}
+
+.note-preview li::marker {
+  color: var(--muted-foreground);
+}
+
+.note-preview ul ul {
+  margin-top: var(--sp-2);
+  list-style: circle;
+}
+
+.note-preview strong {
+  font-weight: 600;
+}
+
+.note-preview:focus {
+  outline: none;
+}
+
+.note-preview[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+/* Floating selection toolbar ---------------------------------------- */
+
+.selection-toolbar {
+  position: fixed;
+  z-index: 80;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--popover) 78%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  backdrop-filter: blur(16px) saturate(1.6);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-lg);
+  transform: translate(-50%, -100%);
+}
+
+.selection-toolbar button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.selection-toolbar button:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.selection-toolbar .divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--border);
+}
+
+/* Empty / primary actions ------------------------------------------ */
+
+.empty-state {
+  display: grid;
+  gap: var(--sp-4);
+  width: min(100%, 480px);
+  margin-top: var(--sp-10);
+  color: var(--muted-foreground);
+}
+
+.empty-state button,
+.primary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  width: max-content;
+  min-height: var(--control-lg);
+  padding: 0 var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out);
+}
+
+.empty-state button:hover,
+.primary-action:hover {
+  background: var(--muted);
+  border-color: var(--ring);
+}
+
+/* Recorder ---------------------------------------------------------- */
 
 .editor-footer {
+  position: sticky;
+  bottom: var(--sp-5);
+  z-index: 3;
   display: flex;
   justify-content: center;
-  min-height: 64px;
+  min-height: 56px;
+  pointer-events: none;
 }
 
+.editor-footer > * {
+  pointer-events: auto;
+}
+
+.record-shell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 52px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--card);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  transition:
+    width var(--t-slow) var(--ease-spring),
+    box-shadow var(--t-med) var(--ease-out);
+  will-change: width;
+}
+
+.record-shell[data-state="idle"] {
+  width: 64px;
+}
+
+.record-shell[data-state="recording"],
+.record-shell[data-state="paused"],
+.record-shell[data-state="validating"] {
+  width: min(440px, calc(100% - var(--sp-8)));
+}
+
+/* Icon-only record trigger. Hover is an inset wash within the shell's
+ * padding, so it reads as a soft pressed surface, not a new outline. */
 .record-button {
   display: inline-flex;
-  gap: 8px;
   align-items: center;
-  min-height: 44px;
-  padding: 0 18px;
-  border-color: rgba(22, 95, 47, 0.25);
-  background: #168843;
-  color: #ffffff;
-  font-weight: 650;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: var(--r-lg);
+  background: transparent;
+  color: var(--foreground);
+  transition: background-color var(--t-fast) var(--ease-out);
+}
+
+.record-button:hover {
+  background: var(--muted);
+}
+
+.record-button .record-dot {
+  width: 9px;
+  height: 9px;
+  margin-right: var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--record);
+}
+
+.recorder-bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--sp-2);
+  align-items: center;
+  width: 100%;
+  padding: 0 2px;
+}
+
+.recorder-icon-button,
+.recorder-stop {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--muted);
+  color: var(--foreground);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    transform var(--t-fast) var(--ease-out);
+}
+
+.recorder-icon-button:hover {
+  background: color-mix(in oklch, var(--muted) 88%, var(--foreground));
+}
+
+.recorder-stop {
+  background: var(--foreground);
+  color: var(--background);
+}
+
+.recorder-stop:hover {
+  background: color-mix(in oklch, var(--foreground) 85%, black);
+}
+
+.recorder-icon-button:disabled,
+.recorder-stop:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.recorder-meter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-3);
+  align-items: center;
+  min-width: 0;
+  padding: 0 var(--sp-2);
+}
+
+.elapsed {
+  min-width: 44px;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+
+/* Waveform ---------------------------------------------------------- */
+
+.waveform {
+  display: grid;
+  grid-template-columns: repeat(32, 1fr);
+  gap: 3px;
+  align-items: center;
+  justify-content: stretch;
+  min-width: 0;
+  height: 30px;
+  padding: 0 2px;
+}
+
+.waveform span {
+  display: block;
+  height: 28px;
+  width: 100%;
+  min-width: 2px;
+  border-radius: 999px;
+  background: var(--foreground);
+  opacity: 0.85;
+  transform-origin: center;
+}
+
+.recorder-bar[data-state="paused"] .waveform span {
+  opacity: 0.32;
+}
+
+.recorder-warning {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+/* Banners ----------------------------------------------------------- */
+
+.error-banner,
+.recovery-banner {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: var(--fs-md);
 }
 
 .error-banner {
-  margin: 0 0 16px;
-  padding: 10px 12px;
-  border: 1px solid rgba(180, 83, 9, 0.2);
-  border-radius: 8px;
-  color: #8a3e00;
-  background: rgba(255, 247, 237, 0.86);
+  margin: 0 0 var(--sp-5);
+  padding: var(--sp-3) var(--sp-4);
+  border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+  background: var(--destructive-soft);
+  color: color-mix(in oklch, var(--destructive) 60%, var(--foreground));
 }
 
 .recovery-banner {
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--sp-5);
   align-items: center;
-  margin: 0 0 18px;
-  padding: 14px 16px;
-  border: 1px solid rgba(180, 83, 9, 0.18);
-  border-radius: 12px;
-  background: rgba(255, 247, 237, 0.82);
+  margin: 0 0 var(--sp-5);
+  padding: var(--sp-4) var(--sp-5);
 }
 
 .recovery-banner p {
-  margin: 4px 0 0;
-  color: #7a4b18;
+  margin: var(--sp-1) 0 0;
 }
 
 .recovery-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
+}
+
+.editor-empty,
+.notes-empty {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  color: var(--muted-foreground);
+}
+
+.notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.notes-list > button:not(.primary-action) {
+  display: grid;
+  gap: var(--sp-1);
+  min-height: 56px;
+  padding: var(--sp-4);
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  cursor: pointer;
+}
+
+.notes-list .selected {
+  background: var(--muted);
 }

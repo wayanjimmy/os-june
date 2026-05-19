@@ -14,6 +14,7 @@ pub fn run() {
             commands::list_notes,
             commands::get_note,
             commands::update_note,
+            commands::delete_note,
             commands::create_folder,
             commands::list_folders,
             commands::assign_note_to_folder,

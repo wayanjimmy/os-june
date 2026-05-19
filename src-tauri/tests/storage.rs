@@ -84,3 +84,27 @@ async fn creates_folders_and_assigns_notes_without_removing_all_notes_visibility
     );
     assert_eq!(folder_notes.items[0].folder_ids, vec![folder.id]);
 }
+
+#[tokio::test]
+async fn deletes_note_and_removes_folder_assignment() {
+    let repos = test_repositories().await;
+    let folder = repos.create_folder("Calls").await.expect("folder");
+    let note = repos
+        .create_note(Some(folder.id.clone()))
+        .await
+        .expect("note");
+
+    repos.delete_note(&note.id).await.expect("delete note");
+
+    let all_notes = repos
+        .list_notes(None, 50, None)
+        .await
+        .expect("all notes should load");
+    let folder_notes = repos
+        .list_notes(Some(folder.id), 50, None)
+        .await
+        .expect("folder notes should load");
+
+    assert!(all_notes.items.is_empty());
+    assert!(folder_notes.items.is_empty());
+}

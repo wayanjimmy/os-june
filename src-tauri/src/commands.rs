@@ -13,10 +13,10 @@ use crate::{
         processing::{process_saved_audio, retry_from_saved_audio},
         types::{
             AppError, AssignNoteToFolderRequest, BootstrapResponse, CreateFolderRequest,
-            CreateNoteRequest, FinishRecordingResponse, GetNoteRequest, ListNotesRequest,
-            ListNotesResponse, MicrophonePermissionResponse, NoteDto, RecordingSessionDto,
-            RecordingStatusDto, RemoveNoteFromFolderRequest, RetryProcessingRequest,
-            SessionRequest, StartRecordingRequest, UpdateNoteRequest,
+            CreateNoteRequest, DeleteNoteRequest, FinishRecordingResponse, GetNoteRequest,
+            ListNotesRequest, ListNotesResponse, MicrophonePermissionResponse, NoteDto,
+            RecordingSessionDto, RecordingStatusDto, RemoveNoteFromFolderRequest,
+            RetryProcessingRequest, SessionRequest, StartRecordingRequest, UpdateNoteRequest,
         },
     },
 };
@@ -87,6 +87,26 @@ pub async fn update_note(app: AppHandle, request: UpdateNoteRequest) -> Result<N
             request.active_tab,
         )
         .await?)
+}
+
+#[tauri::command]
+pub async fn delete_note(app: AppHandle, request: DeleteNoteRequest) -> Result<(), AppError> {
+    let repos = repositories(&app).await?;
+    let audio_paths = repos
+        .audio_artifact_paths_for_note(&request.note_id)
+        .await?;
+    repos.delete_note(&request.note_id).await?;
+    for path in audio_paths {
+        if path.trim().is_empty() {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("failed to remove deleted note audio {path}: {error}");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

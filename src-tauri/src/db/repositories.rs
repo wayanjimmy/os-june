@@ -241,6 +241,25 @@ impl Repositories {
         self.get_note(note_id).await
     }
 
+    pub async fn audio_artifact_paths_for_note(
+        &self,
+        note_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query("SELECT path FROM audio_artifacts WHERE note_id = ?")
+            .bind(note_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|row| row.get("path")).collect())
+    }
+
+    pub async fn delete_note(&self, note_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM notes WHERE id = ?")
+            .bind(note_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_note_status(
         &self,
         note_id: &str,

@@ -1,3 +1,6 @@
+import { IconPause } from "central-icons-filled/IconPause";
+import { IconPlay } from "central-icons-filled/IconPlay";
+import { IconStop } from "central-icons-filled/IconStop";
 import type { RecordingStatusDto } from "../../lib/tauri";
 import { Waveform } from "./Waveform";
 
@@ -27,12 +30,15 @@ export function RecorderBar({
     <div className="recorder-bar" data-state={status.state}>
       <button
         type="button"
+        className="recorder-icon-button"
         disabled={!controlsEnabled}
         onClick={() =>
           paused ? onResume(status.sessionId) : onPause(status.sessionId)
         }
+        aria-label={pauseLabel}
+        title={pauseLabel}
       >
-        {pauseLabel}
+        {paused ? <IconPlay size={14} /> : <IconPause size={14} />}
       </button>
       <div className="recorder-meter">
         <span className="elapsed">{formatElapsed(status.elapsedMs)}</span>
@@ -40,11 +46,13 @@ export function RecorderBar({
       </div>
       <button
         type="button"
-        className="done-button"
+        className="recorder-stop"
         disabled={!controlsEnabled}
         onClick={() => onDone(status.sessionId)}
+        aria-label={controlsEnabled ? "Done" : "Working"}
+        title={controlsEnabled ? "Done" : "Working"}
       >
-        {controlsEnabled ? "Done" : "Working"}
+        <IconStop size={14} />
       </button>
       {status.silenceWarning ? (
         <p className="recorder-warning" role="status">

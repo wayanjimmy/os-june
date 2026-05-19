@@ -1,45 +1,229 @@
-import type { FolderDto } from "../../lib/tauri";
+import { IconDotGrid1x3Vertical } from "central-icons/IconDotGrid1x3Vertical";
+import { IconFileText } from "central-icons/IconFileText";
+import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
+import { IconPlusMedium } from "central-icons/IconPlusMedium";
+import { IconSidebarHiddenLeftWide } from "central-icons/IconSidebarHiddenLeftWide";
+import { IconSidebarSimpleLeftWide } from "central-icons/IconSidebarSimpleLeftWide";
+import { IconTrashCan } from "central-icons/IconTrashCan";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { FolderDto, NoteListItemDto } from "../../lib/tauri";
 
 type SidebarProps = {
   folders: FolderDto[];
+  notes: NoteListItemDto[];
+  selectedNoteId?: string;
   selectedFolderId?: string;
   onCreateFolder: () => void;
+  onCreateNote: () => void;
   onSelectAll: () => void;
   onSelectFolder: (folderId: string) => void;
+  onSelectNote: (noteId: string) => void;
+  onDeleteNote: (noteId: string) => void;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
+};
+
+type MenuState = {
+  noteId: string;
+  x: number;
+  y: number;
 };
 
 export function Sidebar({
-  folders,
-  selectedFolderId,
-  onCreateFolder,
-  onSelectAll,
-  onSelectFolder,
+  notes,
+  selectedNoteId,
+  onCreateNote,
+  onSelectNote,
+  onDeleteNote,
+  collapsed = false,
+  onToggleCollapsed,
 }: SidebarProps) {
+  const [query, setQuery] = useState("");
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const filteredNotes = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return notes;
+    return notes.filter((note) =>
+      `${note.title} ${note.preview}`.toLowerCase().includes(normalized),
+    );
+  }, [notes, query]);
+
+  useEffect(() => {
+    if (!menu) return;
+
+    function close() {
+      setMenu(null);
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") close();
+    }
+
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menu]);
+
+  // Anchor the menu just below the overflow trigger so it always opens in the
+  // same spot, regardless of where the click landed.
+  function openMenuForNote(noteId: string, anchor: HTMLElement) {
+    const rect = anchor.getBoundingClientRect();
+    setMenu({ noteId, x: rect.right, y: rect.bottom + 4 });
+  }
+
   return (
-    <aside className="sidebar">
-      <h1>OS Notetaker</h1>
-      <button type="button" onClick={onCreateFolder}>
-        + New Folder
+    <aside className="sidebar" data-collapsed={collapsed}>
+      <header className="sidebar-header">
+        <a className="sidebar-brand" href="#" aria-label="Notetaker">
+          <img src="/os-notetaker.svg" alt="" height={16} />
+          <span style={{ position: "absolute", left: -9999 }}>Notetaker</span>
+        </a>
+        {onToggleCollapsed ? (
+          <button
+            type="button"
+            className="sidebar-toggle"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-pressed={collapsed}
+            onClick={onToggleCollapsed}
+          >
+            <span className="sidebar-toggle-icon" aria-hidden>
+              <span data-active={collapsed}>
+                <IconSidebarHiddenLeftWide size={18} />
+              </span>
+              <span data-active={!collapsed}>
+                <IconSidebarSimpleLeftWide size={18} />
+              </span>
+            </span>
+          </button>
+        ) : null}
+      </header>
+
+      {collapsed ? (
+        <button
+          type="button"
+          className="icon-button sidebar-search-collapsed"
+          aria-label="Search notes"
+          onClick={onToggleCollapsed}
+        >
+          <IconMagnifyingGlass size={16} />
+        </button>
+      ) : (
+        <label className="sidebar-search">
+          <IconMagnifyingGlass size={15} />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search notes"
+          />
+        </label>
+      )}
+
+      <section className="sidebar-section" aria-label="Notes">
+        <div className="section-title">
+          <span className="section-title-label">
+            Notes <span className="section-count">{filteredNotes.length}</span>
+          </span>
+          <button
+            type="button"
+            className="icon-button section-add"
+            aria-label="New note"
+            onClick={onCreateNote}
+          >
+            <IconPlusMedium size={14} />
+          </button>
+        </div>
+        <div className="notes-nav-wrap">
+          <div className="notes-nav">
+            {filteredNotes.length > 0 ? (
+              filteredNotes.map((note) => (
+                <NoteRow
+                  key={note.id}
+                  note={note}
+                  selected={selectedNoteId === note.id}
+                  onSelect={() => onSelectNote(note.id)}
+                  onOpenMenu={(anchor) => openMenuForNote(note.id, anchor)}
+                />
+              ))
+            ) : (
+              <div className="sidebar-empty">
+                {notes.length === 0 ? "No notes yet" : "No matches"}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {menu ? (
+        <div
+          className="context-menu"
+          style={{ left: menu.x, top: menu.y }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="destructive"
+            onClick={() => {
+              onDeleteNote(menu.noteId);
+              setMenu(null);
+            }}
+          >
+            <IconTrashCan size={14} />
+            Delete note
+          </button>
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
+function NoteRow({
+  note,
+  selected,
+  onSelect,
+  onOpenMenu,
+}: {
+  note: NoteListItemDto;
+  selected: boolean;
+  onSelect: () => void;
+  onOpenMenu: (anchor: HTMLElement) => void;
+}) {
+  const title = note.title.trim() || "New note";
+  const menuRef = useRef<HTMLButtonElement>(null);
+
+  return (
+    <article
+      className="note-row"
+      data-selected={selected}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (menuRef.current) onOpenMenu(menuRef.current);
+      }}
+    >
+      <button type="button" className="note-row-main" onClick={onSelect}>
+        <span className="note-row-icon">
+          <IconFileText size={15} />
+        </span>
+        <span className="note-row-title">{title}</span>
       </button>
       <button
+        ref={menuRef}
         type="button"
-        className={!selectedFolderId ? "active" : undefined}
-        onClick={onSelectAll}
+        className="note-row-menu"
+        aria-label={`Actions for ${title}`}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onOpenMenu(event.currentTarget);
+        }}
       >
-        All Notes
+        <IconDotGrid1x3Vertical size={14} />
       </button>
-      <nav className="folder-nav" aria-label="Folders">
-        {folders.map((folder) => (
-          <button
-            key={folder.id}
-            type="button"
-            className={selectedFolderId === folder.id ? "active" : undefined}
-            onClick={() => onSelectFolder(folder.id)}
-          >
-            {folder.name}
-          </button>
-        ))}
-      </nav>
-    </aside>
+    </article>
   );
 }

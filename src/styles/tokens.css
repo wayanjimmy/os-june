@@ -1,0 +1,187 @@
+/*
+ * OS Notetaker design tokens.
+ *
+ * Source of truth for both the desktop UI and tests. We mirror Fellow's
+ * token names where it makes sense (background/foreground/card/sidebar/
+ * border/ring) so designers can move between repos without re-learning
+ * the language. The "inset card" layout (sidebar tint outside, white card
+ * inside) is the same trick Fellow's shadcn SidebarInset uses.
+ *
+ * Casing rule for any UI label authored against these tokens: sentence
+ * case ("Notes"), never SHOUTY CAPS. See CLAUDE.md.
+ */
+
+:root {
+  /* Type ------------------------------------------------------------- */
+  --font-sans:
+    "ABC Diatype", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-serif: "Martina Plantijn", "Iowan Old Style", Georgia, serif;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+  --fs-2xl: 20px;
+  --fs-display: 30px;
+
+  /* Spacing ---------------------------------------------------------- */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 10px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 24px;
+  --sp-10: 32px;
+  --sp-12: 40px;
+
+  /* Radii ------------------------------------------------------------ */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-2xl: 18px;
+  --r-pill: 999px;
+
+  /* Controls --------------------------------------------------------- */
+  --control-xs: 22px;
+  --control-sm: 26px;
+  --control-md: 28px;
+  --control-lg: 32px;
+  --control-xl: 36px;
+
+  /* Sidebar dimensions ---------------------------------------------- */
+  --sidebar-w: 240px;
+  --sidebar-w-collapsed: 56px;
+  --titlebar-h: 28px;
+
+  /* Color — light theme.  Mirrors Fellow's globals.css so the two apps
+   * read like siblings. ------------------------------------------------ */
+  --background: oklch(95.13% 0.0015 84.59);
+  --foreground: oklch(27.24% 0.0015 84.59);
+  --card: oklch(100% 0 none);
+  --card-foreground: oklch(27.24% 0.0015 84.59);
+  --popover: oklch(100% 0 none);
+  --popover-foreground: oklch(27.24% 0.0015 84.59);
+  --primary: oklch(34% 0.008 84.59);
+  --primary-foreground: oklch(100% 0 none);
+  --secondary: oklch(97.03% 0 none);
+  --secondary-foreground: oklch(20.44% 0 none);
+  --muted: oklch(92.87% 0.0015 84.59);
+  --muted-foreground: oklch(55.8% 0.0015 84.59);
+  --accent: oklch(97.03% 0 none);
+  --accent-foreground: oklch(20.44% 0 none);
+  --destructive: oklch(57% 0.22 27);
+  --destructive-soft: oklch(95% 0.025 27);
+  --border: oklch(86.91% 0.0015 84.59);
+  --input: oklch(86.91% 0.0015 84.59);
+  --ring: oklch(75% 0.0015 84.59);
+
+  --sidebar: oklch(95.13% 0.0015 84.59);
+  --sidebar-foreground: oklch(27.24% 0.0015 84.59);
+  --sidebar-accent: oklch(92.87% 0.0015 84.59);
+  --sidebar-border: oklch(86.91% 0.0015 84.59);
+
+  --record: oklch(60% 0.22 27);
+  --focus-ring: oklch(60% 0.04 250 / 32%);
+  --selection: oklch(92.87% 0.0015 84.59);
+
+  /* Motion ----------------------------------------------------------- */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --t-fast: 100ms;
+  --t-med: 160ms;
+  --t-slow: 240ms;
+
+  /* Shadows ---------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px oklch(24% 0.002 84.59 / 6%);
+  --shadow-md:
+    0 4px 12px oklch(24% 0.002 84.59 / 6%),
+    0 1px 2px oklch(24% 0.002 84.59 / 4%);
+  --shadow-lg:
+    0 18px 40px oklch(24% 0.002 84.59 / 10%),
+    0 2px 6px oklch(24% 0.002 84.59 / 6%);
+  --shadow-inset: 0 0 0 1px oklch(0% 0 none / 4%);
+}
+
+/* Dark theme — port of Fellow's .dark sheet. Applied on
+ * <html data-theme="dark"> or system pref. -------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.165 0.0015 84.59);
+    --foreground: oklch(0.985 0.0015 84.59);
+    --card: oklch(0.195 0.0015 84.59);
+    --card-foreground: oklch(0.985 0.0015 84.59);
+    --popover: oklch(0.195 0.0015 84.59);
+    --popover-foreground: oklch(0.985 0.0015 84.59);
+    --primary: oklch(0.86 0.008 84.59);
+    --primary-foreground: oklch(0.216 0.0015 84.59);
+    --secondary: oklch(0.268 0.0015 84.59);
+    --secondary-foreground: oklch(0.985 0.0015 84.59);
+    --muted: oklch(0.268 0.0015 84.59);
+    --muted-foreground: oklch(0.709 0.0015 84.59);
+    --accent: oklch(0.268 0.0015 84.59);
+    --accent-foreground: oklch(0.985 0.0015 84.59);
+    --destructive: oklch(0.704 0.191 22.216);
+    --destructive-soft: oklch(0.3 0.08 22 / 40%);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(1 0 0 / 18%);
+
+    --sidebar: oklch(0.14 0.0015 84.59);
+    --sidebar-foreground: oklch(0.985 0.0015 84.59);
+    --sidebar-accent: oklch(0.22 0.0015 84.59);
+    --sidebar-border: oklch(1 0 0 / 8%);
+
+    --record: oklch(0.6 0.22 27);
+    --focus-ring: oklch(0.6 0.04 250 / 40%);
+    --selection: oklch(0.268 0.0015 84.59);
+
+    --shadow-sm: 0 1px 2px oklch(0% 0 none / 30%);
+    --shadow-md:
+      0 4px 12px oklch(0% 0 none / 32%),
+      0 1px 2px oklch(0% 0 none / 24%);
+    --shadow-lg:
+      0 18px 40px oklch(0% 0 none / 40%),
+      0 2px 6px oklch(0% 0 none / 28%);
+    --shadow-inset: 0 0 0 1px oklch(100% 0 none / 5%);
+  }
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: oklch(0.165 0.0015 84.59);
+  --foreground: oklch(0.985 0.0015 84.59);
+  --card: oklch(0.195 0.0015 84.59);
+  --card-foreground: oklch(0.985 0.0015 84.59);
+  --popover: oklch(0.195 0.0015 84.59);
+  --popover-foreground: oklch(0.985 0.0015 84.59);
+  --primary: oklch(0.86 0.008 84.59);
+  --primary-foreground: oklch(0.216 0.0015 84.59);
+  --secondary: oklch(0.268 0.0015 84.59);
+  --secondary-foreground: oklch(0.985 0.0015 84.59);
+  --muted: oklch(0.268 0.0015 84.59);
+  --muted-foreground: oklch(0.709 0.0015 84.59);
+  --accent: oklch(0.268 0.0015 84.59);
+  --accent-foreground: oklch(0.985 0.0015 84.59);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-soft: oklch(0.3 0.08 22 / 40%);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(1 0 0 / 18%);
+
+  --sidebar: oklch(0.14 0.0015 84.59);
+  --sidebar-foreground: oklch(0.985 0.0015 84.59);
+  --sidebar-accent: oklch(0.22 0.0015 84.59);
+  --sidebar-border: oklch(1 0 0 / 8%);
+}

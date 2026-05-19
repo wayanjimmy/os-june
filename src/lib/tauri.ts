@@ -178,6 +178,10 @@ export async function updateNote(input: {
   return invoke<NoteDto>("update_note", { request: input });
 }
 
+export async function deleteNote(noteId: string) {
+  return invoke<void>("delete_note", { request: { noteId } });
+}
+
 export async function startRecording(noteId: string) {
   return invoke<RecordingSessionDto>("start_recording", {
     request: { noteId },

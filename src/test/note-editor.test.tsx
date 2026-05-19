@@ -15,7 +15,7 @@ function note(overrides: Partial<NoteDto> = {}): NoteDto {
     folderIds: [],
     createdAt: now,
     updatedAt: now,
-    generatedContent: "Generated body",
+    generatedContent: "## Section one\n\n- First point\n- Second point",
     activeTab: "notes",
     ...overrides,
   };
@@ -36,24 +36,17 @@ const props = {
 };
 
 describe("NoteEditor", () => {
-  it("edits title and generated note body", async () => {
+  it("edits title and renders the generated note as a preview", async () => {
     const user = userEvent.setup();
     const onTitleChange = vi.fn();
-    const onContentChange = vi.fn();
-    render(
-      <NoteEditor
-        {...props}
-        note={note()}
-        onTitleChange={onTitleChange}
-        onContentChange={onContentChange}
-      />,
-    );
+    render(<NoteEditor {...props} note={note()} onTitleChange={onTitleChange} />);
 
     await user.type(screen.getByLabelText("Note title"), " updated");
-    await user.type(screen.getByLabelText("Generated note"), " extra");
-
     expect(onTitleChange).toHaveBeenCalled();
-    expect(onContentChange).toHaveBeenCalled();
+
+    // The note body is a rendered preview, not an editable textarea.
+    expect(screen.getByText("Section one")).toBeInTheDocument();
+    expect(screen.getByText("First point")).toBeInTheDocument();
   });
 
   it("shows raw transcript in transcription tab", () => {
@@ -79,7 +72,7 @@ describe("NoteEditor", () => {
     const onTabChange = vi.fn();
     render(<NoteEditor {...props} note={note()} onTabChange={onTabChange} />);
 
-    await user.click(screen.getByRole("tab", { name: "Transcription" }));
+    await user.click(screen.getByRole("button", { name: "Transcription" }));
 
     expect(onTabChange).toHaveBeenCalledWith("transcription");
   });
