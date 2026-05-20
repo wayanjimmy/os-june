@@ -86,6 +86,33 @@ export function NotePreview({
     else root.removeAttribute("data-empty");
   }
 
+  // Belt-and-suspenders fallback: regardless of how the space landed
+  // (keyboard layout, IME, paste), if a block now starts with "# ", "- "
+  // or "* ", convert it. Fires after the DOM has the new content.
+  function handleInput() {
+    syncEmpty();
+    const root = ref.current;
+    const selection = window.getSelection();
+    if (!root || !selection || !selection.isCollapsed) return;
+
+    let block: Node | null = selection.anchorNode;
+    while (block && block !== root && block.parentNode !== root) {
+      block = block.parentNode;
+    }
+    if (!block || block === root || block.nodeType !== Node.ELEMENT_NODE)
+      return;
+    const blockEl = block as HTMLElement;
+    const tag = blockEl.tagName.toLowerCase();
+    if (tag === "h1" || tag === "li") return;
+
+    const text = blockEl.textContent ?? "";
+    if (text.startsWith("# ")) {
+      replaceBlockWithTag(blockEl, "h1", text.slice(2));
+    } else if (text.startsWith("- ") || text.startsWith("* ")) {
+      replaceBlockWithBullet(blockEl, text.slice(2));
+    }
+  }
+
   // Markdown shortcuts: typing "# ", "- " or "* " at the start of a line
   // rewrites that block into a heading or bullet — the discoverable gesture
   // everyone already tries.
@@ -144,9 +171,9 @@ export function NotePreview({
         role="textbox"
         aria-multiline="true"
         aria-label="Generated note"
-        data-placeholder={emptyPlaceholder ?? "Record or start writing"}
+        data-placeholder={emptyPlaceholder ?? "Record or start writing…"}
         onKeyDown={handleKeyDown}
-        onInput={syncEmpty}
+        onInput={handleInput}
         onBlur={commit}
         dangerouslySetInnerHTML={{ __html: initialHtml }}
       />
@@ -336,6 +363,28 @@ function applyBlockShortcut(
   heading.textContent = rest;
   blockEl.replaceWith(heading);
   placeCaretAtEnd(heading);
+}
+
+function replaceBlockWithTag(blockEl: HTMLElement, tag: string, text: string) {
+  const heading = document.createElement(tag);
+  heading.textContent = text;
+  blockEl.replaceWith(heading);
+  placeCaretAtEnd(heading);
+}
+
+function replaceBlockWithBullet(blockEl: HTMLElement, text: string) {
+  const li = document.createElement("li");
+  li.textContent = text;
+  const prev = blockEl.previousElementSibling;
+  if (prev && prev.tagName === "UL") {
+    prev.appendChild(li);
+    blockEl.remove();
+  } else {
+    const ul = document.createElement("ul");
+    ul.appendChild(li);
+    blockEl.replaceWith(ul);
+  }
+  placeCaretAtEnd(li);
 }
 
 function placeCaretAtEnd(el: HTMLElement) {

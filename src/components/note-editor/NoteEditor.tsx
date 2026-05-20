@@ -124,7 +124,7 @@ export function NoteEditor({
             noteId={note.id}
             markdown={content}
             onChange={onContentChange}
-            emptyPlaceholder="Record or start writing"
+            emptyPlaceholder="Record or start writing…"
           />
         )}
       </section>

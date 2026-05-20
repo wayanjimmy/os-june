@@ -88,7 +88,8 @@
 
   --record: oklch(60% 0.22 27);
   --focus-ring: oklch(60% 0.04 250 / 32%);
-  --selection: oklch(92.87% 0.0015 84.59);
+  /* Warm-gray text selection — neutral to the warm palette, never blue. */
+  --selection: oklch(86% 0.0015 84.59);
 
   /* Motion ----------------------------------------------------------- */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -140,9 +141,9 @@
 
     --record: oklch(0.6 0.22 27);
     --focus-ring: oklch(0.6 0.04 250 / 40%);
-    /* Text selection bg needs enough contrast against dark surfaces — the
-     * default muted lightness (0.268) gave a barely-visible wash. */
-    --selection: oklch(0.42 0.06 250);
+    /* Warm-gray selection bg — bright enough against the dark canvas to
+     * read clearly without pulling in blue from outside the palette. */
+    --selection: oklch(0.4 0.0015 84.59);
 
     --shadow-sm: 0 1px 2px oklch(0% 0 none / 30%);
     --shadow-md:

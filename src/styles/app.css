@@ -892,10 +892,13 @@ input:focus-visible,
   outline: none;
 }
 
+/* Dull placeholder — visible enough to read with caret resting in an empty
+ * editor, quiet enough to disappear next to real text. */
 .note-preview[data-empty="true"]::before {
   content: attr(data-placeholder);
-  color: var(--muted-foreground);
+  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
   pointer-events: none;
+  font-weight: 400;
 }
 
 /* Vercel AI Elements–style shimmer text: muted base with a narrow bright
