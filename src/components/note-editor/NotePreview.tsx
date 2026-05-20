@@ -119,6 +119,7 @@ export function NotePreview({
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (event.key === " " || event.code === "Space") {
       applyBlockShortcut(ref.current, event);
+      syncEmpty();
       return;
     }
     if (event.key === "Enter") {
@@ -272,10 +273,12 @@ function markdownToHtml(markdown: string): string {
     html.push(`<p>${inlineToHtml(line)}</p>`);
   }
   closeList();
-  // Always seed at least one block element so the caret has a block to live
-  // in. Without this, an empty editor has loose text nodes under root and
-  // the markdown shortcut walker bails out (the "# disappears" symptom).
-  if (html.length === 0) return "<p><br></p>";
+  // Leave empty notes truly empty. Seeding "<p><br></p>" sounds reasonable
+  // but Chrome inserts typed characters before the trailing <br>, which
+  // keeps that <br> in the paragraph — so every line you type ends with a
+  // visible line break ("each space pushes to the next line"). Loose text
+  // under root for the very first keystroke is fine; the markdown shortcut
+  // wraps it on the first space.
   return html.join("");
 }
 
@@ -319,12 +322,9 @@ function applyBlockShortcut(
     wrapper.appendChild(block);
     blockEl = wrapper;
   } else {
-    // Caret was on root itself. Seed an empty <p>, move any loose text
-    // children in, and run the shortcut against that.
-    const wrapper = document.createElement("p");
-    while (root.firstChild) wrapper.appendChild(root.firstChild);
-    root.appendChild(wrapper);
-    blockEl = wrapper;
+    // No proper block under the caret — bail rather than rewrap the entire
+    // editor, which used to scramble the DOM mid-keystroke.
+    return;
   }
 
   const pre = document.createRange();
