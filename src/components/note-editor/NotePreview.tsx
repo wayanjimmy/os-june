@@ -1,9 +1,9 @@
 import Placeholder from "@tiptap/extension-placeholder";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { IconBold } from "central-icons-filled/IconBold";
-import { IconBulletList } from "central-icons-filled/IconBulletList";
-import { IconH1 } from "central-icons-filled/IconH1";
+import { IconBold } from "central-icons/IconBold";
+import { IconBulletList } from "central-icons/IconBulletList";
+import { IconH1 } from "central-icons/IconH1";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type NotePreviewProps = {

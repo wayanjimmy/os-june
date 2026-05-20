@@ -24,6 +24,22 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Berkeley Mono";
+  src: url("/BerkeleyMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Berkeley Mono";
+  src: url("/BerkeleyMono-Oblique.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
   color: var(--foreground);
   background: var(--sidebar);
@@ -897,14 +913,15 @@ input:focus-visible,
 }
 
 .note-preview ul {
-  margin: 0 0 var(--sp-4);
+  margin: 0 0 var(--sp-3);
   padding-left: var(--sp-6);
   list-style: disc;
   color: var(--foreground);
+  line-height: 1.5;
 }
 
 .note-preview li {
-  margin: 0 0 var(--sp-2);
+  margin: 0 0 var(--sp-1);
   padding-left: var(--sp-1);
 }
 
@@ -930,16 +947,13 @@ input:focus-visible,
 .note-preview p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   float: left;
-  width: 0;
   height: 0;
   color: color-mix(in oklch, var(--muted-foreground) 42%, transparent);
   pointer-events: none;
   font-weight: 400;
+  white-space: nowrap;
 }
 
-/* Vercel AI Elements–style shimmer text: muted base with a narrow bright
- * band that sweeps left-to-right at a constant rate. The narrow highlight
- * + linear timing is what reads as motion instead of a pulse. */
 .note-generating {
   margin: var(--sp-3) 0;
   font-size: var(--fs-md);
@@ -947,25 +961,30 @@ input:focus-visible,
   background: linear-gradient(
     90deg,
     var(--muted-foreground) 0%,
-    var(--muted-foreground) 40%,
+    color-mix(in oklch, var(--foreground) 28%, var(--muted-foreground)) 35%,
     var(--foreground) 50%,
-    var(--muted-foreground) 60%,
+    color-mix(in oklch, var(--foreground) 28%, var(--muted-foreground)) 65%,
     var(--muted-foreground) 100%
   );
-  background-size: 200% auto;
+  background-size: 300% 100%;
   background-clip: text;
   -webkit-background-clip: text;
   color: transparent;
   -webkit-text-fill-color: transparent;
-  animation: note-shimmer 2.2s linear infinite;
+  animation: note-shimmer 2.8s ease-in-out infinite;
+  will-change: background-position;
 }
 
 @keyframes note-shimmer {
   0% {
-    background-position: 200% 0;
+    background-position: 150% 0;
+  }
+  45%,
+  55% {
+    background-position: 50% 0;
   }
   100% {
-    background-position: -200% 0;
+    background-position: -50% 0;
   }
 }
 
