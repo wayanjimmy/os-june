@@ -52,7 +52,7 @@ describe("folders UI", () => {
       />,
     );
 
-    expect(screen.getByText("Notetaker")).toBeInTheDocument();
+    expect(screen.getByText("Scribe")).toBeInTheDocument();
     expect(screen.getByText("Second")).toBeInTheDocument();
 
     await user.type(screen.getByPlaceholderText("Search notes"), "second");
