@@ -1,4 +1,4 @@
-use crate::domain::types::AudioValidationDto;
+use crate::domain::types::{AudioValidationDto, RecordingSource};
 use hound::WavReader;
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, path::Path};
@@ -67,10 +67,9 @@ pub fn validate_audio_artifact(
 
     result.readable_audio = true;
     let spec = reader.spec();
-    let channels = spec.channels.max(1) as i64;
     let sample_rate = spec.sample_rate.max(1) as i64;
     let sample_count = reader.duration() as i64;
-    result.actual_duration_ms = (sample_count * 1000) / (sample_rate * channels);
+    result.actual_duration_ms = (sample_count * 1000) / sample_rate;
     result.duration_within_tolerance =
         (result.actual_duration_ms - expected_duration_ms).abs() <= config.duration_tolerance_ms;
 
@@ -106,6 +105,18 @@ pub fn validate_audio_artifact(
     }
 
     Ok(result)
+}
+
+pub fn source_audio_passes_validation(
+    source: RecordingSource,
+    validation: &AudioValidationDto,
+) -> bool {
+    let has_usable_audio =
+        validation.non_zero_size && validation.readable_audio && validation.non_silent_signal;
+    match source {
+        RecordingSource::Microphone => has_usable_audio && validation.duration_within_tolerance,
+        RecordingSource::System => has_usable_audio,
+    }
 }
 
 pub fn checksum_file(path: &Path) -> Result<String, std::io::Error> {

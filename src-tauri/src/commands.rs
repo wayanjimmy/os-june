@@ -6,7 +6,10 @@ use crate::{
             resume_capture, start_capture,
         },
         recovery::scan_recoverable_recordings,
-        validation::{checksum_file, validate_audio_artifact, AudioValidationConfig},
+        validation::{
+            checksum_file, source_audio_passes_validation, validate_audio_artifact,
+            AudioValidationConfig,
+        },
     },
     db::{migrations::run_migrations, repositories::Repositories},
     domain::{
@@ -255,10 +258,7 @@ pub async fn finish_recording(
             primary_checksum = checksum.clone();
             primary_file_size = file_size;
         }
-        let valid = validation.non_zero_size
-            && validation.readable_audio
-            && validation.duration_within_tolerance
-            && validation.non_silent_signal;
+        let valid = source_audio_passes_validation(source.source, &validation);
         if let Some(artifact) = source_artifacts
             .iter()
             .find(|artifact| artifact.source == source.source.as_db())
@@ -501,10 +501,8 @@ pub async fn recover_recording(
             let file_size = std::fs::metadata(&path)
                 .map(|metadata| metadata.len() as i64)
                 .unwrap_or_default();
-            let valid = validation.non_zero_size
-                && validation.readable_audio
-                && validation.duration_within_tolerance
-                && validation.non_silent_signal;
+            let source = RecordingSource::from(artifact.source.as_str());
+            let valid = source_audio_passes_validation(source, &validation);
             repos
                 .finalize_source_artifact(
                     &artifact.id,

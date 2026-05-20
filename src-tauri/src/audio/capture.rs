@@ -599,13 +599,14 @@ fn source_statuses(
         let (level, bytes_written, last_error) = system_capture
             .map(|capture| capture.status())
             .unwrap_or_default();
+        let system_silence_warning = elapsed_ms >= 10_000 && level.peak < DEFAULT_SILENCE_THRESHOLD;
         sources.push(SourceStatusDto {
             source: RecordingSource::System,
             state: source_state,
             elapsed_ms,
             bytes_written,
             level,
-            silence_warning: elapsed_ms >= 10_000 && bytes_written == 0,
+            silence_warning: system_silence_warning,
             path_finalized: false,
             last_error,
         });

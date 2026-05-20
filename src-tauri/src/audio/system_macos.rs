@@ -9,7 +9,9 @@ use std::{
 #[derive(Debug, Clone, Default)]
 pub struct SystemAudioStats {
     pub level: AudioLevelDto,
+    pub max_level: f32,
     pub last_error: Option<String>,
+    last_debug_log: Option<Instant>,
 }
 
 pub struct SystemAudioCapture {
@@ -31,6 +33,7 @@ impl SystemAudioCapture {
                 "System audio helper is not built. Run pnpm tauri:dev again.",
             ));
         }
+        terminate_existing_helpers();
         let status_path = partial_path.with_extension("status.json");
         let pid_path = partial_path.with_extension("pid");
         let log_path = partial_path.with_extension("helper.log");
@@ -62,7 +65,13 @@ impl SystemAudioCapture {
         dev_log(format!("open returned status={open_status}"));
 
         let stats = Arc::new(Mutex::new(SystemAudioStats::default()));
-        let ready = wait_for_status(&status_path, Some(&log_path), Duration::from_secs(30))?;
+        let ready = wait_for_status(
+            &status_path,
+            Some(&log_path),
+            Duration::from_secs(30),
+            &["ready", "level", "error"],
+            "System audio helper did not become ready. See the terminal helper log for the last CoreAudio step.",
+        )?;
         if ready.event == "error" {
             return Err(AppError::new(
                 "system_audio_permission_denied",
@@ -103,6 +112,7 @@ impl SystemAudioCapture {
         if let Ok(status) = read_status(&self.status_path) {
             if let Ok(mut stats) = self.stats.lock() {
                 if let Some(level) = status.level {
+                    stats.max_level = stats.max_level.max(status.max_level.unwrap_or(level));
                     stats.level = AudioLevelDto {
                         peak: level,
                         rms: level,
@@ -117,6 +127,17 @@ impl SystemAudioCapture {
                     );
                 } else if status.message.is_some() {
                     stats.last_error = status.message;
+                }
+                if stats
+                    .last_debug_log
+                    .map(|logged| logged.elapsed() >= Duration::from_secs(2))
+                    .unwrap_or(true)
+                {
+                    dev_log(format!(
+                        "capture status event={} level={:.5} max_level={:.5}",
+                        status.event, stats.level.peak, stats.max_level
+                    ));
+                    stats.last_debug_log = Some(Instant::now());
                 }
             }
         }
@@ -207,56 +228,78 @@ pub fn helper_permission_check() -> Result<(), AppError> {
             "System audio helper is not built. Run pnpm tauri:dev again.",
         ));
     }
+    terminate_existing_helpers();
     let temp =
         std::env::temp_dir().join(format!("os-notetaker-audio-check-{}", uuid::Uuid::new_v4()));
+    let output_path = temp.with_extension("wav");
     let status_path = temp.with_extension("json");
     let pid_path = temp.with_extension("pid");
     let log_path = temp.with_extension("log");
     dev_log(format!(
-        "checking helper permission app={} status={} pid={} log={}",
+        "probing helper capture app={} output={} status={} pid={} log={}",
         helper_app.display(),
+        output_path.display(),
         status_path.display(),
         pid_path.display(),
         log_path.display()
     ));
-    let output = Command::new("/usr/bin/open")
-        .arg("-W")
+    let open_status = Command::new("/usr/bin/open")
         .arg("-n")
-        .arg(helper_app)
+        .arg(&helper_app)
         .arg("--args")
-        .arg("--check")
+        .arg("--output")
+        .arg(&output_path)
         .arg("--status")
         .arg(&status_path)
         .arg("--pid")
         .arg(&pid_path)
         .arg("--log")
         .arg(&log_path)
-        .output()
+        .status()
         .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
-    dev_log(format!("permission check open status={}", output.status));
-    let status = read_status(&status_path).ok();
-    if let Some(status) = &status {
-        dev_log(format!("permission check helper event={}", status.event));
-    } else {
-        dev_log("permission check did not write status".to_string());
-        dump_helper_log(&log_path);
+    dev_log(format!("capture probe open status={open_status}"));
+    let status = wait_for_status(
+        &status_path,
+        Some(&log_path),
+        Duration::from_secs(75),
+        &["ready", "level", "error"],
+        "System audio helper could not start a usable CoreAudio capture. Grant System Audio Recording permission if macOS prompts for it, then try again. The terminal helper log shows the last completed CoreAudio step.",
+    );
+    let helper_pid = read_pid(&pid_path);
+    if let Some(pid) = helper_pid {
+        send_signal(pid, "-TERM");
+        let _ = wait_for_stopped(&status_path, Duration::from_secs(3));
     }
+    let result = match status {
+        Ok(status) if status.event == "ready" || status.event == "level" => Ok(()),
+        Ok(status) if status.event == "error" => Err(AppError::new(
+            "system_audio_permission_denied",
+            status
+                .message
+                .unwrap_or_else(|| "System audio capture probe failed.".to_string()),
+        )),
+        Ok(status) => {
+            dump_helper_log(&log_path);
+            Err(AppError::new(
+                "system_audio_permission_denied",
+                format!(
+                    "System audio capture probe ended with unexpected event '{}'.",
+                    status.event
+                ),
+            ))
+        }
+        Err(error) => {
+            if let Some(pid) = helper_pid {
+                send_signal(pid, "-KILL");
+            }
+            Err(error)
+        }
+    };
+    let _ = std::fs::remove_file(&output_path);
     let _ = std::fs::remove_file(&status_path);
     let _ = std::fs::remove_file(&pid_path);
     let _ = std::fs::remove_file(&log_path);
-    if output.status.success() {
-        if let Some(status) = status {
-            if status.event != "error" {
-                return Ok(());
-            }
-            let message = status
-                .message
-                .unwrap_or_else(|| "System audio permission check failed.".to_string());
-            return Err(AppError::new("system_audio_permission_denied", message));
-        }
-    }
-    let message = "System audio permission check did not receive helper status.".to_string();
-    Err(AppError::new("system_audio_permission_denied", message))
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -311,10 +354,45 @@ fn send_signal(pid: u32, signal: &str) {
         .status();
 }
 
+fn terminate_existing_helpers() {
+    let helper_name = "os-notetaker-system-audio-recorder";
+    let Ok(output) = Command::new("pgrep").arg("-f").arg(helper_name).output() else {
+        return;
+    };
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != std::process::id())
+        .collect();
+    if pids.is_empty() {
+        return;
+    }
+    dev_log(format!("terminating stale helper pids={pids:?}"));
+    for pid in &pids {
+        send_signal(*pid, "-TERM");
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    for pid in pids {
+        if process_is_running(pid) {
+            send_signal(pid, "-KILL");
+        }
+    }
+}
+
+fn process_is_running(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[derive(Debug)]
 struct HelperStatus {
     event: String,
     level: Option<f32>,
+    max_level: Option<f32>,
     message: Option<String>,
 }
 
@@ -322,6 +400,8 @@ fn wait_for_status(
     path: &Path,
     log_path: Option<&Path>,
     timeout: Duration,
+    terminal_events: &[&str],
+    timeout_message: &str,
 ) -> Result<HelperStatus, AppError> {
     let started = Instant::now();
     let mut last_event = String::new();
@@ -331,7 +411,7 @@ fn wait_for_status(
                 dev_log(format!("helper status event={}", status.event));
                 last_event = status.event.clone();
             }
-            if matches!(status.event.as_str(), "ready" | "level" | "error") {
+            if terminal_events.contains(&status.event.as_str()) {
                 return Ok(status);
             }
         }
@@ -346,7 +426,7 @@ fn wait_for_status(
             }
             return Err(AppError::new(
                 "system_audio_unavailable",
-                "System audio helper did not become ready.",
+                timeout_message,
             ));
         }
         std::thread::sleep(Duration::from_millis(80));
@@ -388,9 +468,14 @@ fn read_status(path: &Path) -> Result<HelperStatus, std::io::Error> {
         .get("message")
         .and_then(|message| message.as_str())
         .map(str::to_string);
+    let max_level = value
+        .get("maxLevel")
+        .and_then(|level| level.as_str())
+        .and_then(|level| level.parse::<f32>().ok());
     Ok(HelperStatus {
         event,
         level,
+        max_level,
         message,
     })
 }

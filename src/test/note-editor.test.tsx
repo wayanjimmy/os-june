@@ -24,6 +24,7 @@ function note(overrides: Partial<NoteDto> = {}): NoteDto {
 const props = {
   folders: [],
   sourceMode: "microphoneOnly" as const,
+  checkingSourceReadiness: false,
   onTitleChange: vi.fn(),
   onContentChange: vi.fn(),
   onSourceModeChange: vi.fn(),

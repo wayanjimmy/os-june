@@ -39,6 +39,7 @@ export function App() {
     useState<RecordingSourceMode>("microphoneOnly");
   const [sourceReadiness, setSourceReadiness] =
     useState<RecordingSourceReadinessDto>();
+  const [checkingSourceReadiness, setCheckingSourceReadiness] = useState(false);
   const selectedNote = state.selectedNote;
 
   useEffect(() => {
@@ -48,9 +49,21 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    setCheckingSourceReadiness(true);
     checkRecordingSourceReadiness(sourceMode)
-      .then(setSourceReadiness)
-      .catch((err: unknown) => setError(messageFromError(err)));
+      .then((readiness) => {
+        if (!cancelled) setSourceReadiness(readiness);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(messageFromError(err));
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingSourceReadiness(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sourceMode]);
 
   useEffect(() => {
@@ -139,6 +152,7 @@ export function App() {
   async function handleStartRecording() {
     if (!selectedNote) return;
     try {
+      setCheckingSourceReadiness(true);
       const readiness = await checkRecordingSourceReadiness(sourceMode);
       setSourceReadiness(readiness);
       if (!readiness.ready) {
@@ -155,6 +169,8 @@ export function App() {
       });
     } catch (err) {
       setError(messageFromError(err));
+    } finally {
+      setCheckingSourceReadiness(false);
     }
   }
 
@@ -205,7 +221,7 @@ export function App() {
               .catch((err: unknown) => setError(messageFromError(err)))
           }
         />
-        <div className="app-shell">
+        <div className="workspace-shell">
           <NotesList
             notes={state.notes}
             selectedNoteId={state.selectedNoteId}
@@ -219,6 +235,7 @@ export function App() {
               recordingStatus={state.recordingStatus}
               sourceMode={sourceMode}
               sourceReadiness={sourceReadiness}
+              checkingSourceReadiness={checkingSourceReadiness}
               onTitleChange={(title) => void handleUpdateNote({ title })}
               onContentChange={(editedContent) =>
                 void handleUpdateNote({ editedContent })

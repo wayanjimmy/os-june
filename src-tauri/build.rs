@@ -47,6 +47,8 @@ fn build_system_audio_helper() {
             .arg("-framework")
             .arg("Foundation")
             .arg("-framework")
+            .arg("AppKit")
+            .arg("-framework")
             .arg("AVFoundation")
             .arg("-framework")
             .arg("CoreAudio")

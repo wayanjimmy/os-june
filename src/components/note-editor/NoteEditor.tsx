@@ -16,6 +16,7 @@ type NoteEditorProps = {
   recordingStatus?: RecordingStatusDto;
   sourceMode: RecordingSourceMode;
   sourceReadiness?: RecordingSourceReadinessDto;
+  checkingSourceReadiness: boolean;
   onTitleChange: (title: string) => void;
   onContentChange: (content: string) => void;
   onSourceModeChange: (mode: RecordingSourceMode) => void;
@@ -35,6 +36,7 @@ export function NoteEditor({
   recordingStatus,
   sourceMode,
   sourceReadiness,
+  checkingSourceReadiness,
   onTitleChange,
   onContentChange,
   onSourceModeChange,
@@ -139,10 +141,16 @@ export function NoteEditor({
           <button
             type="button"
             className="record-button"
+            disabled={
+              checkingSourceReadiness ||
+              sourceReadiness?.sources.some(
+                (source) => source.required && !source.ready,
+              )
+            }
             onClick={onStartRecording}
           >
             <Mic size={18} />
-            Record
+            {checkingSourceReadiness ? "Checking..." : "Record"}
           </button>
         )}
       </div>
