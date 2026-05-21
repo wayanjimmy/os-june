@@ -10,6 +10,7 @@ const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 pub struct GenerationRequest {
     pub provider: String,
     pub title: String,
+    pub existing_generated_note: Option<String>,
     pub transcript: String,
     pub manual_notes: Option<String>,
     pub language: Option<String>,
@@ -40,7 +41,7 @@ pub async fn generate_note_from_transcript(
             content: format!(
                 "{}\n\n{}",
                 heading_for(&request.title),
-                generation_source_text(request.manual_notes.as_deref(), transcript)
+                mock_generation_source_text(request.manual_notes.as_deref(), transcript)
             ),
             title_suggestion: if request.title.trim().is_empty() {
                 Some("New note".to_string())
@@ -82,10 +83,14 @@ async fn generate_with_openai(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_OPENAI_GENERATION_MODEL.to_string());
     let title_hint = request.title.trim();
-    let source_text = generation_source_text(request.manual_notes.as_deref(), transcript);
+    let source_text = generation_source_text(
+        request.existing_generated_note.as_deref(),
+        request.manual_notes.as_deref(),
+        transcript,
+    );
     let body = json!({
         "model": model,
-        "instructions": "You turn voice transcripts and user-written manual notes into concise markdown notes. Use only the manual notes and transcript. Treat manual notes as user-authored context and prioritize them when they clarify or correct the transcript. Do not invent facts, decisions, dates, or names. Preserve the speaker's language unless the source material is mixed-language. Return only the final note body in markdown.",
+        "instructions": "You write one incremental markdown note block from a newly captured transcript. Use only the new transcript plus optional new manual notes. Existing generated note content is context only: do not repeat, summarize, rewrite, or reformat it. Manual notes are context only unless they add facts; do not output manual note labels as headings, bullets, titles, or section names. Do not add wrapper headings such as Note, Generated note, Transcript, or Summary. Preserve the speaker's language unless the source material is mixed-language. Return only the new note block to append.",
         "input": format!(
             "Current title: {}\nDetected language: {}\n\n{}",
             if title_hint.is_empty() { "New note" } else { title_hint },
@@ -138,7 +143,37 @@ async fn generate_with_openai(
     })
 }
 
-fn generation_source_text(manual_notes: Option<&str>, transcript: &str) -> String {
+fn generation_source_text(
+    existing_generated_note: Option<&str>,
+    manual_notes: Option<&str>,
+    transcript: &str,
+) -> String {
+    let transcript = transcript.trim();
+    let existing_generated_note = existing_generated_note
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let manual_notes = manual_notes
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut sections = Vec::new();
+    if let Some(existing_generated_note) = existing_generated_note {
+        sections.push(format!(
+            "<existing_generated_note_context>\n{existing_generated_note}\n</existing_generated_note_context>"
+        ));
+    }
+    if let Some(manual_notes) = manual_notes {
+        sections.push(format!(
+            "<new_manual_notes_context>\n{manual_notes}\n</new_manual_notes_context>"
+        ));
+    }
+    sections.push(format!("<new_transcript>\n{transcript}\n</new_transcript>"));
+    sections.push(
+        "<output_contract>\nReturn only the new note block for the new transcript. Do not repeat existing note content. Do not output manual note labels. Do not add wrapper headings.\n</output_contract>".to_string(),
+    );
+    sections.join("\n\n")
+}
+
+fn mock_generation_source_text(manual_notes: Option<&str>, transcript: &str) -> String {
     let transcript = transcript.trim();
     let manual_notes = manual_notes
         .map(str::trim)
@@ -168,5 +203,25 @@ fn extract_response_text(value: &Value) -> Option<String> {
         None
     } else {
         Some(parts.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generation_source_text;
+
+    #[test]
+    fn generation_source_text_separates_existing_manual_and_new_transcript() {
+        let input = generation_source_text(
+            Some("Existing generated note"),
+            Some("Test 2:"),
+            "New transcript text",
+        );
+
+        assert!(input.contains("<existing_generated_note_context>\nExisting generated note"));
+        assert!(input.contains("<new_manual_notes_context>\nTest 2:"));
+        assert!(input.contains("<new_transcript>\nNew transcript text"));
+        assert!(input.contains("Do not repeat existing note content"));
+        assert!(input.contains("Do not output manual note labels"));
     }
 }

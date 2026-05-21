@@ -13,7 +13,7 @@ use crate::{
 };
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
-pub const PROMPT_VERSION: &str = "notes-mvp-v2";
+pub const PROMPT_VERSION: &str = "notes-mvp-v3";
 const TRANSCRIPT_COHERENCE_GAP_MS: i64 = 2_500;
 const TRANSCRIPTION_CONTEXT_MAX_CHARS: usize = 1_200;
 const TRANSCRIPTION_CONTEXT_MAX_TURNS: usize = 6;
@@ -121,12 +121,46 @@ pub fn build_transcription_context(previous: &[SourceTranscriptInput]) -> Option
     ))
 }
 
+pub fn manual_notes_for_generation(note: &NoteDto) -> Option<String> {
+    let edited = note.edited_content.as_deref()?.trim();
+    if edited.is_empty() {
+        return None;
+    }
+    let Some(generated) = note.generated_content.as_deref().map(str::trim) else {
+        return Some(edited.to_string());
+    };
+    if generated.is_empty() {
+        return Some(edited.to_string());
+    }
+    if edited == generated {
+        return None;
+    }
+    if let Some(rest) = edited.strip_prefix(generated) {
+        let rest = rest.trim();
+        return if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        };
+    }
+    edited.find(generated).and_then(|index| {
+        let rest = edited[index + generated.len()..].trim();
+        if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        }
+    })
+}
+
 pub async fn process_saved_audio(
     repos: &Repositories,
     note_id: &str,
+    session_id: &str,
     audio_artifact_id: &str,
     audio_path: PathBuf,
     title: String,
+    existing_generated_note: Option<String>,
     manual_notes: Option<String>,
 ) -> Result<NoteDto, AppError> {
     repos
@@ -169,6 +203,7 @@ pub async fn process_saved_audio(
     let generated = match generate_note_from_transcript(GenerationRequest {
         provider,
         title,
+        existing_generated_note,
         transcript: transcript.text,
         manual_notes,
         language: transcript.language,
@@ -187,7 +222,7 @@ pub async fn process_saved_audio(
             return Err(error);
         }
     };
-    repos
+    let generation_result_id = repos
         .create_generation_result(
             note_id,
             &transcript_row.id,
@@ -198,7 +233,13 @@ pub async fn process_saved_audio(
         )
         .await?;
     Ok(repos
-        .set_generated_note(note_id, generated.title_suggestion, generated.content)
+        .set_generated_note_for_session(
+            note_id,
+            Some(session_id),
+            Some(&generation_result_id),
+            generated.title_suggestion,
+            generated.content,
+        )
         .await?)
 }
 
@@ -209,6 +250,7 @@ pub async fn process_saved_source_audio(
     source_mode: RecordingSourceMode,
     sources: Vec<(String, String, PathBuf)>,
     title: String,
+    existing_generated_note: Option<String>,
     manual_notes: Option<String>,
 ) -> Result<NoteDto, AppError> {
     repos
@@ -327,6 +369,7 @@ pub async fn process_saved_source_audio(
     let generated = match generate_note_from_transcript(GenerationRequest {
         provider,
         title,
+        existing_generated_note,
         transcript: labeled_transcript,
         manual_notes,
         language: None,
@@ -346,7 +389,7 @@ pub async fn process_saved_source_audio(
         }
     };
     let transcript_id = first_transcript_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    repos
+    let generation_result_id = repos
         .create_generation_result(
             note_id,
             &transcript_id,
@@ -357,7 +400,13 @@ pub async fn process_saved_source_audio(
         )
         .await?;
     Ok(repos
-        .set_generated_note(note_id, generated.title_suggestion, generated.content)
+        .set_generated_note_for_session(
+            note_id,
+            Some(session_id),
+            Some(&generation_result_id),
+            generated.title_suggestion,
+            generated.content,
+        )
         .await?)
 }
 
@@ -373,29 +422,37 @@ pub async fn retry_from_saved_audio(
         ));
     }
     let note = repos.get_note(note_id).await?;
+    let manual_notes = manual_notes_for_generation(&note);
     if sources.len() == 1 {
-        let (audio_artifact_id, _source, audio_path) = sources[0].clone();
+        let (audio_artifact_id, _source, audio_path, session_id) = sources[0].clone();
         return process_saved_audio(
             repos,
             note_id,
+            &session_id,
             &audio_artifact_id,
             PathBuf::from(audio_path),
             note.title,
-            note.edited_content.clone(),
+            note.generated_content,
+            manual_notes,
         )
         .await;
     }
+    let session_id = sources
+        .first()
+        .map(|(_id, _source, _path, session_id)| session_id.clone())
+        .unwrap_or_default();
     process_saved_source_audio(
         repos,
         note_id,
-        "",
+        &session_id,
         RecordingSourceMode::MicrophonePlusSystem,
         sources
             .into_iter()
-            .map(|(id, source, path)| (id, source, PathBuf::from(path)))
+            .map(|(id, source, path, _session_id)| (id, source, PathBuf::from(path)))
             .collect(),
         note.title,
-        note.edited_content,
+        note.generated_content,
+        manual_notes,
     )
     .await
 }

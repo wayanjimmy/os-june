@@ -17,6 +17,7 @@ pub fn run() {
             commands::delete_note,
             commands::create_folder,
             commands::list_folders,
+            commands::delete_folder,
             commands::assign_note_to_folder,
             commands::remove_note_from_folder,
             commands::get_microphone_permission_state,

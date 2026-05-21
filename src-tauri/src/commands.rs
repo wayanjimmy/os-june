@@ -13,15 +13,18 @@ use crate::{
     },
     db::{migrations::run_migrations, repositories::Repositories},
     domain::{
-        processing::{process_saved_audio, process_saved_source_audio, retry_from_saved_audio},
+        processing::{
+            manual_notes_for_generation, process_saved_audio, process_saved_source_audio,
+            retry_from_saved_audio,
+        },
         types::{
             AppError, AssignNoteToFolderRequest, BootstrapResponse,
             CheckRecordingSourceReadinessRequest, CreateFolderRequest, CreateNoteRequest,
-            DeleteNoteRequest, FinishRecordingResponse, GetNoteRequest, ListNotesRequest,
-            ListNotesResponse, MicrophonePermissionResponse, NoteDto, RecordingSessionDto,
-            RecordingSource, RecordingSourceMode, RecordingSourceReadinessDto, RecordingStatusDto,
-            RemoveNoteFromFolderRequest, RetryProcessingRequest, SessionRequest,
-            SourceReadinessDto, StartRecordingRequest, UpdateNoteRequest,
+            DeleteFolderRequest, DeleteNoteRequest, FinishRecordingResponse, GetNoteRequest,
+            ListNotesRequest, ListNotesResponse, MicrophonePermissionResponse, NoteDto,
+            RecordingSessionDto, RecordingSource, RecordingSourceMode, RecordingSourceReadinessDto,
+            RecordingStatusDto, RemoveNoteFromFolderRequest, RetryProcessingRequest,
+            SessionRequest, SourceReadinessDto, StartRecordingRequest, UpdateNoteRequest,
         },
     },
 };
@@ -134,6 +137,15 @@ pub async fn list_folders(
     app: AppHandle,
 ) -> Result<Vec<crate::domain::types::FolderDto>, AppError> {
     Ok(repositories(&app).await?.list_folders().await?)
+}
+
+#[tauri::command]
+pub async fn delete_folder(app: AppHandle, request: DeleteFolderRequest) -> Result<(), AppError> {
+    repositories(&app)
+        .await?
+        .delete_folder(&request.folder_id, request.delete_notes)
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -403,7 +415,8 @@ pub async fn finish_recording(
         )
         .await?;
     let note = repos.get_note(&finished.note_id).await?;
-    let manual_notes = note.edited_content.clone();
+    let existing_generated_note = note.generated_content.clone();
+    let manual_notes = manual_notes_for_generation(&note);
     let task_repos = repos.clone();
     let task_note_id = finished.note_id.clone();
     let task_session_id = finished.session_id.clone();
@@ -419,9 +432,11 @@ pub async fn finish_recording(
             process_saved_audio(
                 &task_repos,
                 &task_note_id,
+                &task_session_id,
                 &artifact_id,
                 path,
                 title,
+                existing_generated_note,
                 manual_notes,
             )
             .await
@@ -433,6 +448,7 @@ pub async fn finish_recording(
                 task_source_mode,
                 valid_sources,
                 title,
+                existing_generated_note,
                 manual_notes,
             )
             .await
@@ -590,6 +606,8 @@ pub async fn recover_recording(
             return Ok(repos.get_note(&info.note_id).await?);
         }
         let note = repos.get_note(&info.note_id).await?;
+        let existing_generated_note = note.generated_content.clone();
+        let manual_notes = manual_notes_for_generation(&note);
         return process_saved_source_audio(
             &repos,
             &info.note_id,
@@ -597,7 +615,8 @@ pub async fn recover_recording(
             info.source_mode,
             valid_sources,
             note.title,
-            note.edited_content,
+            existing_generated_note,
+            manual_notes,
         )
         .await;
     }
@@ -664,13 +683,17 @@ pub async fn recover_recording(
         )
         .await?;
     let note = repos.get_note(&info.note_id).await?;
+    let existing_generated_note = note.generated_content.clone();
+    let manual_notes = manual_notes_for_generation(&note);
     process_saved_audio(
         &repos,
         &info.note_id,
+        &info.session_id,
         &artifact.id,
         path,
         note.title,
-        note.edited_content,
+        existing_generated_note,
+        manual_notes,
     )
     .await
 }

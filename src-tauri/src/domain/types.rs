@@ -131,6 +131,13 @@ pub struct CreateFolderRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteFolderRequest {
+    pub folder_id: String,
+    pub delete_notes: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssignNoteToFolderRequest {
     pub note_id: String,
     pub folder_id: String,
