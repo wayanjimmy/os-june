@@ -1,6 +1,6 @@
 use crate::domain::types::AppError;
 use crate::providers::{
-    configured_provider,
+    configured_provider, MOCK_PROVIDER,
     transcription::{transcribe_saved_audio, TranscriptionProviderResult, TranscriptionRequest},
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -648,8 +648,20 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
 }
 
 async fn transcribe_recording_ready(app: AppHandle, audio_path: PathBuf) {
+    let provider = match dictation_transcription_provider(configured_provider()) {
+        Ok(provider) => provider,
+        Err(error) => {
+            let state = app.state::<HelperState>();
+            let _ = send_helper_command(
+                &state,
+                serde_json::json!({ "type": "discard_recording" }),
+            );
+            emit_dictation_event_value(&app, app_error_event(error));
+            return;
+        }
+    };
     let result = transcribe_saved_audio(TranscriptionRequest {
-        provider: configured_provider(),
+        provider,
         audio_path,
         title: "Dictation".to_string(),
         context: None,
@@ -664,6 +676,16 @@ async fn transcribe_recording_ready(app: AppHandle, audio_path: PathBuf) {
     if let Some(event) = outcome.event {
         emit_dictation_event_value(&app, event);
     }
+}
+
+fn dictation_transcription_provider(provider: String) -> Result<String, AppError> {
+    if provider == MOCK_PROVIDER {
+        return Err(AppError::new(
+            "dictation_provider_not_configured",
+            "Dictation requires real transcription. Set OPENAI_API_KEY in .env or in the shell that launches Tauri.",
+        ));
+    }
+    Ok(provider)
 }
 
 fn recording_path_from_event(event: &serde_json::Value) -> Result<PathBuf, AppError> {
@@ -1343,6 +1365,23 @@ mod tests {
                     "message": "The provider failed.",
                 },
             }))
+        );
+    }
+
+    #[test]
+    fn dictation_rejects_mock_provider() {
+        let err = dictation_transcription_provider(MOCK_PROVIDER.to_string())
+            .expect_err("dictation should not paste mock transcripts");
+
+        assert_eq!(err.code, "dictation_provider_not_configured");
+    }
+
+    #[test]
+    fn dictation_accepts_real_provider() {
+        assert_eq!(
+            dictation_transcription_provider(crate::providers::OPENAI_PROVIDER.to_string())
+                .expect("openai should be accepted"),
+            crate::providers::OPENAI_PROVIDER
         );
     }
 }

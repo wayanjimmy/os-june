@@ -50,6 +50,8 @@ The app data directory is resolved by Tauri at runtime. In development, inspect 
 
 Dictation is paste-only: it does not create notes or store transcript records. Press the configured global shortcut from another app to start microphone dictation, press it again to stop, and OS Scribe transcribes the temporary m4a recording through the same Rust transcription provider used by note recording. On success, the helper temporarily places the transcript on the clipboard, activates the last focused external app, posts Cmd+V, and restores the previous clipboard when possible.
 
+Dictation requires real transcription. If `OPENAI_API_KEY` is not visible to the Tauri process, dictation reports a configuration error instead of pasting the local mock transcript used by offline note-recording tests. During development, put the key in `.env` or export it in the shell before running `pnpm tauri:dev`.
+
 The default shortcut is `Fn+Space`. If macOS cannot register it, the app falls back to `Ctrl+Opt+Space`. The Dictation settings page can save another shortcut with Cmd, Ctrl, Opt, or Shift plus one supported non-modifier key.
 
 Manual validation:
