@@ -13,8 +13,9 @@ use std::{
     ptr,
     sync::Mutex,
     thread,
+    time::Duration,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 pub struct HelperProcess {
     child: Child,
@@ -229,6 +230,9 @@ impl DictationShortcutInput {
 }
 
 pub fn setup(app: &mut tauri::App) {
+    if let Err(error) = configure_hud_window(app.handle()) {
+        eprintln!("failed to configure dictation HUD: {error}");
+    }
     manage_settings(app.handle());
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
@@ -639,6 +643,7 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
     }
 
     update_latest_event(app, event_type, Some(line.clone()));
+    update_hud_window(app, event_type, event.as_ref());
     let _ = app.emit("dictation-event", line);
 }
 
@@ -715,7 +720,24 @@ fn emit_dictation_event_value(app: &AppHandle, event: serde_json::Value) {
     let event_type = event.get("type").and_then(serde_json::Value::as_str);
     let line = event.to_string();
     update_latest_event(app, event_type, Some(line.clone()));
+    update_hud_window(app, event_type, Some(&event));
     let _ = app.emit("dictation-event", line);
+}
+
+fn update_hud_window(
+    app: &AppHandle,
+    event_type: Option<&str>,
+    event: Option<&serde_json::Value>,
+) {
+    match dictation_event_visibility(event_type) {
+        DictationEventVisibility::Show if should_show_hud_window_for_type(event_type) => {
+            show_hud_window(app)
+        }
+        DictationEventVisibility::Hide => {
+            schedule_hud_hide(app, hud_hide_delay_for_event(event_type, event))
+        }
+        DictationEventVisibility::Show | DictationEventVisibility::Ignore => {}
+    }
 }
 
 fn update_latest_event(app: &AppHandle, event_type: Option<&str>, line: Option<String>) {
@@ -749,6 +771,113 @@ fn dictation_event_visibility(event_type: Option<&str>) -> DictationEventVisibil
         Some("paste_completed" | "error" | "shutdown_ack") => DictationEventVisibility::Hide,
         _ => DictationEventVisibility::Ignore,
     }
+}
+
+fn should_show_hud_window_for_type(event_type: Option<&str>) -> bool {
+    !matches!(event_type, Some("audio_level"))
+}
+
+fn hud_hide_delay_for_event(
+    event_type: Option<&str>,
+    event: Option<&serde_json::Value>,
+) -> Duration {
+    match event_type {
+        Some("shutdown_ack") => Duration::ZERO,
+        Some("error") if event.is_some_and(is_silent_transcription_error) => {
+            Duration::from_millis(900)
+        }
+        Some("error") => Duration::from_millis(2200),
+        _ => Duration::from_millis(900),
+    }
+}
+
+fn is_silent_transcription_error(event: &serde_json::Value) -> bool {
+    let payload = event.get("payload");
+    let code = payload
+        .and_then(|payload| payload.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let message = payload
+        .and_then(|payload| payload.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+
+    matches!(code, "no_speech" | "no_transcription" | "empty_transcript")
+        || message == "OpenAI did not return any transcript text."
+}
+
+fn show_hud_window(app: &AppHandle) {
+    if let Some(hud) = app.get_webview_window("hud") {
+        position_hud_window(&hud);
+        let _ = hud.show();
+    }
+}
+
+fn schedule_hud_hide(app: &AppHandle, delay: Duration) {
+    let app = app.clone();
+    thread::spawn(move || {
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+
+        if let Some(state) = app.try_state::<LastDictationEvent>() {
+            if state
+                .event
+                .lock()
+                .ok()
+                .and_then(|event| event.clone())
+                .is_some()
+            {
+                return;
+            }
+        }
+
+        if let Some(hud) = app.get_webview_window("hud") {
+            let _ = hud.hide();
+        }
+    });
+}
+
+fn position_hud_window(hud: &tauri::WebviewWindow) {
+    const HUD_BOTTOM_MARGIN: i32 = 12;
+
+    let monitor = hud
+        .cursor_position()
+        .ok()
+        .and_then(|cursor| hud.monitor_from_point(cursor.x, cursor.y).ok().flatten())
+        .or_else(|| hud.current_monitor().ok().flatten())
+        .or_else(|| hud.primary_monitor().ok().flatten());
+
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let Ok(window_size) = hud.outer_size() else {
+        return;
+    };
+
+    let work_area = monitor.work_area();
+    let x = work_area.position.x
+        + ((work_area.size.width as i32).saturating_sub(window_size.width as i32) / 2);
+    let y = work_area.position.y + work_area.size.height as i32
+        - window_size.height as i32
+        - HUD_BOTTOM_MARGIN;
+
+    let _ = hud.set_position(PhysicalPosition::new(x, y));
+}
+
+fn configure_hud_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(hud) = app.get_webview_window("hud") {
+        hud.set_always_on_top(true)
+            .map_err(|error| error.to_string())?;
+        hud.set_visible_on_all_workspaces(true)
+            .map_err(|error| error.to_string())?;
+        hud.set_focusable(false)
+            .map_err(|error| error.to_string())?;
+        hud.set_skip_taskbar(true)
+            .map_err(|error| error.to_string())?;
+        hud.set_shadow(false).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn hotkey_ready_event(shortcut: &DictationShortcutSetting) -> serde_json::Value {

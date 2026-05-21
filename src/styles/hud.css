@@ -1,0 +1,215 @@
+:root {
+  color: #f7faf8;
+  background: transparent;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+
+.hud {
+  --hud-bg: rgba(15, 18, 20, 0.84);
+  --hud-border: rgba(255, 255, 255, 0.16);
+  --hud-accent: #dce86a;
+  --hud-danger: #ff8177;
+
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 28px;
+  padding: 5px 8px;
+  border: 1px solid var(--hud-border);
+  border-radius: 999px;
+  background: var(--hud-bg);
+  box-shadow: 0 9px 19px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(9px) saturate(1.2);
+}
+
+.hud-bars {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 68px;
+  height: 17px;
+  gap: 3.5px;
+}
+
+.hud-bar {
+  width: 3.5px;
+  min-height: 4px;
+  height: calc(4px + (var(--level, 0.2) * 13px));
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.96),
+    rgba(220, 232, 106, 0.88)
+  );
+  box-shadow: 0 0 9px rgba(220, 232, 106, 0.24);
+  transition:
+    height 90ms ease-out,
+    opacity 140ms ease-out,
+    transform 140ms ease-out;
+}
+
+.hud-progress,
+.hud-success,
+.hud-error-mark,
+.hud-message {
+  display: none;
+}
+
+.hud-progress {
+  width: 17px;
+  height: 17px;
+  border: 1.5px solid rgba(255, 255, 255, 0.22);
+  border-top-color: var(--hud-accent);
+  border-radius: 999px;
+  animation: hud-spin 820ms linear infinite;
+}
+
+.hud-success {
+  position: relative;
+  width: 17px;
+  height: 17px;
+  border: 1px solid rgba(220, 232, 106, 0.9);
+  border-radius: 999px;
+  box-shadow: 0 0 11px rgba(220, 232, 106, 0.22);
+}
+
+.hud-success::after {
+  content: "";
+  position: absolute;
+  top: 3.5px;
+  left: 5px;
+  width: 4.5px;
+  height: 7.5px;
+  border: solid var(--hud-accent);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.hud-error-mark {
+  position: relative;
+  width: 17px;
+  height: 17px;
+  border: 1px solid rgba(255, 129, 119, 0.9);
+  border-radius: 999px;
+  box-shadow: 0 0 11px rgba(255, 93, 82, 0.22);
+}
+
+.hud-error-mark::before,
+.hud-error-mark::after {
+  content: "";
+  position: absolute;
+  top: 7.5px;
+  left: 4.5px;
+  width: 7px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: var(--hud-danger);
+}
+
+.hud-error-mark::before {
+  transform: rotate(45deg);
+}
+
+.hud-error-mark::after {
+  transform: rotate(-45deg);
+}
+
+.hud-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hud[data-state="transcribing"] .hud-bars,
+.hud[data-state="pasting"] .hud-bars,
+.hud[data-state="success"] .hud-bars,
+.hud[data-state="silent-error"] .hud-bars,
+.hud[data-state="error"] .hud-bars {
+  display: none;
+}
+
+.hud[data-state="transcribing"] .hud-progress,
+.hud[data-state="pasting"] .hud-progress {
+  display: block;
+}
+
+.hud[data-state="pasting"] .hud-progress {
+  animation-duration: 620ms;
+}
+
+.hud[data-state="success"],
+.hud[data-state="silent-error"] {
+  min-width: 29px;
+  padding-inline: 6px;
+}
+
+.hud[data-state="success"] .hud-success,
+.hud[data-state="silent-error"] .hud-error-mark {
+  display: block;
+}
+
+.hud[data-state="silent-error"],
+.hud[data-state="error"] {
+  border-color: rgba(255, 129, 119, 0.36);
+}
+
+.hud[data-state="error"] {
+  width: 120px;
+  min-height: 32px;
+  padding: 6px 8px;
+}
+
+.hud[data-state="error"] .hud-message {
+  display: block;
+  width: 100%;
+  max-height: 20px;
+  margin: 0;
+  overflow: hidden;
+  color: #ffe1de;
+  font-size: 0.41rem;
+  font-weight: 650;
+  line-height: 1.28;
+  text-align: center;
+}
+
+@keyframes hud-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-bar,
+  .hud-progress {
+    transition: none;
+    animation: none;
+  }
+}
