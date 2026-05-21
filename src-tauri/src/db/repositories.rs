@@ -345,17 +345,88 @@ impl Repositories {
         title: Option<String>,
         content: String,
     ) -> Result<NoteDto, sqlx::Error> {
+        self.set_generated_note_for_session(note_id, None, None, title, content)
+            .await
+    }
+
+    pub async fn set_generated_note_for_session(
+        &self,
+        note_id: &str,
+        recording_session_id: Option<&str>,
+        generation_result_id: Option<&str>,
+        title: Option<String>,
+        content: String,
+    ) -> Result<NoteDto, sqlx::Error> {
         let current = self.get_note(note_id).await?;
         let title = if current.title.trim().is_empty() {
             title.unwrap_or_else(|| "New note".to_string())
         } else {
             current.title.clone()
         };
-        let next_generated_content =
-            append_note_content(current.generated_content, content.clone());
-        let next_edited_content = current
-            .edited_content
-            .map(|edited_content| append_note_content(Some(edited_content), content));
+        let recording_session_id = recording_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let existing_session_block = match recording_session_id {
+            Some(session_id) => self.generation_block_exists(note_id, session_id).await?,
+            None => false,
+        };
+        let manual_tail = manual_tail_for_append(
+            current.generated_content.as_deref(),
+            current.edited_content.as_deref(),
+        );
+        let existing_for_normalization = if existing_session_block {
+            None
+        } else {
+            current.generated_content.as_deref()
+        };
+        let content = normalize_generated_addition(
+            &title,
+            existing_for_normalization,
+            manual_tail.as_deref(),
+            &content,
+        );
+        let next_generated_content = if let Some(session_id) = recording_session_id {
+            if self.generation_block_count(note_id).await? == 0 {
+                self.seed_legacy_generation_block(
+                    note_id,
+                    current.generated_content.as_deref(),
+                    Some(title.as_str()),
+                )
+                .await?;
+            }
+            self.upsert_generation_block(
+                note_id,
+                session_id,
+                generation_result_id,
+                Some(title.as_str()),
+                &content,
+            )
+            .await?;
+            self.compose_generation_blocks(note_id)
+                .await?
+                .unwrap_or_default()
+        } else {
+            append_note_content(current.generated_content.clone(), content.clone())
+        };
+        let next_edited_content = current.edited_content.map(|edited_content| {
+            if existing_session_block {
+                if edited_content.trim()
+                    == current.generated_content.as_deref().unwrap_or("").trim()
+                {
+                    next_generated_content.clone()
+                } else {
+                    edited_content
+                }
+            } else {
+                let content = normalize_generated_addition(
+                    &title,
+                    Some(edited_content.as_str()),
+                    manual_tail.as_deref(),
+                    &content,
+                );
+                append_note_content(Some(edited_content), content)
+            }
+        });
         sqlx::query(
             "UPDATE notes SET title = ?, generated_content = ?, edited_content = ?, active_tab = 'notes', processing_status = 'ready', last_error = NULL, updated_at = ? WHERE id = ?",
         )
@@ -367,6 +438,146 @@ impl Repositories {
         .execute(&self.pool)
         .await?;
         self.get_note(note_id).await
+    }
+
+    async fn generation_block_exists(
+        &self,
+        note_id: &str,
+        recording_session_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT 1 FROM note_generation_blocks WHERE note_id = ? AND recording_session_id = ? LIMIT 1",
+        )
+        .bind(note_id)
+        .bind(recording_session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    async fn generation_block_count(&self, note_id: &str) -> Result<i64, sqlx::Error> {
+        let row =
+            sqlx::query("SELECT COUNT(*) AS count FROM note_generation_blocks WHERE note_id = ?")
+                .bind(note_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.get("count"))
+    }
+
+    async fn seed_legacy_generation_block(
+        &self,
+        note_id: &str,
+        content: Option<&str>,
+        title_suggestion: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let Some(content) = content.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(());
+        };
+        let now = timestamp();
+        sqlx::query(
+            "INSERT INTO note_generation_blocks
+             (id, note_id, recording_session_id, generation_result_id, content, title_suggestion, sort_order, created_at, updated_at)
+             VALUES (?, ?, NULL, NULL, ?, ?, 0, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(note_id)
+        .bind(content)
+        .bind(title_suggestion)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn upsert_generation_block(
+        &self,
+        note_id: &str,
+        recording_session_id: &str,
+        generation_result_id: Option<&str>,
+        title_suggestion: Option<&str>,
+        content: &str,
+    ) -> Result<(), sqlx::Error> {
+        let now = timestamp();
+        if let Some(row) = sqlx::query(
+            "SELECT id FROM note_generation_blocks WHERE note_id = ? AND recording_session_id = ? LIMIT 1",
+        )
+        .bind(note_id)
+        .bind(recording_session_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            let id: String = row.get("id");
+            sqlx::query(
+                "UPDATE note_generation_blocks
+                 SET generation_result_id = ?, content = ?, title_suggestion = ?, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(generation_result_id)
+            .bind(content)
+            .bind(title_suggestion)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+            return Ok(());
+        }
+
+        let sort_order = self.next_generation_block_sort_order(note_id).await?;
+        sqlx::query(
+            "INSERT INTO note_generation_blocks
+             (id, note_id, recording_session_id, generation_result_id, content, title_suggestion, sort_order, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(note_id)
+        .bind(recording_session_id)
+        .bind(generation_result_id)
+        .bind(content)
+        .bind(title_suggestion)
+        .bind(sort_order)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn next_generation_block_sort_order(&self, note_id: &str) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order
+             FROM note_generation_blocks
+             WHERE note_id = ?",
+        )
+        .bind(note_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("next_order"))
+    }
+
+    async fn compose_generation_blocks(
+        &self,
+        note_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT content
+             FROM note_generation_blocks
+             WHERE note_id = ?
+             ORDER BY sort_order ASC, created_at ASC, rowid ASC",
+        )
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let content = rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("content"))
+            .filter(|content| !content.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(Some(content))
     }
 
     pub async fn create_recording_session(
@@ -681,7 +892,7 @@ impl Repositories {
     pub async fn latest_valid_audio_artifact_paths(
         &self,
         note_id: &str,
-    ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
+    ) -> Result<Vec<(String, String, String, String)>, sqlx::Error> {
         let session = sqlx::query(
             "SELECT recording_session_id
              FROM audio_artifacts
@@ -697,7 +908,7 @@ impl Repositories {
         };
         let session_id: String = session.get("recording_session_id");
         let rows = sqlx::query(
-            "SELECT id, source, path
+            "SELECT id, source, path, recording_session_id
              FROM audio_artifacts
              WHERE note_id = ? AND recording_session_id = ? AND status = 'valid'
              ORDER BY CASE source WHEN 'microphone' THEN 0 WHEN 'system' THEN 1 ELSE 2 END",
@@ -708,7 +919,14 @@ impl Repositories {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|row| (row.get("id"), row.get("source"), row.get("path")))
+            .map(|row| {
+                (
+                    row.get("id"),
+                    row.get("source"),
+                    row.get("path"),
+                    row.get("recording_session_id"),
+                )
+            })
             .collect())
     }
 
@@ -896,13 +1114,14 @@ impl Repositories {
         title_suggestion: Option<String>,
         provider: &str,
         prompt_version: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<String, sqlx::Error> {
         let now = timestamp();
+        let id = Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO generation_results (id, note_id, transcript_id, content, title_suggestion, provider, prompt_version, status, retry_count, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, ?, ?)",
         )
-        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
         .bind(note_id)
         .bind(transcript_id)
         .bind(content)
@@ -913,7 +1132,7 @@ impl Repositories {
         .bind(&now)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(id)
     }
 
     pub async fn recording_recovery_info(
@@ -1020,6 +1239,161 @@ fn append_note_content(existing: Option<String>, addition: String) -> String {
     } else {
         format!("{existing}\n\n{addition}")
     }
+}
+
+fn normalize_generated_addition(
+    title: &str,
+    existing: Option<&str>,
+    manual_tail: Option<&str>,
+    content: &str,
+) -> String {
+    let content = content.trim();
+    let Some(existing) = existing.map(str::trim).filter(|value| !value.is_empty()) else {
+        return strip_generated_addition_prefixes(title, manual_tail, content).to_string();
+    };
+    if content == existing {
+        String::new()
+    } else if let Some(rest) = content.strip_prefix(existing) {
+        strip_generated_addition_prefixes(title, manual_tail, rest.trim_start()).to_string()
+    } else {
+        strip_generated_addition_prefixes(title, manual_tail, content).to_string()
+    }
+}
+
+fn strip_generated_addition_prefixes<'a>(
+    title: &str,
+    manual_tail: Option<&str>,
+    content: &'a str,
+) -> &'a str {
+    let mut content = content;
+    loop {
+        let next = strip_duplicate_generated_heading(
+            title,
+            manual_tail,
+            strip_manual_tail_line_echo(manual_tail, strip_manual_tail_echo(manual_tail, content)),
+        );
+        if next == content {
+            return content;
+        }
+        content = next;
+    }
+}
+
+fn strip_manual_tail_echo<'a>(manual_tail: Option<&str>, content: &'a str) -> &'a str {
+    let Some(manual_tail) = manual_tail.map(str::trim).filter(|value| !value.is_empty()) else {
+        return content;
+    };
+    let Some(rest) = content.strip_prefix(manual_tail) else {
+        return content;
+    };
+    rest.strip_prefix(':').unwrap_or(rest).trim_start()
+}
+
+fn strip_manual_tail_line_echo<'a>(manual_tail: Option<&str>, content: &'a str) -> &'a str {
+    let Some(manual_tail) = manual_tail.map(str::trim).filter(|value| !value.is_empty()) else {
+        return content;
+    };
+    let Some((line, rest)) = content.split_once('\n') else {
+        return content;
+    };
+    if manual_echo_matches(line, manual_tail) {
+        rest.trim_start()
+    } else {
+        content
+    }
+}
+
+fn manual_echo_matches(line: &str, manual_tail: &str) -> bool {
+    let manual_tail = manual_echo_text(manual_tail);
+    let line = manual_echo_text(line);
+    !manual_tail.is_empty() && line.eq_ignore_ascii_case(&manual_tail)
+}
+
+fn manual_echo_text(value: &str) -> String {
+    let mut text = value.trim();
+    if let Some(heading) = markdown_heading_text(text) {
+        text = heading;
+    }
+    for prefix in ["- ", "* ", "+ "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim();
+            break;
+        }
+    }
+    text.trim_end_matches(':').trim().to_string()
+}
+
+fn strip_duplicate_generated_heading<'a>(
+    title: &str,
+    manual_tail: Option<&str>,
+    content: &'a str,
+) -> &'a str {
+    let Some((heading, rest)) = content.split_once('\n') else {
+        return content;
+    };
+    let Some(heading_text) = markdown_heading_text(heading) else {
+        return content;
+    };
+    if is_duplicate_generated_heading(title, manual_tail, heading_text) {
+        rest.trim_start()
+    } else {
+        content
+    }
+}
+
+fn markdown_heading_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let hash_count = trimmed
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    if hash_count == 0 || hash_count > 6 {
+        return None;
+    }
+
+    trimmed[hash_count..].strip_prefix(' ').map(str::trim)
+}
+
+fn is_duplicate_generated_heading(title: &str, manual_tail: Option<&str>, heading: &str) -> bool {
+    let heading = heading.trim();
+    let title = title.trim();
+    heading.eq_ignore_ascii_case("New note")
+        || heading.eq_ignore_ascii_case("Note")
+        || heading.eq_ignore_ascii_case("Generated note")
+        || (!title.is_empty() && heading.eq_ignore_ascii_case(title))
+        || manual_tail
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|manual_tail| heading.eq_ignore_ascii_case(manual_tail))
+}
+
+fn manual_tail_for_append(generated: Option<&str>, edited: Option<&str>) -> Option<String> {
+    let edited = edited?.trim();
+    if edited.is_empty() {
+        return None;
+    }
+    let Some(generated) = generated.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Some(edited.to_string());
+    };
+    if edited == generated {
+        return None;
+    }
+    if let Some(rest) = edited.strip_prefix(generated) {
+        let rest = rest.trim();
+        return if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        };
+    }
+    edited.find(generated).and_then(|index| {
+        let rest = edited[index + generated.len()..].trim();
+        if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
