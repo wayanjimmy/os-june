@@ -67,6 +67,44 @@ select {
   cursor: pointer;
 }
 
+.sidebar button:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.folder-create-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(31, 35, 42, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.folder-create-form label {
+  display: grid;
+  gap: 6px;
+  color: #646a73;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.folder-create-form input {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(36, 38, 43, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #171717;
+}
+
+.folder-create-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .folder-nav {
   display: flex;
   flex-direction: column;

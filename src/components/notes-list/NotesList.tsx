@@ -3,6 +3,7 @@ import type { NoteListItemDto } from "../../lib/tauri";
 type NotesListProps = {
   notes: NoteListItemDto[];
   selectedNoteId?: string;
+  emptyTitle?: string;
   onSelectNote: (noteId: string) => void;
   onCreateNote: () => void;
 };
@@ -10,13 +11,14 @@ type NotesListProps = {
 export function NotesList({
   notes,
   selectedNoteId,
+  emptyTitle = "No notes yet",
   onSelectNote,
   onCreateNote,
 }: NotesListProps) {
   if (notes.length === 0) {
     return (
       <section className="notes-empty">
-        <p>No notes yet</p>
+        <p>{emptyTitle}</p>
         <button type="button" className="primary-action" onClick={onCreateNote}>
           New note
         </button>

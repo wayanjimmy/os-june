@@ -122,9 +122,7 @@ export function App() {
     }
   }
 
-  async function handleCreateFolder() {
-    const name = window.prompt("Folder name");
-    if (!name?.trim()) return;
+  async function handleCreateFolder(name: string) {
     try {
       const folder = await createFolder(name);
       dispatch({ type: "folderCreated", folder });
@@ -132,6 +130,7 @@ export function App() {
       dispatch({ type: "notesLoaded", notes: response.items });
     } catch (err) {
       setError(messageFromError(err));
+      throw err;
     }
   }
 
@@ -218,7 +217,7 @@ export function App() {
       <Sidebar
         folders={state.folders}
         selectedFolderId={state.selectedFolderId}
-        onCreateFolder={() => void handleCreateFolder()}
+        onCreateFolder={(name) => handleCreateFolder(name)}
         onSelectAll={() => void handleSelectFolder(undefined)}
         onSelectFolder={(folderId) => void handleSelectFolder(folderId)}
       />
@@ -247,6 +246,9 @@ export function App() {
           <NotesList
             notes={state.notes}
             selectedNoteId={state.selectedNoteId}
+            emptyTitle={
+              state.selectedFolderId ? "No notes in this folder yet" : undefined
+            }
             onSelectNote={(noteId) => void handleSelectNote(noteId)}
             onCreateNote={() => void handleCreateNote()}
           />

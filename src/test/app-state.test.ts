@@ -66,6 +66,45 @@ describe("notesReducer", () => {
     expect(state.selectedNote?.editedContent).toBe("Clean notes");
   });
 
+  it("keeps updated notes visible when they remain in the selected folder", () => {
+    const initial = notesReducer(createInitialState(), {
+      type: "folderSelected",
+      folderId: "folder-1",
+    });
+    const loaded = notesReducer(initial, {
+      type: "noteLoaded",
+      note: note({ folderIds: ["folder-1"] }),
+    });
+
+    const state = notesReducer(loaded, {
+      type: "noteUpdated",
+      note: note({ title: "In folder", folderIds: ["folder-1"] }),
+    });
+
+    expect(state.notes.map((item) => item.id)).toEqual(["note-1"]);
+    expect(state.selectedNote?.title).toBe("In folder");
+  });
+
+  it("removes updated notes from the current folder view when unassigned", () => {
+    const initial = notesReducer(createInitialState(), {
+      type: "folderSelected",
+      folderId: "folder-1",
+    });
+    const loaded = notesReducer(initial, {
+      type: "noteLoaded",
+      note: note({ folderIds: ["folder-1"] }),
+    });
+
+    const state = notesReducer(loaded, {
+      type: "noteUpdated",
+      note: note({ folderIds: [] }),
+    });
+
+    expect(state.notes).toEqual([]);
+    expect(state.selectedNoteId).toBeUndefined();
+    expect(state.selectedNote).toBeUndefined();
+  });
+
   it("tracks recording status transitions without changing selected note", () => {
     const initial = notesReducer(createInitialState(), {
       type: "noteLoaded",

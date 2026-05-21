@@ -62,13 +62,7 @@ export function notesReducer(
         selectedNote: action.note,
       };
     case "noteUpdated":
-      return {
-        ...upsertNote(state, action.note),
-        selectedNote:
-          state.selectedNoteId === action.note.id
-            ? action.note
-            : state.selectedNote,
-      };
+      return reconcileUpdatedNote(state, action.note);
     case "recordingStatusChanged":
       return {
         ...state,
@@ -82,7 +76,9 @@ export function notesReducer(
     case "folderCreated":
       return {
         ...state,
-        folders: [...state.folders, action.folder],
+        folders: [...state.folders, action.folder].sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+        ),
         selectedFolderId: action.folder.id,
       };
     case "folderSelected":
@@ -116,6 +112,26 @@ function upsertNote(state: NotesState, note: NoteDto): NotesState {
     notes: [toListItem(note), ...existing].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt),
     ),
+  };
+}
+
+function reconcileUpdatedNote(state: NotesState, note: NoteDto): NotesState {
+  const isSelected = state.selectedNoteId === note.id;
+  if (
+    state.selectedFolderId &&
+    !note.folderIds.includes(state.selectedFolderId)
+  ) {
+    return {
+      ...state,
+      notes: state.notes.filter((item) => item.id !== note.id),
+      selectedNoteId: isSelected ? undefined : state.selectedNoteId,
+      selectedNote: isSelected ? undefined : state.selectedNote,
+    };
+  }
+
+  return {
+    ...upsertNote(state, note),
+    selectedNote: isSelected ? note : state.selectedNote,
   };
 }
 

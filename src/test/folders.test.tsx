@@ -60,6 +60,26 @@ describe("folders UI", () => {
     expect(onSelectFolder).toHaveBeenCalledWith("folder-1");
   });
 
+  it("creates folders from the sidebar form", async () => {
+    const user = userEvent.setup();
+    const onCreateFolder = vi.fn();
+    render(
+      <Sidebar
+        folders={folders}
+        selectedFolderId={undefined}
+        onCreateFolder={onCreateFolder}
+        onSelectAll={vi.fn()}
+        onSelectFolder={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "+ New Folder" }));
+    await user.type(screen.getByLabelText("Folder name"), "Research");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(onCreateFolder).toHaveBeenCalledWith("Research");
+  });
+
   it("shows notes with placeholders and empty folder action", () => {
     const { container } = render(
       <NotesList
