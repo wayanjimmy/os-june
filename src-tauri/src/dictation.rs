@@ -1,4 +1,8 @@
 use crate::domain::types::AppError;
+use crate::providers::{
+    configured_provider,
+    transcription::{transcribe_saved_audio, TranscriptionProviderResult, TranscriptionRequest},
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     ffi::c_void,
@@ -613,17 +617,117 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .and_then(|event| event.get("type"))
         .and_then(serde_json::Value::as_str);
 
+    if matches!(event_type, Some("recording_ready")) {
+        if let Some(event) = event.as_ref() {
+            match recording_path_from_event(event) {
+                Ok(audio_path) => {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        transcribe_recording_ready(app, audio_path).await;
+                    });
+                }
+                Err(error) => {
+                    let state = app.state::<HelperState>();
+                    let _ = send_helper_command(
+                        &state,
+                        serde_json::json!({ "type": "discard_recording" }),
+                    );
+                    emit_dictation_event_value(app, app_error_event(error));
+                }
+            }
+        }
+    }
+
+    update_latest_event(app, event_type, Some(line.clone()));
+    let _ = app.emit("dictation-event", line);
+}
+
+async fn transcribe_recording_ready(app: AppHandle, audio_path: PathBuf) {
+    let result = transcribe_saved_audio(TranscriptionRequest {
+        provider: configured_provider(),
+        audio_path,
+        title: "Dictation".to_string(),
+        context: None,
+    })
+    .await;
+    let outcome = outcome_from_transcription_result(result);
+    let state = app.state::<HelperState>();
+    if let Err(error) = send_helper_command(&state, outcome.helper_command) {
+        emit_dictation_event_value(&app, app_error_event(error));
+        return;
+    }
+    if let Some(event) = outcome.event {
+        emit_dictation_event_value(&app, event);
+    }
+}
+
+fn recording_path_from_event(event: &serde_json::Value) -> Result<PathBuf, AppError> {
+    let path = event
+        .get("payload")
+        .and_then(|payload| payload.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            AppError::new(
+                "dictation_recording_path_missing",
+                "Dictation helper did not provide a recording path.",
+            )
+        })?;
+    Ok(PathBuf::from(path))
+}
+
+#[derive(Debug)]
+struct DictationTranscriptionOutcome {
+    helper_command: serde_json::Value,
+    event: Option<serde_json::Value>,
+}
+
+fn outcome_from_transcription_result(
+    result: Result<TranscriptionProviderResult, AppError>,
+) -> DictationTranscriptionOutcome {
+    match result {
+        Ok(transcript) => DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({
+                "type": "paste_text",
+                "text": transcript.text,
+            }),
+            event: None,
+        },
+        Err(error) => DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({ "type": "discard_recording" }),
+            event: Some(app_error_event(error)),
+        },
+    }
+}
+
+fn app_error_event(error: AppError) -> serde_json::Value {
+    serde_json::json!({
+        "type": "error",
+        "payload": {
+            "code": error.code,
+            "message": error.message,
+        },
+    })
+}
+
+fn emit_dictation_event_value(app: &AppHandle, event: serde_json::Value) {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    let line = event.to_string();
+    update_latest_event(app, event_type, Some(line.clone()));
+    let _ = app.emit("dictation-event", line);
+}
+
+fn update_latest_event(app: &AppHandle, event_type: Option<&str>, line: Option<String>) {
     if let Some(state) = app.try_state::<LastDictationEvent>() {
         if let Ok(mut event) = state.event.lock() {
             match dictation_event_visibility(event_type) {
-                DictationEventVisibility::Show => *event = Some(line.clone()),
+                DictationEventVisibility::Show => *event = line,
                 DictationEventVisibility::Hide => *event = None,
                 DictationEventVisibility::Ignore => {}
             }
         }
     }
-
-    let _ = app.emit("dictation-event", line);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1070,5 +1174,46 @@ mod tests {
         .expect_err("unsupported key should fail");
 
         assert_eq!(err.code, "dictation_shortcut_unsupported");
+    }
+
+    #[test]
+    fn successful_transcription_maps_to_paste_command() {
+        let outcome = outcome_from_transcription_result(Ok(TranscriptionProviderResult {
+            text: "Paste this transcript.".to_string(),
+            language: Some("en".to_string()),
+            provider: "mock".to_string(),
+        }));
+
+        assert_eq!(
+            outcome.helper_command,
+            serde_json::json!({
+                "type": "paste_text",
+                "text": "Paste this transcript.",
+            })
+        );
+        assert!(outcome.event.is_none());
+    }
+
+    #[test]
+    fn failed_transcription_maps_to_discard_and_error() {
+        let outcome = outcome_from_transcription_result(Err(AppError::new(
+            "transcription_failed",
+            "The provider failed.",
+        )));
+
+        assert_eq!(
+            outcome.helper_command,
+            serde_json::json!({ "type": "discard_recording" })
+        );
+        assert_eq!(
+            outcome.event,
+            Some(serde_json::json!({
+                "type": "error",
+                "payload": {
+                    "code": "transcription_failed",
+                    "message": "The provider failed.",
+                },
+            }))
+        );
     }
 }
