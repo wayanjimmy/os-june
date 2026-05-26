@@ -78,9 +78,10 @@ export type DictationShortcutSetting = {
   code: string;
   modifiers: DictationShortcutModifiers;
   label: string;
+  pressCount: 1 | 2;
 };
 
-export type DictationActivationMode = "push_to_talk" | "toggle";
+export type DictationShortcutKind = "push_to_talk" | "toggle";
 
 export type DictationMicrophoneSetting = {
   id?: string;
@@ -88,8 +89,8 @@ export type DictationMicrophoneSetting = {
 };
 
 export type DictationSettingsDto = {
-  shortcut: DictationShortcutSetting;
-  activationMode: DictationActivationMode;
+  pushToTalkShortcut: DictationShortcutSetting;
+  toggleShortcut: DictationShortcutSetting;
   microphone: DictationMicrophoneSetting;
 };
 
@@ -472,16 +473,15 @@ export async function setVeniceModel(mode: ProviderModelMode, modelId: string) {
 }
 
 export async function setDictationShortcut(
-  shortcut: Pick<DictationShortcutSetting, "code" | "modifiers" | "label">,
+  kind: DictationShortcutKind,
+  shortcut: Pick<
+    DictationShortcutSetting,
+    "code" | "modifiers" | "label" | "pressCount"
+  >,
 ) {
-  return invoke<DictationSettingsDto>("set_dictation_shortcut", { shortcut });
-}
-
-export async function setDictationActivationMode(
-  activationMode: DictationActivationMode,
-) {
-  return invoke<DictationSettingsDto>("set_dictation_activation_mode", {
-    activationMode,
+  return invoke<DictationSettingsDto>("set_dictation_shortcut", {
+    kind,
+    shortcut,
   });
 }
 
