@@ -29,6 +29,7 @@ import {
   startRecording,
   updateNote,
 } from "../lib/tauri";
+import { playRecordingSound } from "../lib/recording-sounds";
 import type { NoteDto, RecordingStatusDto } from "../lib/tauri";
 import type {
   RecordingSourceMode,
@@ -283,6 +284,7 @@ export function App() {
         type: "recordingStatusChanged",
         status: recordingToStatus(recording),
       });
+      playRecordingSound("start");
     } catch (err) {
       dispatch({ type: "recordingStatusCleared" });
       setError(messageFromError(err));
@@ -299,6 +301,7 @@ export function App() {
     // ("Transcribing audio…" → "Generating notes…") tells the user
     // work is still in flight.
     dispatch({ type: "recordingStatusCleared" });
+    playRecordingSound("stop");
     if (selectedNote) {
       dispatch({
         type: "noteUpdated",
