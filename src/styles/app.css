@@ -901,7 +901,6 @@ input:focus-visible,
   padding: var(--sp-10) 0 var(--sp-5);
 }
 
-
 .editor-header {
   display: grid;
   justify-items: start;
@@ -2285,8 +2284,7 @@ input:focus-visible,
   height: 40px;
   margin: 0 calc(-1 * var(--sp-8));
   padding: 0 var(--sp-4);
-  border-bottom: 1px solid
-    color-mix(in oklch, var(--border) 60%, transparent);
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
   background: color-mix(in oklch, var(--card) 78%, transparent);
   backdrop-filter: saturate(140%) blur(14px);
   -webkit-backdrop-filter: saturate(140%) blur(14px);
@@ -2763,13 +2761,6 @@ input:focus-visible,
 
 .folder-detail-meta-dot {
   opacity: 0.5;
-}
-
-/* Folder action row — primary New note + secondary Add existing. */
-.folder-actions-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
 }
 
 /* Notes list — rows ride on white by default, hover lifts a quiet

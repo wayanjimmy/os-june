@@ -98,3 +98,18 @@ async fn deleting_folder_with_notes_removes_associated_notes() {
     let all_notes = repos.list_notes(None, 50, None).await.expect("all notes");
     assert!(all_notes.items.is_empty());
 }
+
+#[tokio::test]
+async fn renaming_missing_folder_returns_descriptive_error() {
+    let repos = repos().await;
+    let error = repos
+        .rename_folder("missing-folder", "Renamed", None)
+        .await
+        .expect_err("missing folder should fail");
+
+    assert_eq!(error.code, "folder_not_found");
+    assert_eq!(
+        error.message,
+        "Folder was not found or has already been deleted."
+    );
+}

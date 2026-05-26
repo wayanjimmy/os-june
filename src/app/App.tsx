@@ -46,8 +46,9 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeView, setActiveView] = useState<SidebarView>("notes");
   const [originFolderId, setOriginFolderId] = useState<string | undefined>();
-  const [sourceMode, setSourceMode] =
-    useState<RecordingSourceMode>("microphonePlusSystem");
+  const [sourceMode, setSourceMode] = useState<RecordingSourceMode>(
+    "microphonePlusSystem",
+  );
   const [sourceReadiness, setSourceReadiness] =
     useState<RecordingSourceReadinessDto>();
   const [checkingSourceReadiness, setCheckingSourceReadiness] = useState(false);
@@ -169,12 +170,21 @@ export function App() {
     }
   }
 
-  async function handleAssignNoteToFolder(noteId: string, folderId: string) {
+  async function handleAssignNoteToFolder(
+    noteId: string,
+    folderId: string,
+    options?: { rethrow?: boolean },
+  ) {
     try {
       const note = await assignNoteToFolder(noteId, folderId);
       dispatch({ type: "noteUpdated", note });
+      return note;
     } catch (err) {
       setError(messageFromError(err));
+      if (options?.rethrow) {
+        throw err;
+      }
+      return undefined;
     }
   }
 
@@ -392,8 +402,8 @@ export function App() {
                   }
                 }}
                 onAssignNoteToFolder={(noteId, folderId) =>
-                  assignNoteToFolder(noteId, folderId).then((note) => {
-                    dispatch({ type: "noteUpdated", note });
+                  handleAssignNoteToFolder(noteId, folderId, {
+                    rethrow: true,
                   })
                 }
                 onRemoveNoteFromFolder={(noteId, folderId) =>
@@ -427,71 +437,69 @@ export function App() {
                     }}
                   />
                 ) : null}
-              <NoteEditor
-                note={selectedNote}
-                folders={state.folders}
-                recordingStatus={state.recordingStatus}
-                sourceMode={sourceMode}
-                sourceReadiness={sourceReadiness}
-                checkingSourceReadiness={checkingSourceReadiness}
-                onTitleChange={(title) => void handleUpdateNote({ title })}
-                onContentChange={(sourceNoteId, editedContent) => {
-                  // Blur fired by an editor that was already torn
-                  // down on note-switch — ignore so we don't write
-                  // the old note's content into the new selectedNote.
-                  if (sourceNoteId !== selectedNote.id) return;
-                  void handleUpdateNote({ editedContent });
-                }}
-                onSourceModeChange={setSourceMode}
-                onTabChange={(activeTab) =>
-                  void updateNote({ noteId: selectedNote.id, activeTab }).then(
-                    (note) => dispatch({ type: "noteUpdated", note }),
-                  )
-                }
-                onStartRecording={() => void handleStartRecording()}
-                onPauseRecording={(sessionId) =>
-                  void pauseRecording(sessionId).then((status) =>
-                    dispatch({ type: "recordingStatusChanged", status }),
-                  )
-                }
-                onResumeRecording={(sessionId) =>
-                  void resumeRecording(sessionId).then((status) =>
-                    dispatch({ type: "recordingStatusChanged", status }),
-                  )
-                }
-                onFinishRecording={(sessionId) =>
-                  void handleFinishRecording(sessionId)
-                }
-                onRetry={() =>
-                  selectedNote
-                    ? void retryProcessing(selectedNote.id).then((note) =>
-                        dispatch({ type: "noteUpdated", note }),
-                      )
-                    : undefined
-                }
-                onAssignFolder={(folderId) =>
-                  void assignNoteToFolder(selectedNote.id, folderId).then(
-                    (note) => dispatch({ type: "noteUpdated", note }),
-                  )
-                }
-                onRemoveFolder={(folderId) =>
-                  void removeNoteFromFolder(selectedNote.id, folderId).then(
-                    (note) => dispatch({ type: "noteUpdated", note }),
-                  )
-                }
-                onCreateAndAssignFolder={(name) => {
-                  void (async () => {
-                    const folder = await handleCreateFolder(name);
-                    if (folder) {
-                      const note = await assignNoteToFolder(
-                        selectedNote.id,
-                        folder.id,
-                      );
-                      dispatch({ type: "noteUpdated", note });
-                    }
-                  })();
-                }}
-              />
+                <NoteEditor
+                  note={selectedNote}
+                  folders={state.folders}
+                  recordingStatus={state.recordingStatus}
+                  sourceMode={sourceMode}
+                  sourceReadiness={sourceReadiness}
+                  checkingSourceReadiness={checkingSourceReadiness}
+                  onTitleChange={(title) => void handleUpdateNote({ title })}
+                  onContentChange={(sourceNoteId, editedContent) => {
+                    // Blur fired by an editor that was already torn
+                    // down on note-switch — ignore so we don't write
+                    // the old note's content into the new selectedNote.
+                    if (sourceNoteId !== selectedNote.id) return;
+                    void handleUpdateNote({ editedContent });
+                  }}
+                  onSourceModeChange={setSourceMode}
+                  onTabChange={(activeTab) =>
+                    void updateNote({
+                      noteId: selectedNote.id,
+                      activeTab,
+                    }).then((note) => dispatch({ type: "noteUpdated", note }))
+                  }
+                  onStartRecording={() => void handleStartRecording()}
+                  onPauseRecording={(sessionId) =>
+                    void pauseRecording(sessionId).then((status) =>
+                      dispatch({ type: "recordingStatusChanged", status }),
+                    )
+                  }
+                  onResumeRecording={(sessionId) =>
+                    void resumeRecording(sessionId).then((status) =>
+                      dispatch({ type: "recordingStatusChanged", status }),
+                    )
+                  }
+                  onFinishRecording={(sessionId) =>
+                    void handleFinishRecording(sessionId)
+                  }
+                  onRetry={() =>
+                    selectedNote
+                      ? void retryProcessing(selectedNote.id).then((note) =>
+                          dispatch({ type: "noteUpdated", note }),
+                        )
+                      : undefined
+                  }
+                  onAssignFolder={(folderId) =>
+                    void handleAssignNoteToFolder(selectedNote.id, folderId)
+                  }
+                  onRemoveFolder={(folderId) =>
+                    void removeNoteFromFolder(selectedNote.id, folderId).then(
+                      (note) => dispatch({ type: "noteUpdated", note }),
+                    )
+                  }
+                  onCreateAndAssignFolder={(name) => {
+                    void (async () => {
+                      const folder = await handleCreateFolder(name);
+                      if (folder) {
+                        await handleAssignNoteToFolder(
+                          selectedNote.id,
+                          folder.id,
+                        );
+                      }
+                    })();
+                  }}
+                />
               </div>
             ) : (
               <section className="editor-empty">

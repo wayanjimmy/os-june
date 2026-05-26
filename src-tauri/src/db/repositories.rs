@@ -1,6 +1,6 @@
 use crate::domain::types::{
-    AudioArtifactDto, FolderDto, ListNotesResponse, NoteDto, NoteListItemDto, ProcessingStatus,
-    RecordingSourceMode, TranscriptDto,
+    AppError, AudioArtifactDto, FolderDto, ListNotesResponse, NoteDto, NoteListItemDto,
+    ProcessingStatus, RecordingSourceMode, TranscriptDto,
 };
 use chrono::{SecondsFormat, Utc};
 use sqlx::{Row, SqlitePool};
@@ -62,13 +62,13 @@ impl Repositories {
         folder_id: &str,
         name: &str,
         description: Option<&str>,
-    ) -> Result<FolderDto, sqlx::Error> {
+    ) -> Result<FolderDto, AppError> {
         let now = timestamp();
         let trimmed = name.trim();
         let description = description
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE folders SET name = ?, description = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(trimmed)
@@ -77,6 +77,12 @@ impl Repositories {
         .bind(folder_id)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::new(
+                "folder_not_found",
+                "Folder was not found or has already been deleted.",
+            ));
+        }
 
         let row = sqlx::query(
             "SELECT id, name, description, created_at, updated_at FROM folders WHERE id = ? AND deleted_at IS NULL",

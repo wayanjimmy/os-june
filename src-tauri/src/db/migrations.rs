@@ -117,10 +117,14 @@ async fn drop_index_if_exists(
     pool: &SqlitePool,
     index: &str,
 ) -> Result<(), sqlx::migrate::MigrateError> {
-    let sql = format!("DROP INDEX IF EXISTS {index}");
+    let sql = format!("DROP INDEX IF EXISTS {}", quote_sqlite_identifier(index));
     sqlx::query(&sql)
         .execute(pool)
         .await
         .map_err(sqlx::migrate::MigrateError::Execute)?;
     Ok(())
+}
+
+fn quote_sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
