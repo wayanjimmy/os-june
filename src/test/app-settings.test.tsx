@@ -12,7 +12,6 @@ const mocks = vi.hoisted(() => ({
   setVeniceModel: vi.fn(),
   openPrivacySettings: vi.fn(),
   setDictationShortcut: vi.fn(),
-  setDictationActivationMode: vi.fn(),
   setDictationMicrophone: vi.fn(),
   listen: vi.fn(),
   eventHandler: undefined as ((event: { payload: string }) => void) | undefined,
@@ -26,7 +25,6 @@ vi.mock("../lib/tauri", () => ({
   setVeniceModel: mocks.setVeniceModel,
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationShortcut: mocks.setDictationShortcut,
-  setDictationActivationMode: mocks.setDictationActivationMode,
   setDictationMicrophone: mocks.setDictationMicrophone,
 }));
 
@@ -35,9 +33,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 const baseSettings: DictationSettingsDto = {
-  shortcut: {
+  pushToTalkShortcut: {
     code: "Space",
     label: "Fn+Space",
+    pressCount: 1,
     modifiers: {
       command: false,
       control: false,
@@ -46,7 +45,18 @@ const baseSettings: DictationSettingsDto = {
       function: true,
     },
   },
-  activationMode: "push_to_talk",
+  toggleShortcut: {
+    code: "Space",
+    label: "Fn+Space+Fn+Space",
+    pressCount: 2,
+    modifiers: {
+      command: false,
+      control: false,
+      option: false,
+      shift: false,
+      function: true,
+    },
+  },
   microphone: {},
 };
 
@@ -126,16 +136,12 @@ describe("AppSettings", () => {
     }));
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.openPrivacySettings.mockResolvedValue(undefined);
-    mocks.setDictationShortcut.mockImplementation(async (shortcut) => ({
+    mocks.setDictationShortcut.mockImplementation(async (kind, shortcut) => ({
       ...baseSettings,
-      shortcut,
+      ...(kind === "toggle"
+        ? { toggleShortcut: shortcut }
+        : { pushToTalkShortcut: shortcut }),
     }));
-    mocks.setDictationActivationMode.mockImplementation(
-      async (activationMode) => ({
-        ...baseSettings,
-        activationMode,
-      }),
-    );
     mocks.setDictationMicrophone.mockImplementation(async (id, name) => ({
       ...baseSettings,
       microphone: { id, name },
@@ -182,7 +188,7 @@ describe("AppSettings", () => {
     expect(onSourceModeChange).toHaveBeenCalledWith("microphonePlusSystem");
   });
 
-  it("records dictation shortcut and activation mode in settings", async () => {
+  it("records push-to-talk and toggle dictation shortcuts in settings", async () => {
     const user = userEvent.setup();
     render(
       <AppSettings
@@ -192,10 +198,64 @@ describe("AppSettings", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Change" }));
+    expect(await screen.findByText("Push to talk")).toBeInTheDocument();
+    expect(screen.getByText("Toggle dictation")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Dictation activation mode"),
+    ).not.toBeInTheDocument();
+
+    const changeButtons = await screen.findAllByRole("button", {
+      name: "Change",
+    });
+    await user.click(changeButtons[0]);
     await waitFor(() =>
       expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
         type: "start_shortcut_capture",
+        pressCount: 1,
+      }),
+    );
+    mocks.eventHandler?.({
+      payload: JSON.stringify({
+        type: "shortcut_captured",
+        payload: {
+          shortcut: {
+            code: "Fn",
+            label: "Fn",
+            modifiers: {
+              command: false,
+              control: false,
+              option: false,
+              shift: false,
+              function: true,
+            },
+            pressCount: 1,
+          },
+        },
+      }),
+    });
+
+    await waitFor(() =>
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith("push_to_talk", {
+        code: "Fn",
+        label: "Fn",
+        modifiers: {
+          command: false,
+          control: false,
+          option: false,
+          shift: false,
+          function: true,
+        },
+        pressCount: 1,
+      }),
+    );
+
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Change" }))[1],
+    );
+    await waitFor(() =>
+      expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+        type: "start_shortcut_capture",
+        pressCount: 2,
       }),
     );
     mocks.eventHandler?.({
@@ -218,9 +278,9 @@ describe("AppSettings", () => {
     });
 
     await waitFor(() =>
-      expect(mocks.setDictationShortcut).toHaveBeenCalledWith({
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith("toggle", {
         code: "Fn",
-        label: "Fn",
+        label: "Fn+Fn",
         modifiers: {
           command: false,
           control: false,
@@ -228,16 +288,9 @@ describe("AppSettings", () => {
           shift: false,
           function: true,
         },
+        pressCount: 2,
       }),
     );
-
-    await user.click(screen.getByRole("button", { name: "Toggle" }));
-    await waitFor(() =>
-      expect(mocks.setDictationActivationMode).toHaveBeenCalledWith("toggle"),
-    );
-    expect(
-      await screen.findByText("Activation mode set to Toggle."),
-    ).toBeInTheDocument();
   });
 
   it("shows permission status and opens matching privacy panes", async () => {

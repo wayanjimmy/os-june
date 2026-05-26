@@ -10,15 +10,14 @@ import {
   listVeniceModels,
   openPrivacySettings,
   providerModelSettings,
-  setDictationActivationMode,
   setDictationMicrophone,
   setDictationShortcut,
   setVeniceModel,
 } from "../../lib/tauri";
 import type {
-  DictationActivationMode,
   DictationHelperEvent,
   DictationMicrophoneDeviceDto,
+  DictationShortcutKind,
   DictationSettingsDto,
   DictationShortcutModifiers,
   DictationShortcutSetting,
@@ -29,7 +28,6 @@ import type {
   VeniceModelDto,
 } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
-import { SegmentedControl } from "../ui/SegmentedControl";
 import { Switch } from "../ui/Switch";
 
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
@@ -41,22 +39,26 @@ const EMPTY_MODIFIERS: DictationShortcutModifiers = {
 };
 
 const DEFAULT_SETTINGS: DictationSettingsDto = {
-  shortcut: {
+  pushToTalkShortcut: {
     code: "Fn",
     label: "Fn",
+    pressCount: 1,
     modifiers: {
       ...EMPTY_MODIFIERS,
       function: true,
     },
   },
-  activationMode: "push_to_talk",
+  toggleShortcut: {
+    code: "Fn",
+    label: "Fn+Fn",
+    pressCount: 2,
+    modifiers: {
+      ...EMPTY_MODIFIERS,
+      function: true,
+    },
+  },
   microphone: {},
 };
-
-const ACTIVATION_MODE_OPTIONS = [
-  { value: "push_to_talk", label: "Push-to-talk" },
-  { value: "toggle", label: "Toggle" },
-] as const;
 
 const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
@@ -95,7 +97,9 @@ export function AppSettings({
     DictationMicrophoneDeviceDto[]
   >([]);
   const [permissions, setPermissions] = useState<DictationPermissionStatus>({});
-  const [capturingShortcut, setCapturingShortcut] = useState(false);
+  const [capturingShortcut, setCapturingShortcut] =
+    useState<DictationShortcutKind>();
+  const capturingShortcutRef = useRef<DictationShortcutKind>();
   const [shortcutError, setShortcutError] = useState<string>();
   const [status, setStatus] = useState<string>();
   const [micOpen, setMicOpen] = useState(false);
@@ -107,6 +111,10 @@ export function AppSettings({
     (source) => source.source === "system",
   );
   const systemBlocked = !!(systemReadiness && !systemReadiness.ready);
+
+  useEffect(() => {
+    capturingShortcutRef.current = capturingShortcut;
+  }, [capturingShortcut]);
 
   useEffect(() => {
     let cancelled = false;
@@ -236,8 +244,15 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "shortcut_captured") {
+      const kind = capturingShortcutRef.current;
+      if (!kind) {
+        setShortcutError("Shortcut capture returned without an active target.");
+        setStatus("Shortcut capture returned without an active target.");
+        return;
+      }
       const shortcut = shortcutFromCapturePayload(
         helperEvent.payload?.shortcut,
+        pressCountForKind(kind),
       );
       if (!shortcut) {
         setShortcutError("Shortcut capture returned invalid data.");
@@ -245,7 +260,7 @@ export function AppSettings({
         return;
       }
       setShortcutError(undefined);
-      void saveShortcut(shortcut);
+      void saveShortcut(kind, shortcut);
       return;
     }
     if (helperEvent.type === "error") {
@@ -267,48 +282,45 @@ export function AppSettings({
   }
 
   async function saveShortcut(
-    shortcut: Pick<DictationShortcutSetting, "code" | "modifiers" | "label">,
+    kind: DictationShortcutKind,
+    shortcut: Pick<
+      DictationShortcutSetting,
+      "code" | "modifiers" | "label" | "pressCount"
+    >,
   ) {
     try {
-      const next = await setDictationShortcut(shortcut);
+      const next = await setDictationShortcut(kind, shortcut);
       setSettings(next);
-      setCapturingShortcut(false);
-      setStatus(`Shortcut set to ${next.shortcut.label}.`);
+      setCapturingShortcut(undefined);
+      setStatus(
+        `${shortcutKindLabel(kind)} set to ${shortcutForKind(next, kind).label}.`,
+      );
     } catch (error) {
       setShortcutError(messageFromError(error));
       setStatus(messageFromError(error));
     }
   }
 
-  async function startShortcutCapture() {
+  async function startShortcutCapture(kind: DictationShortcutKind) {
     setShortcutError(undefined);
-    setCapturingShortcut(true);
+    setCapturingShortcut(kind);
     try {
-      await dictationHelperCommand({ type: "start_shortcut_capture" });
+      await dictationHelperCommand({
+        type: "start_shortcut_capture",
+        pressCount: pressCountForKind(kind),
+      });
     } catch (error) {
-      setCapturingShortcut(false);
+      setCapturingShortcut(undefined);
       setShortcutError(messageFromError(error));
       setStatus(messageFromError(error));
     }
   }
 
   async function cancelShortcutCapture() {
-    setCapturingShortcut(false);
+    setCapturingShortcut(undefined);
     setShortcutError(undefined);
     try {
       await dictationHelperCommand({ type: "cancel_shortcut_capture" });
-    } catch (error) {
-      setStatus(messageFromError(error));
-    }
-  }
-
-  async function selectActivationMode(activationMode: DictationActivationMode) {
-    try {
-      const next = await setDictationActivationMode(activationMode);
-      setSettings(next);
-      setStatus(
-        `Activation mode set to ${activationModeLabel(next.activationMode)}.`,
-      );
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -394,55 +406,31 @@ export function AppSettings({
         </h2>
         <div className="settings-card">
           <div className="settings-rows">
-            <div className="settings-row">
-              <div className="settings-row-info">
-                <h3 className="settings-row-title">Shortcut</h3>
-                <p className="settings-row-description">
-                  Press Change, then press Fn/Globe or any supported modifier
-                  shortcut.
-                </p>
-                {shortcutError ? (
-                  <p className="settings-row-error">{shortcutError}</p>
-                ) : null}
-              </div>
-              <div className="settings-row-control">
-                <KeycapShortcut
-                  label={settings.shortcut.label}
-                  capturing={capturingShortcut}
-                />
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    if (capturingShortcut) {
-                      void cancelShortcutCapture();
-                    } else {
-                      void startShortcutCapture();
-                    }
-                  }}
-                >
-                  {capturingShortcut ? "Cancel" : "Change"}
-                </button>
-              </div>
-            </div>
+            <ShortcutRow
+              title="Push to talk"
+              description="Hold this shortcut to dictate, then release to paste."
+              shortcut={settings.pushToTalkShortcut}
+              capturing={capturingShortcut === "push_to_talk"}
+              disabled={
+                !!capturingShortcut && capturingShortcut !== "push_to_talk"
+              }
+              error={
+                capturingShortcut === "push_to_talk" ? shortcutError : undefined
+              }
+              onChange={() => void startShortcutCapture("push_to_talk")}
+              onCancel={() => void cancelShortcutCapture()}
+            />
 
-            <div className="settings-row">
-              <div className="settings-row-info">
-                <h3 className="settings-row-title">Activation mode</h3>
-                <p className="settings-row-description">
-                  Choose whether the shortcut records while held or toggles on
-                  each press.
-                </p>
-              </div>
-              <div className="settings-row-control">
-                <SegmentedControl
-                  value={settings.activationMode}
-                  options={ACTIVATION_MODE_OPTIONS}
-                  onValueChange={selectActivationMode}
-                  aria-label="Dictation activation mode"
-                />
-              </div>
-            </div>
+            <ShortcutRow
+              title="Toggle dictation"
+              description="Press this shortcut twice to start or stop dictation."
+              shortcut={settings.toggleShortcut}
+              capturing={capturingShortcut === "toggle"}
+              disabled={!!capturingShortcut && capturingShortcut !== "toggle"}
+              error={capturingShortcut === "toggle" ? shortcutError : undefined}
+              onChange={() => void startShortcutCapture("toggle")}
+              onCancel={() => void cancelShortcutCapture()}
+            />
           </div>
         </div>
       </section>
@@ -679,6 +667,47 @@ function ModelRow({
             <span className="model-summary-price">{pricingLabel(model)}</span>
           </span>
           <IconChevronDownSmall size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ShortcutRow({
+  title,
+  description,
+  shortcut,
+  capturing,
+  disabled,
+  error,
+  onChange,
+  onCancel,
+}: {
+  title: string;
+  description: string;
+  shortcut: DictationShortcutSetting;
+  capturing: boolean;
+  disabled: boolean;
+  error?: string;
+  onChange: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="settings-row">
+      <div className="settings-row-info">
+        <h3 className="settings-row-title">{title}</h3>
+        <p className="settings-row-description">{description}</p>
+        {error ? <p className="settings-row-error">{error}</p> : null}
+      </div>
+      <div className="settings-row-control">
+        <KeycapShortcut label={shortcut.label} capturing={capturing} />
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={disabled}
+          onClick={capturing ? onCancel : onChange}
+        >
+          {capturing ? "Cancel" : "Change"}
         </button>
       </div>
     </div>
@@ -1020,10 +1049,6 @@ function KeycapShortcut({
   );
 }
 
-function activationModeLabel(mode: DictationActivationMode) {
-  return mode === "toggle" ? "Toggle" : "Push-to-talk";
-}
-
 function parseDictationEvent(
   payload: unknown,
 ): DictationHelperEvent | undefined {
@@ -1042,11 +1067,21 @@ function parseDictationEvent(
 
 function shortcutFromCapturePayload(
   shortcut: unknown,
-): Pick<DictationShortcutSetting, "code" | "modifiers" | "label"> | undefined {
+  fallbackPressCount: 1 | 2,
+):
+  | Pick<
+      DictationShortcutSetting,
+      "code" | "modifiers" | "label" | "pressCount"
+    >
+  | undefined {
   if (!shortcut || typeof shortcut !== "object") return undefined;
 
   const value = shortcut as Partial<DictationShortcutSetting>;
   const modifiers = value.modifiers;
+  const pressCount =
+    value.pressCount === 1 || value.pressCount === 2
+      ? value.pressCount
+      : fallbackPressCount;
   if (
     typeof value.code !== "string" ||
     typeof value.label !== "string" ||
@@ -1062,9 +1097,37 @@ function shortcutFromCapturePayload(
 
   return {
     code: value.code,
-    label: value.label,
+    label:
+      pressCount === 2 && !isRepeatedShortcutLabel(value.label)
+        ? `${value.label}+${value.label}`
+        : value.label,
     modifiers,
+    pressCount,
   };
+}
+
+function pressCountForKind(kind: DictationShortcutKind): 1 | 2 {
+  return kind === "toggle" ? 2 : 1;
+}
+
+function shortcutKindLabel(kind: DictationShortcutKind) {
+  return kind === "toggle" ? "Toggle dictation" : "Push to talk";
+}
+
+function shortcutForKind(
+  settings: DictationSettingsDto,
+  kind: DictationShortcutKind,
+) {
+  return kind === "toggle"
+    ? settings.toggleShortcut
+    : settings.pushToTalkShortcut;
+}
+
+function isRepeatedShortcutLabel(label: string) {
+  const keys = label.split("+").filter(Boolean);
+  if (keys.length === 0 || keys.length % 2 !== 0) return false;
+  const half = keys.length / 2;
+  return keys.slice(0, half).join("+") === keys.slice(half).join("+");
 }
 
 function stringPayloadValue(value: unknown) {
