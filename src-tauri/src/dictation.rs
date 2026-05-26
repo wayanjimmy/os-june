@@ -17,6 +17,9 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 const DICTATION_TRANSCRIPTION_CONTEXT: &str = "Transcribe this as clean hands-free dictation for direct insertion into the active app. Preserve the speaker's intended words, language, and meaning. Remove filler sounds and accidental false starts when they are not meaningful, especially um, uh, ah, er, and a... stutters. Do not remove intentional articles such as a or an when they are grammatically needed. Convert spoken punctuation and formatting into text punctuation, including comma, period, question mark, exclamation point, colon, semicolon, dash, newline, and new paragraph. Convert quote/unquote, open quote/close quote, and start quote/end quote into actual quotation marks around the quoted words. Output only the dictated text.";
+const DEFAULT_DICTATION_CLEANUP_MODEL: &str = "nvidia-nemotron-3-nano-30b-a3b";
+const DICTATION_CLEANUP_TIMEOUT_MS: u64 = 2_500;
+const DICTATION_CLEANUP_INSTRUCTIONS: &str = "Rewrite ASR output as clean hands-free typing. Remove filler sounds, verbal hesitations, and accidental false starts when they are not meaningful. Preserve intended words, language, casing, and meaning. Convert spoken punctuation and formatting commands into actual punctuation or line breaks. Convert quote/unquote, open quote/close quote, and start quote/end quote into actual quotation marks around the quoted words. Do not summarize, add new content, explain, or wrap the answer. Output only the corrected text.";
 
 pub struct HelperProcess {
     child: Child,
@@ -943,6 +946,7 @@ async fn transcribe_recording_ready(app: AppHandle, audio_path: PathBuf) {
             return;
         }
     };
+    let provider_for_cleanup = provider.clone();
     let result = transcribe_saved_audio(TranscriptionRequest {
         provider,
         audio_path,
@@ -950,6 +954,7 @@ async fn transcribe_recording_ready(app: AppHandle, audio_path: PathBuf) {
         context: Some(dictation_transcription_context()),
     })
     .await;
+    let result = maybe_cleanup_dictation_result(&provider_for_cleanup, result).await;
     let outcome = outcome_from_transcription_result(result);
     let state = app.state::<HelperState>();
     if let Err(error) = send_helper_command(&state, outcome.helper_command) {
@@ -973,6 +978,139 @@ fn dictation_transcription_provider(provider: String) -> Result<String, AppError
 
 fn dictation_transcription_context() -> String {
     DICTATION_TRANSCRIPTION_CONTEXT.to_string()
+}
+
+async fn maybe_cleanup_dictation_result(
+    provider: &str,
+    result: Result<TranscriptionProviderResult, AppError>,
+) -> Result<TranscriptionProviderResult, AppError> {
+    let mut transcript = match result {
+        Ok(transcript) => transcript,
+        Err(error) => return Err(error),
+    };
+    if provider == OPENAI_PROVIDER {
+        return Ok(transcript);
+    }
+    if let Ok(cleaned) = cleanup_dictation_text(&transcript.text).await {
+        if !cleaned.trim().is_empty() {
+            transcript.text = cleaned;
+        }
+    }
+    Ok(transcript)
+}
+
+async fn cleanup_dictation_text(text: &str) -> Result<String, AppError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(String::new());
+    }
+    let api_key = crate::providers::venice_api_key().ok_or_else(|| {
+        AppError::new(
+            "provider_not_configured",
+            "VENICE_API_KEY is required for dictation cleanup.",
+        )
+    })?;
+    let body = serde_json::json!({
+        "model": dictation_cleanup_model(),
+        "messages": [
+            {
+                "role": "system",
+                "content": DICTATION_CLEANUP_INSTRUCTIONS,
+            },
+            {
+                "role": "user",
+                "content": text,
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": dictation_cleanup_max_tokens(text),
+    });
+    let body =
+        match tokio::time::timeout(Duration::from_millis(DICTATION_CLEANUP_TIMEOUT_MS), async {
+            let response = reqwest::Client::new()
+                .post(format!(
+                    "{}/chat/completions",
+                    crate::providers::venice_api_base_url()
+                ))
+                .bearer_auth(api_key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| AppError::new("provider_request_failed", error.to_string()))?;
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .map_err(|error| AppError::new("provider_request_failed", error.to_string()))?;
+            if !status.is_success() {
+                return Err(AppError::new(
+                    "provider_request_failed",
+                    format!("Venice dictation cleanup failed with status {status}: {body}"),
+                ));
+            }
+            Ok(body)
+        })
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(AppError::new(
+                    "dictation_cleanup_timeout",
+                    "Dictation cleanup timed out.",
+                ));
+            }
+        };
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| AppError::new("provider_response_invalid", error.to_string()))?;
+    extract_chat_completion_text(&parsed)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::new(
+                "provider_response_invalid",
+                "Venice dictation cleanup response did not contain text output.",
+            )
+        })
+}
+
+fn dictation_cleanup_model() -> String {
+    crate::providers::load_local_env();
+    std::env::var("VENICE_DICTATION_CLEANUP_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_DICTATION_CLEANUP_MODEL.to_string())
+}
+
+fn dictation_cleanup_max_tokens(text: &str) -> usize {
+    ((text.len() / 3) + 64).clamp(128, 2_048)
+}
+
+fn extract_chat_completion_text(value: &serde_json::Value) -> Option<String> {
+    let content = value
+        .get("choices")?
+        .as_array()?
+        .first()?
+        .get("message")?
+        .get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let parts = content
+        .as_array()?
+        .iter()
+        .filter_map(|item| {
+            item.get("text")
+                .or_else(|| item.get("content"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
 }
 
 fn recording_path_from_event(event: &serde_json::Value) -> Result<PathBuf, AppError> {
@@ -1563,5 +1701,50 @@ mod tests {
         assert!(context.contains("quote/unquote"));
         assert!(context.contains("actual quotation marks"));
         assert!(context.contains("Do not remove intentional articles"));
+    }
+
+    #[test]
+    fn extracts_string_chat_completion_text() {
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": "Hello, \"testing\"."
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_chat_completion_text(&response).as_deref(),
+            Some("Hello, \"testing\".")
+        );
+    }
+
+    #[test]
+    fn extracts_array_chat_completion_text() {
+        let response = serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            { "text": "Hello" },
+                            { "content": ", world." }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_chat_completion_text(&response).as_deref(),
+            Some("Hello\n, world.")
+        );
+    }
+
+    #[test]
+    fn dictation_cleanup_max_tokens_scales_with_input() {
+        assert_eq!(dictation_cleanup_max_tokens("short text"), 128);
+        assert_eq!(dictation_cleanup_max_tokens(&"a".repeat(12_000)), 2_048);
     }
 }
