@@ -87,8 +87,8 @@ impl<'de> Deserialize<'de> for DictationSettings {
             });
         }
 
-        let settings: SettingsValue = serde_json::from_value(value)
-            .map_err(serde::de::Error::custom)?;
+        let settings: SettingsValue =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
 
         Ok(Self {
             push_to_talk_shortcut: settings
@@ -309,9 +309,8 @@ impl DictationShortcutInput {
             ));
         }
 
-        let press_count = normalize_press_count(self.press_count.unwrap_or(1)).map_err(|message| {
-            AppError::new("dictation_shortcut_press_count_invalid", message)
-        })?;
+        let press_count = normalize_press_count(self.press_count.unwrap_or(1))
+            .map_err(|message| AppError::new("dictation_shortcut_press_count_invalid", message))?;
 
         if is_bare_fn_input(&self.code, &self.modifiers) {
             return Ok(DictationShortcutSetting {
@@ -487,11 +486,9 @@ pub fn set_dictation_shortcut(
         return Ok(current_settings);
     }
 
-    let settings = update_settings(&state, |settings| {
-        match kind {
-            DictationShortcutKind::PushToTalk => settings.push_to_talk_shortcut = shortcut,
-            DictationShortcutKind::Toggle => settings.toggle_shortcut = shortcut,
-        }
+    let settings = update_settings(&state, |settings| match kind {
+        DictationShortcutKind::PushToTalk => settings.push_to_talk_shortcut = shortcut,
+        DictationShortcutKind::Toggle => settings.toggle_shortcut = shortcut,
     })?;
     reset_shortcut_activation(&app);
     apply_shortcut_settings(&helper_state, &settings)?;
@@ -1285,8 +1282,14 @@ mod tests {
     fn default_settings_use_fn_and_double_fn() {
         let settings = DictationSettings::default();
 
-        assert_eq!(settings.push_to_talk_shortcut, DictationShortcutSetting::bare_fn());
-        assert_eq!(settings.toggle_shortcut, DictationShortcutSetting::double_bare_fn());
+        assert_eq!(
+            settings.push_to_talk_shortcut,
+            DictationShortcutSetting::bare_fn()
+        );
+        assert_eq!(
+            settings.toggle_shortcut,
+            DictationShortcutSetting::double_bare_fn()
+        );
     }
 
     #[test]
@@ -1296,8 +1299,14 @@ mod tests {
         )
         .expect("legacy shortcut should deserialize");
 
-        assert_eq!(settings.push_to_talk_shortcut, DictationShortcutSetting::bare_fn());
-        assert_eq!(settings.toggle_shortcut, DictationShortcutSetting::double_bare_fn());
+        assert_eq!(
+            settings.push_to_talk_shortcut,
+            DictationShortcutSetting::bare_fn()
+        );
+        assert_eq!(
+            settings.toggle_shortcut,
+            DictationShortcutSetting::double_bare_fn()
+        );
         assert_eq!(settings.microphone.id.as_deref(), Some("usb"));
         assert_eq!(settings.microphone.name.as_deref(), Some("USB Mic"));
     }
@@ -1311,17 +1320,19 @@ mod tests {
 
         assert_eq!(settings.push_to_talk_shortcut.press_count, 1);
         assert_eq!(settings.toggle_shortcut.press_count, 2);
-        assert!(settings.push_to_talk_shortcut.same_trigger_as(&DictationShortcutSetting {
-            key_code: 0x31,
-            code: "Space".to_string(),
-            modifiers: DictationShortcutModifiers {
-                control: true,
-                option: true,
-                ..DictationShortcutModifiers::default()
-            },
-            label: "Ctrl+Opt+Space".to_string(),
-            press_count: 1,
-        }));
+        assert!(settings
+            .push_to_talk_shortcut
+            .same_trigger_as(&DictationShortcutSetting {
+                key_code: 0x31,
+                code: "Space".to_string(),
+                modifiers: DictationShortcutModifiers {
+                    control: true,
+                    option: true,
+                    ..DictationShortcutModifiers::default()
+                },
+                label: "Ctrl+Opt+Space".to_string(),
+                press_count: 1,
+            }));
     }
 
     #[test]
