@@ -287,9 +287,9 @@ export function AppSettings({
           <div className="settings-rows">
             <div className="settings-row">
               <div className="settings-row-info">
-                <h3 className="settings-row-title">Dictation microphone</h3>
+                <h3 className="settings-row-title">Microphone</h3>
                 <p className="settings-row-description">
-                  Input device used for dictated text.
+                  Input device used for dictation.
                 </p>
               </div>
               <div className="settings-row-control" ref={micWrapRef}>
