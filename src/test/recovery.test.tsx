@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { RecoveryBanner } from "../components/recorder/RecoveryBanner";
+import { NoteRecoveryPrompt } from "../components/recorder/NoteRecoveryPrompt";
 import type { RecoverableRecordingDto } from "../lib/tauri";
 
 const recovery: RecoverableRecordingDto = {
@@ -13,26 +13,27 @@ const recovery: RecoverableRecordingDto = {
   bytesFound: 4096,
 };
 
-describe("RecoveryBanner", () => {
-  it("surfaces recoverable recordings with validate and discard actions", async () => {
+describe("NoteRecoveryPrompt", () => {
+  it("surfaces recoverable recordings with recover and discard actions", async () => {
     const user = userEvent.setup();
-    const onValidate = vi.fn();
+    const onRecover = vi.fn();
     const onDiscard = vi.fn();
     render(
-      <RecoveryBanner
-        recoveries={[recovery]}
-        onValidate={onValidate}
+      <NoteRecoveryPrompt
+        recovery={recovery}
+        onRecover={onRecover}
         onDiscard={onDiscard}
       />,
     );
 
-    expect(screen.getByText("Recoverable recording found")).toBeInTheDocument();
-    expect(screen.getByText(/4096 bytes/)).toBeInTheDocument();
+    expect(screen.getByText("Interrupted recording")).toBeInTheDocument();
+    expect(screen.getByText(/4\.0 KB/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Validate" }));
+    await user.click(screen.getByRole("button", { name: "Recover" }));
     await user.click(screen.getByRole("button", { name: "Discard" }));
 
-    expect(onValidate).toHaveBeenCalledWith("session-1");
+    expect(onRecover).toHaveBeenCalledWith("session-1");
     expect(onDiscard).toHaveBeenCalledWith("session-1");
   });
+
 });

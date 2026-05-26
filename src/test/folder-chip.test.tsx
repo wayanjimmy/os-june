@@ -33,6 +33,8 @@ function baseProps(folders: FolderDto[]) {
     onResumeRecording: vi.fn(),
     onFinishRecording: vi.fn(),
     onRetry: vi.fn(),
+    onRecoverRecording: vi.fn(),
+    onDiscardRecording: vi.fn(),
     onAssignFolder: vi.fn(),
     onRemoveFolder: vi.fn(),
     onCreateAndAssignFolder: vi.fn(),

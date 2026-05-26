@@ -662,17 +662,38 @@ input:focus-visible,
 }
 
 .note-row-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--foreground);
   font-size: var(--fs-md);
   font-weight: 400;
 }
 
+.note-row-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .note-row[data-selected="true"] .note-row-title {
   font-weight: 500;
+}
+
+.note-row-recovery-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-pill);
+  background: var(--warm-strong);
+}
+
+.sidebar[data-collapsed="true"] .note-row-recovery-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
 }
 
 .note-row-menu {
@@ -1142,32 +1163,6 @@ input:focus-visible,
   font-size: var(--fs-sm);
 }
 
-.note-overline-status {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-left: auto; /* float to the right end of the overline row */
-  color: var(--muted-foreground);
-}
-
-.note-overline-status .status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--r-pill);
-  background: var(--record);
-  animation: pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-
 .note-title {
   width: 100%;
   border: 0;
@@ -1194,7 +1189,7 @@ input:focus-visible,
   height: 30px;
   padding: 3px;
   border-radius: var(--r-md);
-  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  background: var(--surface-subtle);
   color: var(--muted-foreground);
 }
 
@@ -1295,7 +1290,7 @@ input:focus-visible,
   padding: var(--sp-1) var(--sp-3);
   border: 0;
   border-radius: var(--r-md);
-  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  background: var(--surface-subtle);
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
   font-weight: 500;
@@ -1350,7 +1345,7 @@ input:focus-visible,
   align-items: center;
   padding: 2px var(--sp-2);
   border-radius: var(--r-sm);
-  background: color-mix(in oklch, var(--muted) 75%, transparent);
+  background: var(--surface-subtle);
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
   font-weight: 500;
@@ -1492,7 +1487,7 @@ input:focus-visible,
   align-items: center;
   gap: 2px;
   padding: 4px;
-  border: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--r-lg);
   background: color-mix(in oklch, var(--popover) 70%, transparent);
   -webkit-backdrop-filter: blur(20px) saturate(1.7);
@@ -1998,39 +1993,55 @@ input:focus-visible,
 
 /* Banners ----------------------------------------------------------- */
 
-.error-banner,
-.recovery-banner {
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--card);
-  color: var(--foreground);
-  font-size: var(--fs-md);
-}
-
 .error-banner {
   margin: 0 0 var(--sp-5);
   padding: var(--sp-3) var(--sp-4);
-  border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+  border: 1px solid color-mix(in oklch, var(--destructive) 40%, transparent);
+  border-radius: var(--r-md);
   background: var(--destructive-soft);
   color: color-mix(in oklch, var(--destructive) 60%, var(--foreground));
+  font-size: var(--fs-md);
 }
 
-.recovery-banner {
+.note-recovery-prompt {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: var(--sp-5);
-  align-items: center;
   margin: 0 0 var(--sp-5);
-  padding: var(--sp-4) var(--sp-5);
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
 }
 
-.recovery-banner p {
-  margin: var(--sp-1) 0 0;
-}
-
-.recovery-actions {
+.note-recovery-prompt-message {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  margin: 0;
+  min-width: 0;
+  font-size: var(--fs-md);
+}
+
+.note-recovery-prompt-eyebrow {
+  display: inline-flex;
+  align-items: center;
   gap: var(--sp-2);
+  color: var(--warm-strong);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.note-recovery-prompt-body {
+  color: var(--muted-foreground);
+}
+
+.note-recovery-prompt-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-shrink: 0;
 }
 
 .editor-empty,
@@ -2143,7 +2154,7 @@ input:focus-visible,
 /* Granola-style settings card — quiet rounded container, no heavy chrome. */
 .settings-card {
   padding: var(--sp-5) var(--sp-6);
-  border: 1px solid color-mix(in oklch, var(--border) 55%, transparent);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--r-lg);
   background: var(--card);
 }
@@ -2159,7 +2170,7 @@ input:focus-visible,
   align-items: center;
   gap: var(--sp-6);
   padding: var(--sp-4) 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .settings-row:first-child {
@@ -2413,7 +2424,7 @@ input:focus-visible,
   gap: 3px;
   height: 28px;
   padding: 3px;
-  border: 1px solid color-mix(in oklch, var(--border) 55%, transparent);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
   background: transparent;
 }
@@ -2464,7 +2475,7 @@ input:focus-visible,
 }
 
 .btn-secondary {
-  background: color-mix(in oklch, var(--muted) 65%, transparent);
+  background: var(--surface-subtle);
   color: var(--secondary-foreground);
 }
 
@@ -2880,7 +2891,7 @@ input:focus-visible,
   height: 40px;
   margin: 0 calc(-1 * var(--sp-8));
   padding: 0 var(--sp-4);
-  border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
   background: color-mix(in oklch, var(--card) 78%, transparent);
   backdrop-filter: saturate(140%) blur(14px);
   -webkit-backdrop-filter: saturate(140%) blur(14px);
@@ -3129,7 +3140,7 @@ input:focus-visible,
   width: 22px;
   height: 22px;
   border-radius: var(--r-sm);
-  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  background: var(--surface-subtle);
   color: var(--muted-foreground);
 }
 
@@ -3351,7 +3362,7 @@ input:focus-visible,
   width: 22px;
   height: 22px;
   border-radius: var(--r-sm);
-  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  background: var(--surface-subtle);
   color: var(--muted-foreground);
 }
 
