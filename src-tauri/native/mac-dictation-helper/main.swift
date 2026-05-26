@@ -319,11 +319,11 @@ final class ShortcutKeyMonitor {
     private var shortcuts: [ShortcutKind: MonitoredShortcut] = [
         .pushToTalk: .bareFn,
         .toggle: MonitoredShortcut(
-            keyCode: 0,
-            code: "Fn",
-            label: "Fn",
-            modifiers: ShortcutModifiers(function: true),
-            pressCount: 2
+            keyCode: 0x31,
+            code: "Space",
+            label: "Ctrl+Opt+Space",
+            modifiers: ShortcutModifiers(control: true, option: true),
+            pressCount: 1
         ),
     ]
     private var activeIdentity: ShortcutIdentity?
@@ -419,7 +419,7 @@ final class ShortcutKeyMonitor {
 
     func startShortcutCapture(pressCount: Int = 1) {
         isCapturingShortcut = true
-        capturePressCount = pressCount == 2 ? 2 : 1
+        capturePressCount = 1
         cancelPendingPush()
         activeIdentity = nil
         cancelPendingBareFnCapture()

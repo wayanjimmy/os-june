@@ -49,12 +49,13 @@ const DEFAULT_SETTINGS: DictationSettingsDto = {
     },
   },
   toggleShortcut: {
-    code: "Fn",
-    label: "Fn+Fn",
-    pressCount: 2,
+    code: "Space",
+    label: "Ctrl+Opt+Space",
+    pressCount: 1,
     modifiers: {
       ...EMPTY_MODIFIERS,
-      function: true,
+      control: true,
+      option: true,
     },
   },
   microphone: {},
@@ -253,7 +254,7 @@ export function AppSettings({
       }
       const shortcut = shortcutFromCapturePayload(
         helperEvent.payload?.shortcut,
-        pressCountForKind(kind),
+        1,
       );
       if (!shortcut) {
         setShortcutError("Shortcut capture returned invalid data.");
@@ -308,7 +309,7 @@ export function AppSettings({
     try {
       await dictationHelperCommand({
         type: "start_shortcut_capture",
-        pressCount: pressCountForKind(kind),
+        pressCount: 1,
       });
     } catch (error) {
       setCapturingShortcut(undefined);
@@ -424,7 +425,7 @@ export function AppSettings({
 
             <ShortcutRow
               title="Toggle dictation"
-              description="Press this shortcut twice to start or stop dictation."
+              description="Press this shortcut to start or stop dictation."
               shortcut={settings.toggleShortcut}
               capturing={capturingShortcut === "toggle"}
               disabled={!!capturingShortcut && capturingShortcut !== "toggle"}
@@ -1102,17 +1103,10 @@ function shortcutFromCapturePayload(
 
   return {
     code: value.code,
-    label:
-      pressCount === 2 && !isRepeatedShortcutLabel(value.label)
-        ? `${value.label}+${value.label}`
-        : value.label,
+    label: value.label,
     modifiers,
-    pressCount,
+    pressCount: 1,
   };
-}
-
-function pressCountForKind(kind: DictationShortcutKind): 1 | 2 {
-  return kind === "toggle" ? 2 : 1;
 }
 
 function shortcutKindLabel(kind: DictationShortcutKind) {
@@ -1126,13 +1120,6 @@ function shortcutForKind(
   return kind === "toggle"
     ? settings.toggleShortcut
     : settings.pushToTalkShortcut;
-}
-
-function isRepeatedShortcutLabel(label: string) {
-  const keys = label.split("+").filter(Boolean);
-  if (keys.length === 0 || keys.length % 2 !== 0) return false;
-  const half = keys.length / 2;
-  return keys.slice(0, half).join("+") === keys.slice(half).join("+");
 }
 
 function stringPayloadValue(value: unknown) {

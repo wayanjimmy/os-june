@@ -47,14 +47,14 @@ const baseSettings: DictationSettingsDto = {
   },
   toggleShortcut: {
     code: "Space",
-    label: "Fn+Space+Fn+Space",
-    pressCount: 2,
+    label: "Ctrl+Opt+Space",
+    pressCount: 1,
     modifiers: {
       command: false,
-      control: false,
-      option: false,
+      control: true,
+      option: true,
       shift: false,
-      function: true,
+      function: false,
     },
   },
   microphone: {},
@@ -276,7 +276,7 @@ describe("AppSettings", () => {
     await waitFor(() =>
       expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
         type: "start_shortcut_capture",
-        pressCount: 2,
+        pressCount: 1,
       }),
     );
     mocks.eventHandler?.({
@@ -284,15 +284,16 @@ describe("AppSettings", () => {
         type: "shortcut_captured",
         payload: {
           shortcut: {
-            code: "Fn",
-            label: "Fn",
+            code: "Space",
+            label: "Ctrl+Opt+Space",
             modifiers: {
               command: false,
-              control: false,
-              option: false,
+              control: true,
+              option: true,
               shift: false,
-              function: true,
+              function: false,
             },
+            pressCount: 1,
           },
         },
       }),
@@ -300,16 +301,16 @@ describe("AppSettings", () => {
 
     await waitFor(() =>
       expect(mocks.setDictationShortcut).toHaveBeenCalledWith("toggle", {
-        code: "Fn",
-        label: "Fn+Fn",
+        code: "Space",
+        label: "Ctrl+Opt+Space",
         modifiers: {
           command: false,
-          control: false,
-          option: false,
+          control: true,
+          option: true,
           shift: false,
-          function: true,
+          function: false,
         },
-        pressCount: 2,
+        pressCount: 1,
       }),
     );
   });

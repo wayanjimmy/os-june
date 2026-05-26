@@ -59,7 +59,7 @@ impl Default for DictationSettings {
     fn default() -> Self {
         Self {
             push_to_talk_shortcut: DictationShortcutSetting::bare_fn(),
-            toggle_shortcut: DictationShortcutSetting::double_bare_fn(),
+            toggle_shortcut: DictationShortcutSetting::control_option_space(),
             microphone: DictationMicrophoneSetting::default(),
         }
     }
@@ -101,7 +101,7 @@ impl<'de> Deserialize<'de> for DictationSettings {
                 .unwrap_or_else(DictationShortcutSetting::bare_fn),
             toggle_shortcut: settings
                 .toggle_shortcut
-                .unwrap_or_else(DictationShortcutSetting::double_bare_fn),
+                .unwrap_or_else(DictationShortcutSetting::control_option_space),
             microphone: settings.microphone.unwrap_or(microphone),
         })
     }
@@ -140,13 +140,13 @@ impl<'de> Deserialize<'de> for DictationShortcutSetting {
 
         let shortcut: ShortcutSettingValue =
             serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        let press_count = shortcut.press_count.unwrap_or(1);
         Ok(Self {
             key_code: shortcut.key_code,
             code: shortcut.code,
             modifiers: shortcut.modifiers,
             label: shortcut.label,
-            press_count: normalize_press_count(shortcut.press_count.unwrap_or(1))
-                .map_err(serde::de::Error::custom)?,
+            press_count: if press_count == 2 { 2 } else { 1 },
         })
     }
 }
@@ -165,16 +165,17 @@ impl DictationShortcutSetting {
         }
     }
 
-    fn double_bare_fn() -> Self {
+    fn control_option_space() -> Self {
         Self {
-            key_code: 0,
-            code: "Fn".to_string(),
+            key_code: 0x31,
+            code: "Space".to_string(),
             modifiers: DictationShortcutModifiers {
-                function: true,
+                control: true,
+                option: true,
                 ..DictationShortcutModifiers::default()
             },
-            label: "Fn+Fn".to_string(),
-            press_count: 2,
+            label: "Ctrl+Opt+Space".to_string(),
+            press_count: 1,
         }
     }
 
@@ -314,17 +315,12 @@ impl DictationShortcutInput {
             ));
         }
 
-        let press_count = normalize_press_count(self.press_count.unwrap_or(1))
-            .map_err(|message| AppError::new("dictation_shortcut_press_count_invalid", message))?;
+        let press_count = 1;
 
         if is_bare_fn_input(&self.code, &self.modifiers) {
             return Ok(DictationShortcutSetting {
                 press_count,
-                label: if press_count == 2 {
-                    "Fn+Fn".to_string()
-                } else {
-                    "Fn".to_string()
-                },
+                label: "Fn".to_string(),
                 ..DictationShortcutSetting::bare_fn()
             });
         }
@@ -355,13 +351,6 @@ impl DictationShortcutInput {
             label: self.label,
             press_count,
         })
-    }
-}
-
-fn normalize_press_count(press_count: u8) -> Result<u8, String> {
-    match press_count {
-        1 | 2 => Ok(press_count),
-        _ => Err("Shortcut press count must be 1 or 2.".to_string()),
     }
 }
 
@@ -1432,7 +1421,7 @@ mod tests {
         );
         assert_eq!(
             settings.toggle_shortcut,
-            DictationShortcutSetting::double_bare_fn()
+            DictationShortcutSetting::control_option_space()
         );
     }
 
@@ -1449,7 +1438,7 @@ mod tests {
         );
         assert_eq!(
             settings.toggle_shortcut,
-            DictationShortcutSetting::double_bare_fn()
+            DictationShortcutSetting::control_option_space()
         );
         assert_eq!(settings.microphone.id.as_deref(), Some("usb"));
         assert_eq!(settings.microphone.name.as_deref(), Some("USB Mic"));
@@ -1458,14 +1447,14 @@ mod tests {
     #[test]
     fn deserializes_new_shortcut_settings() {
         let settings: DictationSettings = serde_json::from_str(
-            r#"{"pushToTalkShortcut":{"keyCode":49,"code":"Space","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt+Space","pressCount":1},"toggleShortcut":{"keyCode":49,"code":"Space","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt+Space+Ctrl+Opt+Space","pressCount":2},"microphone":{"id":null,"name":null}}"#,
+            r#"{"pushToTalkShortcut":{"keyCode":0,"code":"Fn","modifiers":{"command":false,"control":false,"option":false,"shift":false,"function":true},"label":"Fn","pressCount":1},"toggleShortcut":{"keyCode":49,"code":"Space","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt+Space","pressCount":1},"microphone":{"id":null,"name":null}}"#,
         )
         .expect("new settings should deserialize");
 
         assert_eq!(settings.push_to_talk_shortcut.press_count, 1);
-        assert_eq!(settings.toggle_shortcut.press_count, 2);
+        assert_eq!(settings.toggle_shortcut.press_count, 1);
         assert!(settings
-            .push_to_talk_shortcut
+            .toggle_shortcut
             .same_trigger_as(&DictationShortcutSetting {
                 key_code: 0x31,
                 code: "Space".to_string(),
@@ -1497,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_input_accepts_double_bare_fn() {
+    fn shortcut_input_normalizes_double_press_to_single_press() {
         let shortcut = DictationShortcutInput {
             code: "Fn".to_string(),
             modifiers: DictationShortcutModifiers {
@@ -1508,9 +1497,9 @@ mod tests {
             press_count: Some(2),
         }
         .into_setting()
-        .expect("double bare Fn should be accepted");
+        .expect("bare Fn should be accepted");
 
-        assert_eq!(shortcut, DictationShortcutSetting::double_bare_fn());
+        assert_eq!(shortcut, DictationShortcutSetting::bare_fn());
     }
 
     #[test]
@@ -1545,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_validation_distinguishes_press_count() {
+    fn duplicate_validation_rejects_same_key_combo() {
         let settings = DictationSettings {
             push_to_talk_shortcut: DictationShortcutSetting {
                 key_code: 0x31,
@@ -1564,8 +1553,8 @@ mod tests {
                     control: true,
                     ..DictationShortcutModifiers::default()
                 },
-                label: "Ctrl+Space+Ctrl+Space".to_string(),
-                press_count: 2,
+                label: "Ctrl+Space".to_string(),
+                press_count: 1,
             },
             microphone: DictationMicrophoneSetting::default(),
         };
@@ -1574,12 +1563,6 @@ mod tests {
             &settings,
             DictationShortcutKind::PushToTalk,
             &settings.push_to_talk_shortcut
-        )
-        .is_ok());
-        assert!(validate_shortcut_update(
-            &settings,
-            DictationShortcutKind::PushToTalk,
-            &settings.toggle_shortcut
         )
         .is_err());
     }
