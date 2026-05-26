@@ -1,4 +1,4 @@
-# OS Notetaker
+# OS Scribe
 
 macOS-first Tauri MVP for local notes, reliable local audio recording, saved audio validation, batch transcription, and generated notes.
 
