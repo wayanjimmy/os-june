@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSettings } from "../components/settings/AppSettings";
 import type { DictationSettingsDto } from "../lib/tauri";
+import packageJson from "../../package.json";
 
 const mocks = vi.hoisted(() => ({
   dictationSettings: vi.fn(),
@@ -181,6 +182,7 @@ describe("AppSettings", () => {
         sourceMode="microphoneOnly"
         checkingSourceReadiness={false}
         onSourceModeChange={onSourceModeChange}
+        onOpenOnboarding={vi.fn()}
       />,
     );
 
@@ -216,6 +218,7 @@ describe("AppSettings", () => {
         sourceMode="microphoneOnly"
         checkingSourceReadiness={false}
         onSourceModeChange={vi.fn()}
+        onOpenOnboarding={vi.fn()}
       />,
     );
 
@@ -322,6 +325,7 @@ describe("AppSettings", () => {
         sourceMode="microphoneOnly"
         checkingSourceReadiness={false}
         onSourceModeChange={vi.fn()}
+        onOpenOnboarding={vi.fn()}
       />,
     );
 
@@ -358,6 +362,7 @@ describe("AppSettings", () => {
         sourceMode="microphoneOnly"
         checkingSourceReadiness={false}
         onSourceModeChange={vi.fn()}
+        onOpenOnboarding={vi.fn()}
       />,
     );
 
@@ -399,5 +404,24 @@ describe("AppSettings", () => {
       "generation",
       "venice-uncensored",
     );
+  });
+
+  it("shows app version and can reopen onboarding", async () => {
+    const user = userEvent.setup();
+    const onOpenOnboarding = vi.fn();
+    render(
+      <AppSettings
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onSourceModeChange={vi.fn()}
+        onOpenOnboarding={onOpenOnboarding}
+      />,
+    );
+
+    expect(await screen.findByText("Version")).toBeInTheDocument();
+    expect(screen.getByText(packageJson.version)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Run onboarding" }));
+    expect(onOpenOnboarding).toHaveBeenCalledTimes(1);
   });
 });

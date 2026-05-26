@@ -2059,6 +2059,12 @@ input:focus-visible,
   gap: var(--sp-3);
 }
 
+.settings-version-text {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+}
+
 .settings-permission-control {
   min-width: 225px;
   justify-content: flex-end;

@@ -29,6 +29,7 @@ import type {
 } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
 import { Switch } from "../ui/Switch";
+import packageJson from "../../../package.json";
 
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
   command: false,
@@ -72,6 +73,7 @@ type AppSettingsProps = {
   sourceReadiness?: RecordingSourceReadinessDto;
   checkingSourceReadiness: boolean;
   onSourceModeChange: (mode: RecordingSourceMode) => void;
+  onOpenOnboarding: () => void;
 };
 
 type DictationPermissionStatus = {
@@ -84,6 +86,7 @@ export function AppSettings({
   sourceReadiness,
   checkingSourceReadiness,
   onSourceModeChange,
+  onOpenOnboarding,
 }: AppSettingsProps) {
   const [settings, setSettings] =
     useState<DictationSettingsDto>(DEFAULT_SETTINGS);
@@ -626,6 +629,45 @@ export function AppSettings({
               options={generationOptions}
               onOpen={() => openModelPicker("generation")}
             />
+          </div>
+        </div>
+      </section>
+
+      <section className="settings-group" aria-labelledby="about-heading">
+        <h2 id="about-heading" className="settings-group-heading">
+          About
+        </h2>
+        <div className="settings-card">
+          <div className="settings-rows">
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">Version</h3>
+              </div>
+              <div className="settings-row-control">
+                <span className="settings-version-text">
+                  {packageJson.version}
+                </span>
+              </div>
+            </div>
+
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">Onboarding</h3>
+                <p className="settings-row-description">
+                  Review microphone, accessibility, and audio setup.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onOpenOnboarding}
+                >
+                  <IconArrowRotateClockwise size={14} />
+                  Run onboarding
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </section>

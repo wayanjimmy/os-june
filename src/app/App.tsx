@@ -39,6 +39,8 @@ import { shouldPollProcessingStatus } from "./processing-polling";
 import { createInitialState, notesReducer } from "./state/app-state";
 
 const ONBOARDING_COMPLETE_KEY = "os-scribe:onboarding:permissions:v1";
+const ONBOARDING_ROUTE_PARAM = "onboarding";
+const ONBOARDING_ROUTE_HASH = "#onboarding";
 
 export function App() {
   const [state, dispatch] = useReducer(
@@ -57,9 +59,21 @@ export function App() {
     useState<RecordingSourceReadinessDto>();
   const [checkingSourceReadiness, setCheckingSourceReadiness] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(
-    () => !onboardingComplete(),
+    () => !onboardingComplete() || onboardingRouteRequested(),
   );
   const selectedNote = state.selectedNote;
+
+  useEffect(() => {
+    function showOnboardingFromRoute() {
+      if (onboardingRouteRequested()) setShowOnboarding(true);
+    }
+    window.addEventListener("hashchange", showOnboardingFromRoute);
+    window.addEventListener("popstate", showOnboardingFromRoute);
+    return () => {
+      window.removeEventListener("hashchange", showOnboardingFromRoute);
+      window.removeEventListener("popstate", showOnboardingFromRoute);
+    };
+  }, []);
 
   useEffect(() => {
     bootstrapApp()
@@ -402,6 +416,7 @@ export function App() {
                 sourceReadiness={sourceReadiness}
                 checkingSourceReadiness={checkingSourceReadiness}
                 onSourceModeChange={setSourceMode}
+                onOpenOnboarding={() => setShowOnboarding(true)}
               />
             ) : activeView === "folders" ? (
               <FoldersWorkspace
@@ -570,6 +585,21 @@ function markOnboardingComplete() {
     localStorage.setItem(ONBOARDING_COMPLETE_KEY, "complete");
   } catch {
     // If storage is unavailable, keep the app usable for this session.
+  }
+}
+
+function onboardingRouteRequested() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const value = params.get(ONBOARDING_ROUTE_PARAM)?.toLowerCase();
+    return (
+      value === "1" ||
+      value === "true" ||
+      value === "permissions" ||
+      window.location.hash.toLowerCase() === ONBOARDING_ROUTE_HASH
+    );
+  } catch {
+    return false;
   }
 }
 
