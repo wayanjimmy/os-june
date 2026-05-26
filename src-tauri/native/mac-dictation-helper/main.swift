@@ -118,30 +118,69 @@ func runOnMain(_ work: @escaping () -> Void) {
 final class FnKeyMonitor {
     static let shared = FnKeyMonitor()
 
-    private var monitor: Any?
+    private var globalMonitor: Any?
+    private var eventTap: CFMachPort?
+    private var eventTapRunLoopSource: CFRunLoopSource?
     private var fnIsDown = false
 
     private init() {}
 
     func start() {
-        guard monitor == nil else {
+        guard globalMonitor == nil, eventTap == nil else {
             return
         }
 
-        guard let monitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] event in
-            self?.handle(event)
-        }) else {
+        startGlobalMonitor()
+        startEventTap()
+
+        if globalMonitor == nil, eventTap == nil {
             emit("fn_monitor_unavailable", [
                 "message": "Could not monitor Fn/Globe key events.",
             ])
+        }
+    }
+
+    fileprivate func enableEventTap() {
+        guard let eventTap else {
             return
         }
 
-        self.monitor = monitor
+        CGEvent.tapEnable(tap: eventTap, enable: true)
     }
 
-    private func handle(_ event: NSEvent) {
-        let nextIsDown = event.modifierFlags.contains(.function)
+    fileprivate func handle(flags: CGEventFlags) {
+        observe(isDown: flags.contains(.maskSecondaryFn))
+    }
+
+    private func startGlobalMonitor() {
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] event in
+            self?.observe(isDown: event.modifierFlags.contains(.function))
+        })
+    }
+
+    private func startEventTap() {
+        let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .tailAppendEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: fnEventTapCallback,
+            userInfo: userInfo
+        ) else {
+            return
+        }
+
+        eventTap = tap
+        eventTapRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        if let eventTapRunLoopSource {
+            CFRunLoopAddSource(CFRunLoopGetMain(), eventTapRunLoopSource, .commonModes)
+        }
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func observe(isDown nextIsDown: Bool) {
         guard nextIsDown != fnIsDown else {
             return
         }
@@ -149,6 +188,24 @@ final class FnKeyMonitor {
         fnIsDown = nextIsDown
         emit(nextIsDown ? "fn_key_down" : "fn_key_up")
     }
+}
+
+private let fnEventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
+    guard let userInfo else {
+        return Unmanaged.passUnretained(event)
+    }
+
+    let monitor = Unmanaged<FnKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        monitor.enableEventTap()
+        return Unmanaged.passUnretained(event)
+    }
+
+    if type == .flagsChanged {
+        monitor.handle(flags: event.flags)
+    }
+
+    return Unmanaged.passUnretained(event)
 }
 
 final class FocusTargetController {
@@ -829,6 +886,9 @@ func handleCommandLine(_ line: String) {
     }
 }
 
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+
 emit("ready")
 FnKeyMonitor.shared.start()
 FocusTargetController.shared.start()
@@ -840,4 +900,4 @@ Thread.detachNewThread {
     }
 }
 
-RunLoop.main.run()
+app.run()

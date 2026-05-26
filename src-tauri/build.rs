@@ -214,7 +214,7 @@ fn build_dictation_helper() {
   <string>0.1.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
-  <key>LSBackgroundOnly</key>
+  <key>LSUIElement</key>
   <true/>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
