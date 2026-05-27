@@ -32,6 +32,7 @@ type SidebarProps = {
   onSelectFolder: (folderId: string) => void;
   onSelectNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
+  recoverableNoteIds?: ReadonlySet<string>;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 };
@@ -51,6 +52,7 @@ export function Sidebar({
   onCreateNote,
   onSelectNote,
   onDeleteNote,
+  recoverableNoteIds,
   collapsed = false,
   onToggleCollapsed,
 }: SidebarProps) {
@@ -230,6 +232,7 @@ export function Sidebar({
                   selected={
                     activeView === "notes" && selectedNoteId === note.id
                   }
+                  recoverable={recoverableNoteIds?.has(note.id) ?? false}
                   onSelect={() => {
                     onChangeView("notes");
                     onSelectNote(note.id);
@@ -290,11 +293,13 @@ export function Sidebar({
 function NoteRow({
   note,
   selected,
+  recoverable,
   onSelect,
   onOpenMenu,
 }: {
   note: NoteListItemDto;
   selected: boolean;
+  recoverable: boolean;
   onSelect: () => void;
   onOpenMenu: (anchor: HTMLElement) => void;
 }) {
@@ -305,6 +310,7 @@ function NoteRow({
     <article
       className="note-row"
       data-selected={selected}
+      data-recoverable={recoverable || undefined}
       onContextMenu={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -315,7 +321,16 @@ function NoteRow({
         <span className="note-row-icon">
           <IconFileText size={15} />
         </span>
-        <span className="note-row-title">{title}</span>
+        <span className="note-row-title">
+          <span className="note-row-title-text">{title}</span>
+          {recoverable ? (
+            <span
+              className="note-row-recovery-dot"
+              aria-label="Interrupted recording"
+              title="Interrupted recording"
+            />
+          ) : null}
+        </span>
       </button>
       <button
         ref={menuRef}

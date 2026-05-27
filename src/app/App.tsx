@@ -1,12 +1,11 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { DictionaryWorkspace } from "../components/dictionary/DictionaryWorkspace";
 import { FoldersWorkspace } from "../components/folders/FoldersWorkspace";
 import { NoteFromFolderCrumb } from "../components/folders/NoteFromFolderCrumb";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import { PermissionsOnboarding } from "../components/onboarding/PermissionsOnboarding";
-import { RecoveryBanner } from "../components/recorder/RecoveryBanner";
 import { AppSettings } from "../components/settings/AppSettings";
 import { Sidebar, type SidebarView } from "../components/sidebar/Sidebar";
 import { StylesWorkspace } from "../components/styles/StylesWorkspace";
@@ -35,7 +34,11 @@ import {
   playRecordingSound,
   preloadRecordingSounds,
 } from "../lib/recording-sounds";
-import type { NoteDto, RecordingStatusDto } from "../lib/tauri";
+import type {
+  BootstrapResponse,
+  NoteDto,
+  RecordingStatusDto,
+} from "../lib/tauri";
 import type {
   RecordingSourceMode,
   RecordingSourceReadinessDto,
@@ -67,6 +70,31 @@ export function App() {
     () => !onboardingComplete() || onboardingRouteRequested(),
   );
   const selectedNote = state.selectedNote;
+  const recoveriesByNote = useMemo(() => {
+    const map = new Map<string, (typeof state.activeRecoveries)[number]>();
+    for (const recovery of state.activeRecoveries) {
+      // If multiple recoveries land on one note, the first one wins —
+      // backend should only surface one per note in practice.
+      if (!map.has(recovery.noteId)) map.set(recovery.noteId, recovery);
+    }
+    return map;
+  }, [state.activeRecoveries]);
+  const recoverableNoteIds = useMemo(
+    () => new Set(recoveriesByNote.keys()),
+    [recoveriesByNote],
+  );
+  const selectedRecovery = selectedNote
+    ? recoveriesByNote.get(selectedNote.id)
+    : undefined;
+
+  function handleRecovery(sessionId: string, action: "validate" | "discard") {
+    void recoverRecording(sessionId, action)
+      .then((note) => {
+        dispatch({ type: "noteUpdated", note });
+        dispatch({ type: "recoveryRemoved", sessionId });
+      })
+      .catch((err: unknown) => setError(messageFromError(err)));
+  }
 
   useEffect(() => {
     preloadRecordingSounds();
@@ -87,8 +115,13 @@ export function App() {
   useEffect(() => {
     bootstrapApp()
       .then(async (payload) => {
-        dispatch({ type: "bootstrapLoaded", payload });
-        const firstNoteId = payload.notes[0]?.id;
+        const seeded = withFakeRecovery(payload);
+        dispatch({ type: "bootstrapLoaded", payload: seeded.payload });
+        if (seeded.fakeNote) {
+          dispatch({ type: "noteLoaded", note: seeded.fakeNote });
+          return;
+        }
+        const firstNoteId = seeded.payload.notes[0]?.id;
         if (firstNoteId) {
           const note = await getNote(firstNoteId);
           dispatch({ type: "noteLoaded", note });
@@ -413,31 +446,13 @@ export function App() {
         onSelectFolder={(folderId) => handleSelectFolder(folderId)}
         onSelectNote={(noteId) => void handleSelectNote(noteId)}
         onDeleteNote={(noteId) => void handleDeleteNote(noteId)}
+        recoverableNoteIds={recoverableNoteIds}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
       <section className="main-panel">
         <div className="main-panel-body">
           {error ? <p className="error-banner">{error}</p> : null}
-          <RecoveryBanner
-            recoveries={state.activeRecoveries}
-            onValidate={(sessionId) =>
-              void recoverRecording(sessionId, "validate")
-                .then((note) => {
-                  dispatch({ type: "noteUpdated", note });
-                  dispatch({ type: "recoveriesUpdated", recoveries: [] });
-                })
-                .catch((err: unknown) => setError(messageFromError(err)))
-            }
-            onDiscard={(sessionId) =>
-              void recoverRecording(sessionId, "discard")
-                .then((note) => {
-                  dispatch({ type: "noteUpdated", note });
-                  dispatch({ type: "recoveriesUpdated", recoveries: [] });
-                })
-                .catch((err: unknown) => setError(messageFromError(err)))
-            }
-          />
           <div className="workspace">
             {activeView === "settings" ? (
               <AppSettings
@@ -520,6 +535,13 @@ export function App() {
                   sourceMode={sourceMode}
                   sourceReadiness={sourceReadiness}
                   checkingSourceReadiness={checkingSourceReadiness}
+                  recovery={selectedRecovery}
+                  onRecoverRecording={(sessionId) =>
+                    handleRecovery(sessionId, "validate")
+                  }
+                  onDiscardRecording={(sessionId) =>
+                    handleRecovery(sessionId, "discard")
+                  }
                   onTitleChange={(title) => void handleUpdateNote({ title })}
                   onContentChange={(sourceNoteId, editedContent) => {
                     // Blur fired by an editor that was already torn
@@ -690,6 +712,78 @@ function startingRecordingStatus(
     bytesWritten: 0,
     sources,
     warnings: [],
+  };
+}
+
+// Dev-only helper: pass `?fake-recovery=1` in the URL to inject a fake
+// recoverable recording so the inline recovery prompt can be iterated
+// on without crashing a real recording. No-op in production builds.
+function withFakeRecovery(payload: BootstrapResponse): {
+  payload: BootstrapResponse;
+  fakeNote?: NoteDto;
+} {
+  if (!import.meta.env.DEV) return { payload };
+  let enabled = false;
+  try {
+    enabled =
+      new URLSearchParams(window.location.search).get("fake-recovery") ===
+        "1" ||
+      window.location.hash.toLowerCase() === "#fake-recovery" ||
+      localStorage.getItem("os-scribe:dev:fake-recovery") === "1";
+  } catch {
+    return { payload };
+  }
+  if (!enabled) return { payload };
+
+  const noteId = "fake-recovery-note";
+  const sessionId = "fake-recovery-session";
+  const now = new Date().toISOString();
+  const fakeListItem = {
+    id: noteId,
+    title: "Team sync",
+    preview: "Recovered from an interrupted recording",
+    processingStatus: "recoverable" as const,
+    folderIds: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  const fakeNote: NoteDto = {
+    ...fakeListItem,
+    generatedContent: "",
+    editedContent: "",
+  };
+  return {
+    payload: {
+      ...payload,
+      notes: [fakeListItem, ...payload.notes],
+      activeRecoveries: [
+        {
+          sessionId,
+          noteId,
+          sourceMode: "microphonePlusSystem",
+          startedAt: now,
+          partialPathPresent: true,
+          finalPathPresent: false,
+          bytesFound: 2_400_000,
+          sources: [
+            {
+              source: "microphone",
+              partialPathPresent: true,
+              finalPathPresent: false,
+              bytesFound: 1_200_000,
+            },
+            {
+              source: "system",
+              partialPathPresent: true,
+              finalPathPresent: false,
+              bytesFound: 1_200_000,
+            },
+          ],
+        },
+        ...payload.activeRecoveries,
+      ],
+    },
+    fakeNote,
   };
 }
 

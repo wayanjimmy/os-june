@@ -30,7 +30,8 @@ export type NotesAction =
   | { type: "folderSelected"; folderId?: string }
   | { type: "foldersLoaded"; folders: FolderDto[] }
   | { type: "notesLoaded"; notes: NoteListItemDto[] }
-  | { type: "recoveriesUpdated"; recoveries: RecoverableRecordingDto[] };
+  | { type: "recoveriesUpdated"; recoveries: RecoverableRecordingDto[] }
+  | { type: "recoveryRemoved"; sessionId: string };
 
 export function createInitialState(): NotesState {
   return {
@@ -140,6 +141,13 @@ export function notesReducer(
       return {
         ...state,
         activeRecoveries: action.recoveries,
+      };
+    case "recoveryRemoved":
+      return {
+        ...state,
+        activeRecoveries: state.activeRecoveries.filter(
+          (recovery) => recovery.sessionId !== action.sessionId,
+        ),
       };
     default:
       return state;

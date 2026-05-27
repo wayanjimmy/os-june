@@ -15,9 +15,11 @@ import type {
   RecordingSourceMode,
   RecordingSourceReadinessDto,
   RecordingStatusDto,
+  RecoverableRecordingDto,
 } from "../../lib/tauri";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { RecorderBar } from "../recorder/RecorderBar";
+import { NoteRecoveryPrompt } from "../recorder/NoteRecoveryPrompt";
 import { NotePreview } from "./NotePreview";
 
 type NoteEditorProps = {
@@ -27,6 +29,7 @@ type NoteEditorProps = {
   sourceMode: RecordingSourceMode;
   sourceReadiness?: RecordingSourceReadinessDto;
   checkingSourceReadiness: boolean;
+  recovery?: RecoverableRecordingDto;
   onTitleChange: (title: string) => void;
   onContentChange: (noteId: string, content: string) => void;
   onSourceModeChange: (mode: RecordingSourceMode) => void;
@@ -35,6 +38,8 @@ type NoteEditorProps = {
   onResumeRecording: (sessionId: string) => void;
   onFinishRecording: (sessionId: string) => void;
   onRetry: () => void;
+  onRecoverRecording: (sessionId: string) => void;
+  onDiscardRecording: (sessionId: string) => void;
   onAssignFolder: (folderId: string) => void;
   onRemoveFolder: (folderId: string) => void;
   onCreateAndAssignFolder: (name: string) => void;
@@ -69,6 +74,7 @@ export function NoteEditor({
   sourceMode,
   sourceReadiness,
   checkingSourceReadiness,
+  recovery,
   onTitleChange,
   onContentChange,
   onSourceModeChange,
@@ -77,6 +83,8 @@ export function NoteEditor({
   onResumeRecording,
   onFinishRecording,
   onRetry,
+  onRecoverRecording,
+  onDiscardRecording,
   onAssignFolder,
   onRemoveFolder,
   onCreateAndAssignFolder,
@@ -105,7 +113,6 @@ export function NoteEditor({
   // covers the "still processing" affordance, and the record button
   // stays disabled via processingLock so nothing can re-trigger.
   const shellState = recordingForNote?.state ?? "idle";
-  const processing = transientStatus(note.processingStatus);
   const processingText = processingMessage(note.processingStatus);
   const canRetry =
     note.processingStatus === "failed" &&
@@ -116,6 +123,7 @@ export function NoteEditor({
   // error, so background readiness only informs the popover hint.
   const recordDisabled =
     processingLock ||
+    !!recovery ||
     (sourceReadiness?.sources.some(
       (source) => source.required && !source.ready,
     ) ??
@@ -138,12 +146,6 @@ export function NoteEditor({
             onRemove={onRemoveFolder}
             onCreateAndAssign={onCreateAndAssignFolder}
           />
-          {processing ? (
-            <span className="note-overline-status">
-              <span className="status-dot" aria-hidden />
-              {processing}
-            </span>
-          ) : null}
         </div>
         <input
           className="note-title"
@@ -161,6 +163,14 @@ export function NoteEditor({
       </header>
 
       <section className="editor-content">
+        {recovery ? (
+          <NoteRecoveryPrompt
+            recovery={recovery}
+            onRecover={onRecoverRecording}
+            onDiscard={onDiscardRecording}
+            disabled={processingLock}
+          />
+        ) : null}
         {activeTab === "transcription" ? (
           <div className="transcript-view">
             {transcriptToText(note) ? (
@@ -486,27 +496,6 @@ function FolderChip({
       ) : null}
     </div>
   );
-}
-
-/* Status is only worth surfacing while something is actually happening —
- * a steady-state "Draft"/"Ready" badge is noise, so we drop it. */
-function transientStatus(status: NoteDto["processingStatus"]): string | null {
-  switch (status) {
-    case "recording":
-      return "Recording";
-    case "validating":
-      return "Validating";
-    case "transcribing":
-      return "Transcribing";
-    case "generating":
-      return "Writing notes";
-    case "failed":
-      return "Needs attention";
-    case "recoverable":
-      return "Recoverable";
-    default:
-      return null;
-  }
 }
 
 function processingMessage(status: NoteDto["processingStatus"]): string | null {
