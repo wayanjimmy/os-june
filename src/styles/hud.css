@@ -50,8 +50,11 @@ body {
   --hud-border: var(--border);
   --hud-bar: var(--foreground);
   --hud-handle: color-mix(in oklch, var(--foreground) 58%, transparent);
-  --hud-stop-bg: color-mix(in oklch, var(--foreground) 10%, transparent);
-  --hud-stop-bg-hover: color-mix(in oklch, var(--foreground) 12%, transparent);
+  --hud-stop-bg: color-mix(in oklch, var(--foreground) 5%, transparent);
+  /* Hover surface uses --accent (the same raised-gray token the sidebar and
+   * other controls use for hover) so the HUD reads as part of the same app
+   * vocabulary instead of a bespoke white wash. */
+  --hud-stop-bg-hover: var(--accent);
   --hud-danger: var(--destructive);
   --hud-warning: var(--warm-strong);
   --hud-alert: var(--hud-danger);
@@ -60,7 +63,12 @@ body {
   align-items: center;
   gap: var(--sp-1);
   height: 32px;
-  padding: var(--sp-1);
+  /* 3px inset (+ 1px border) lets inner controls sit at 6px radius perfectly
+   * concentric with the HUD's 10px outer radius. The previous 4px inset was
+   * mathematically concentric too, but with the stop button's tiny inner
+   * glyph the curved corner reads as extra right padding — the tighter
+   * inset closes that optical gap on both sides at once. */
+  padding: 3px;
   border: 1px solid var(--hud-border);
   border-radius: var(--r-lg);
   background: var(--hud-bg);
@@ -95,7 +103,9 @@ body {
   place-items: center;
   width: 24px;
   height: 24px;
-  border-radius: var(--r-sm);
+  /* Concentric with the HUD: outer radius 10px minus 1px border minus 3px
+   * padding leaves 6px for the inner control curve. */
+  border-radius: 6px;
   color: var(--hud-handle);
   cursor: grab;
   overflow: hidden;
@@ -225,7 +235,7 @@ body {
   height: 24px;
   padding: 0;
   border: 0;
-  border-radius: var(--r-sm);
+  border-radius: 6px;
   background: var(--hud-stop-bg);
   color: var(--foreground);
   cursor: pointer;
@@ -243,7 +253,13 @@ body {
   pointer-events: none;
 }
 
-.hud-stop:hover::before,
+/* Hover state is driven exclusively by the Rust-side native cursor hit test
+ * (see hud.ts → "hud-stop-hover" event listener). We deliberately do NOT
+ * include `:hover` here: on macOS, WebKit's `:hover` matching can latch onto
+ * the button while the panel is briefly key (during a click) and stick after
+ * the panel resigns key, which read as the stop button auto-highlighting on
+ * the next dictation. The `.is-hovered` class is set/cleared every poll, so
+ * we know exactly when it should be on. */
 .hud-stop.is-hovered::before {
   opacity: 1;
 }
@@ -293,14 +309,28 @@ body {
   display: none;
 }
 
-.hud[data-state="silent-error"] {
-  --hud-alert: var(--hud-warning);
-
+/* Both error states share the same text-only, shaking pill shape — the only
+ * difference is the tint (warm for "Nothing recorded", red for hard errors).
+ * Subtle "not allowed" wobble fires once when the state lands. */
+.hud[data-state="silent-error"],
+.hud[data-state="error"] {
   gap: var(--sp-2);
   padding-inline: var(--sp-3) var(--sp-4);
-  border-color: color-mix(in oklch, var(--hud-warning) 62%, var(--border));
-  background: color-mix(in oklch, var(--popover) 88%, var(--hud-warning) 12%);
-  animation: hud-shake 240ms var(--ease-out);
+  animation: hud-shake 380ms var(--ease-out);
+}
+
+.hud[data-state="silent-error"] {
+  --hud-alert: var(--hud-warning);
+  /* Border kept close to the surface tint so it reads as one cohesive warm
+   * pill, not a tinted body inside an orange ring. */
+  border-color: color-mix(in oklch, var(--hud-warning) 28%, var(--border));
+  background: color-mix(in oklch, var(--popover) 78%, var(--hud-warning) 22%);
+}
+
+.hud[data-state="error"] {
+  --hud-alert: var(--hud-danger);
+  border-color: color-mix(in oklch, var(--hud-danger) 28%, var(--border));
+  background: color-mix(in oklch, var(--popover) 78%, var(--hud-danger) 22%);
 }
 
 .hud[data-state="transcribing"] .hud-viz,
@@ -312,7 +342,7 @@ body {
 
 .hud[data-state="silent-error"] .hud-viz,
 .hud[data-state="error"] .hud-viz {
-  width: 16px;
+  display: none;
 }
 
 .hud[data-state="transcribing"] .hud-bars,
@@ -327,12 +357,8 @@ body {
   display: flex;
 }
 
-.hud[data-state="silent-error"] .hud-error-mark,
-.hud[data-state="error"] .hud-error-mark {
-  display: flex;
-}
-
-.hud[data-state="silent-error"] .hud-error-text {
+.hud[data-state="silent-error"] .hud-error-text,
+.hud[data-state="error"] .hud-error-text {
   display: block;
 }
 
@@ -342,11 +368,6 @@ body {
 .hud[data-state="silent-error"] .hud-stop,
 .hud[data-state="error"] .hud-stop {
   display: none;
-}
-
-.hud[data-state="silent-error"],
-.hud[data-state="error"] {
-  border-color: color-mix(in oklch, var(--hud-alert) 50%, var(--border));
 }
 
 /* Rapid blur-fade exit. Triggered by setting data-state="exiting" before
@@ -359,26 +380,40 @@ body {
   pointer-events: none;
 }
 
+/* Decaying horizontal oscillation modeled on the macOS "not allowed" wobble.
+ * Multiple stops keep the curve smooth instead of notchy; amplitude shrinks
+ * each pass so the pill settles instead of stopping cold. */
 @keyframes hud-shake {
-  0%,
-  100% {
+  0% {
     transform: translateX(0);
   }
 
-  22% {
-    transform: translateX(-2px);
+  12% {
+    transform: translateX(-3px);
+  }
+
+  28% {
+    transform: translateX(3px);
   }
 
   44% {
+    transform: translateX(-2px);
+  }
+
+  60% {
     transform: translateX(2px);
   }
 
-  66% {
+  76% {
     transform: translateX(-1px);
   }
 
-  88% {
+  90% {
     transform: translateX(1px);
+  }
+
+  100% {
+    transform: translateX(0);
   }
 }
 

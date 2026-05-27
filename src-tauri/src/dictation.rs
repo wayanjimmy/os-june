@@ -60,12 +60,32 @@ pub struct ShortcutActivationState {
     controller: Mutex<ShortcutActivationController>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct HudClientRect {
     left: f64,
     right: f64,
     top: f64,
     bottom: f64,
+}
+
+/// Stop-button hover detection + transparent-gutter click pass-through, both
+/// driven entirely from the Rust side.
+///
+/// JS-side polling (rAF or setInterval) gets throttled by WebKit on pages
+/// that aren't the focused window, and the HUD is a non-activating panel that
+/// never becomes "key" — that's why hover only flickered to life on
+/// mouse-down. By moving the cursor read + hit test into a native thread and
+/// pushing the result to JS as a Tauri event, the visual update no longer
+/// depends on the WebView's wake state or JS timer cadence.
+///
+/// The same thread also flips `setIgnoresMouseEvents` so clicks in the
+/// transparent gutter around the pill fall through to whatever app is under
+/// the HUD, while clicks on the pill itself still register normally.
+pub struct HudHoverState {
+    stop_bounds: Mutex<Option<HudClientRect>>,
+    pill_bounds: Mutex<Option<HudClientRect>>,
+    last_hover: std::sync::atomic::AtomicBool,
+    last_passthrough: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -444,6 +464,16 @@ pub fn setup(app: &mut tauri::App) {
     app.manage(HudPosition {
         inner: Mutex::new(None),
     });
+    app.manage(HudHoverState {
+        stop_bounds: Mutex::new(None),
+        pill_bounds: Mutex::new(None),
+        last_hover: std::sync::atomic::AtomicBool::new(false),
+        // Start in pass-through state — the HUD isn't even visible yet, and
+        // we never want to block clicks until the cursor is genuinely on the
+        // pill.
+        last_passthrough: std::sync::atomic::AtomicBool::new(true),
+    });
+    spawn_hud_hover_thread(app.handle().clone());
     if let Err(error) = configure_hud_window(app.handle()) {
         eprintln!("failed to configure dictation HUD: {error}");
     }
@@ -590,31 +620,162 @@ pub fn latest_dictation_event(state: State<'_, LastDictationEvent>) -> Option<St
     state.event.lock().ok().and_then(|event| event.clone())
 }
 
-#[tauri::command]
-pub fn dictation_hud_hit_test(app: AppHandle, rect: HudClientRect) -> Result<bool, AppError> {
-    let Some(hud) = app.get_webview_window("hud") else {
-        return Ok(false);
-    };
-    if !hud.is_visible().unwrap_or(false) {
-        return Ok(false);
+/// CoreGraphics-backed cursor query. Returns position in logical points with
+/// top-left origin.
+///
+/// We can't use `WebviewWindow::cursor_position()` here: on macOS that path
+/// only refreshes the cached cursor when the window is "key", and our HUD is
+/// a non-activating NSPanel that never becomes key without a click. That's
+/// why hover only updates on mouse-down — the cached cursor only moves when
+/// AppKit happens to re-deliver an event during a click.
+///
+/// CGEvent has no such dependency: it pulls the current cursor from the
+/// window server directly.
+#[cfg(target_os = "macos")]
+fn cursor_position_via_cg() -> Option<(f64, f64)> {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
     }
 
-    let cursor = hud
-        .cursor_position()
-        .map_err(|error| AppError::new("hud_cursor_position_failed", error.to_string()))?;
-    let position = hud
-        .outer_position()
-        .map_err(|error| AppError::new("hud_position_failed", error.to_string()))?;
-    let scale_factor = hud
-        .scale_factor()
-        .map_err(|error| AppError::new("hud_scale_factor_failed", error.to_string()))?;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn CGEventGetLocation(event: *const std::ffi::c_void) -> CGPoint;
+        fn CFRelease(cf: *const std::ffi::c_void);
+    }
 
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let point = CGEventGetLocation(event);
+        CFRelease(event);
+        Some((point.x, point.y))
+    }
+}
+
+/// Bounds setter for the stop button (used for hover hit-test).
+/// JS calls this with the rect on entering `listening`, and with `None` when
+/// leaving listening.
+#[tauri::command]
+pub fn dictation_hud_set_stop_bounds(state: State<'_, HudHoverState>, rect: Option<HudClientRect>) {
+    if let Ok(mut guard) = state.stop_bounds.lock() {
+        *guard = rect;
+    }
+}
+
+/// Bounds setter for the pill itself (used to decide click pass-through on
+/// the transparent gutter). JS calls this on show with the `.hud` element's
+/// rect, and with `None` on hide.
+#[tauri::command]
+pub fn dictation_hud_set_pill_bounds(state: State<'_, HudHoverState>, rect: Option<HudClientRect>) {
+    if let Ok(mut guard) = state.pill_bounds.lock() {
+        *guard = rect;
+    }
+}
+
+fn rect_contains(
+    rect: &HudClientRect,
+    position: PhysicalPosition<i32>,
+    scale_factor: f64,
+    cx: f64,
+    cy: f64,
+) -> bool {
     let left = position.x as f64 + rect.left * scale_factor;
     let right = position.x as f64 + rect.right * scale_factor;
     let top = position.y as f64 + rect.top * scale_factor;
     let bottom = position.y as f64 + rect.bottom * scale_factor;
+    cx >= left && cx <= right && cy >= top && cy <= bottom
+}
 
-    Ok(cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom)
+/// Native polling thread for stop-button hover and pill-region click
+/// pass-through. Runs continuously; cheap to keep alive because it
+/// short-circuits when bounds are `None`. Only emits events / flips
+/// pass-through when state actually changes.
+fn spawn_hud_hover_thread(app: AppHandle) {
+    thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        let tick = Duration::from_millis(33);
+        loop {
+            thread::sleep(tick);
+
+            let hover_state = match app.try_state::<HudHoverState>() {
+                Some(state) => state,
+                None => continue,
+            };
+
+            let Some(hud) = app.get_webview_window("hud") else {
+                continue;
+            };
+            let visible = hud.is_visible().unwrap_or(false);
+
+            let stop_rect = hover_state.stop_bounds.lock().ok().and_then(|g| g.clone());
+            let pill_rect = hover_state.pill_bounds.lock().ok().and_then(|g| g.clone());
+
+            // When the HUD isn't visible (or hasn't reported bounds yet),
+            // clear stale hover and leave the window non-interactive — there's
+            // nothing to click anyway.
+            if !visible || pill_rect.is_none() {
+                if hover_state.last_hover.swap(false, Ordering::Relaxed) {
+                    let _ = app.emit("hud-stop-hover", false);
+                }
+                // Default to pass-through when hidden so we never block clicks
+                // to whatever is underneath.
+                if !hover_state.last_passthrough.swap(true, Ordering::Relaxed) {
+                    let _ = hud.set_ignore_cursor_events(true);
+                }
+                continue;
+            }
+
+            let (Ok(position), Ok(scale_factor)) = (hud.outer_position(), hud.scale_factor())
+            else {
+                continue;
+            };
+
+            #[cfg(target_os = "macos")]
+            let cursor =
+                cursor_position_via_cg().map(|(x, y)| (x * scale_factor, y * scale_factor));
+            #[cfg(not(target_os = "macos"))]
+            let cursor = hud.cursor_position().ok().map(|p| (p.x, p.y));
+
+            let Some((cx, cy)) = cursor else { continue };
+
+            // Click pass-through: only let the HUD capture mouse events when
+            // the cursor is actually over the pill. Outside the pill (in the
+            // transparent gutter around it), forward clicks to the window
+            // underneath so the user can keep selecting in other apps while
+            // dictating.
+            if let Some(pill) = pill_rect.as_ref() {
+                let over_pill = rect_contains(pill, position, scale_factor, cx, cy);
+                let should_passthrough = !over_pill;
+                let prev_passthrough = hover_state.last_passthrough.load(Ordering::Relaxed);
+                if should_passthrough != prev_passthrough {
+                    hover_state
+                        .last_passthrough
+                        .store(should_passthrough, Ordering::Relaxed);
+                    let _ = hud.set_ignore_cursor_events(should_passthrough);
+                }
+            }
+
+            // Stop-button hover (only meaningful in `listening`; JS clears the
+            // stop bounds otherwise so this branch falls through to a forced
+            // hover-off below).
+            let is_hovered = match stop_rect.as_ref() {
+                Some(rect) => rect_contains(rect, position, scale_factor, cx, cy),
+                None => false,
+            };
+            let was_hovered = hover_state.last_hover.load(Ordering::Relaxed);
+            if is_hovered != was_hovered {
+                hover_state.last_hover.store(is_hovered, Ordering::Relaxed);
+                let _ = app.emit("hud-stop-hover", is_hovered);
+            }
+        }
+    });
 }
 
 pub fn stop_helper(app: &AppHandle) {

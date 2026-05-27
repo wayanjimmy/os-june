@@ -27,7 +27,6 @@ const statusText = document.querySelector<HTMLElement>("#hud-status");
 let hideTimer: number | undefined;
 let brailleTimer: number | undefined;
 let brailleFrame = 0;
-let stopHoverPollTimer: number | undefined;
 
 // waverows shows multiple horizontal rows of dots flowing across — reads as a
 // "thinking/processing" texture rather than a single dot bouncing.
@@ -63,7 +62,6 @@ const AUDIO_NOISE_GATE = 0.012;
 const AUDIO_VISUAL_GAIN = 16;
 const AMBIENT_VISUAL_GAIN = 4;
 const AMBIENT_MAX_LEVEL = 0.11;
-const STOP_HOVER_POLL_MS = 33;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -91,7 +89,8 @@ function setHud(state: string, status: string) {
   hud.dataset.state = state;
   statusText.textContent = status;
   if (errorText) {
-    errorText.textContent = state === "silent-error" ? status : "";
+    errorText.textContent =
+      state === "silent-error" || state === "error" ? status : "";
   }
   if (state === "transcribing" || state === "pasting") {
     startBraille();
@@ -100,9 +99,20 @@ function setHud(state: string, status: string) {
   }
   if (state === "listening") {
     startBarLoop();
-  } else if (state !== "listening" && previous === "listening") {
+    if (previous !== "listening") {
+      pushStopBoundsToNative();
+    }
+  } else if (previous === "listening") {
     // Bars hide via CSS in non-listening states; let the rAF coast to idle
-    // and stop itself.
+    // and stop itself. Tell native to stop hit-testing the stop button.
+    clearStopHover();
+  }
+  // Pill width changes between states (listening 60px viz, transcribing 88px,
+  // silent-error hides viz entirely) — keep native click-through math in sync
+  // with the actual pill rect.
+  if (state !== previous && hud) {
+    hud.offsetWidth;
+    pushPillBoundsToNative();
   }
 }
 
@@ -189,43 +199,44 @@ function setStopHover(isHovered: boolean) {
   stopButton?.classList.toggle("is-hovered", isHovered);
 }
 
-let stopHoverPollInFlight = false;
-
-async function updateStopHoverFromNativeHitTest() {
-  if (!hud || !stopButton || hud.dataset.state !== "listening") {
-    setStopHover(false);
+// Hover detection + click pass-through both live in Rust. JS hands two rects
+// to native:
+//   1. The pill (`#hud`) rect — used to flip `set_ignore_cursor_events` so
+//      clicks in the transparent gutter around the pill fall through to apps
+//      underneath, while clicks on the pill itself still register.
+//   2. The stop button rect — used to hit-test cursor → `.is-hovered` class.
+// Both are pushed via invoke (one-shot), then the native thread polls and
+// emits `hud-stop-hover` events back. Doing this in Rust avoids WebKit's
+// timer/rAF throttling on the non-key panel, which is what made hover look
+// stuck until mouse-down.
+function pushStopBoundsToNative() {
+  if (!stopButton || hud?.dataset.state !== "listening") {
+    void invoke("dictation_hud_set_stop_bounds", { rect: null }).catch(
+      () => {},
+    );
     return;
   }
-  if (stopHoverPollInFlight) return;
-
-  stopHoverPollInFlight = true;
-  try {
-    const { left, right, top, bottom } = stopButton.getBoundingClientRect();
-    const isHovered = await invoke<boolean>("dictation_hud_hit_test", {
-      rect: { left, right, top, bottom },
-    });
-    setStopHover(isHovered);
-  } catch {
-    setStopHover(false);
-  } finally {
-    stopHoverPollInFlight = false;
-  }
+  const { left, right, top, bottom } = stopButton.getBoundingClientRect();
+  void invoke("dictation_hud_set_stop_bounds", {
+    rect: { left, right, top, bottom },
+  }).catch(() => {});
 }
 
-function startStopHoverPolling() {
-  if (stopHoverPollTimer !== undefined) return;
-  stopHoverPollTimer = window.setInterval(() => {
-    void updateStopHoverFromNativeHitTest();
-  }, STOP_HOVER_POLL_MS);
-  void updateStopHoverFromNativeHitTest();
+function pushPillBoundsToNative() {
+  if (!hud) return;
+  const { left, right, top, bottom } = hud.getBoundingClientRect();
+  void invoke("dictation_hud_set_pill_bounds", {
+    rect: { left, right, top, bottom },
+  }).catch(() => {});
 }
 
-function stopStopHoverPolling() {
-  if (stopHoverPollTimer !== undefined) {
-    window.clearInterval(stopHoverPollTimer);
-    stopHoverPollTimer = undefined;
-  }
+function clearPillBounds() {
+  void invoke("dictation_hud_set_pill_bounds", { rect: null }).catch(() => {});
+}
+
+function clearStopHover() {
   setStopHover(false);
+  void invoke("dictation_hud_set_stop_bounds", { rect: null }).catch(() => {});
 }
 
 function clearHideTimer() {
@@ -237,7 +248,8 @@ function clearHideTimer() {
 
 async function hideHud() {
   clearHideTimer();
-  stopStopHoverPolling();
+  clearStopHover();
+  clearPillBounds();
   if (hud) {
     hud.dataset.state = "exiting";
     stopBraille();
@@ -251,7 +263,11 @@ async function hideHud() {
 async function showHud() {
   clearHideTimer();
   await appWindow.show();
-  startStopHoverPolling();
+  // Force a layout flush so the rects we push to native reflect the
+  // just-applied state (pill width changes between listening/transcribing).
+  hud?.offsetWidth;
+  pushPillBoundsToNative();
+  pushStopBoundsToNative();
 }
 
 function hideSoon(delay = 900) {
@@ -314,10 +330,14 @@ async function handleDictationEventPayload(payload: unknown) {
     if (isSilentDictationError(errorCode, errorMessage)) {
       setHud("silent-error", "Nothing recorded");
     } else {
-      setHud("error", errorMessage || "Dictation failed.");
+      // Detailed messages get logged elsewhere; the HUD just signals that
+      // something failed with the same shake + tinted pill treatment.
+      setHud("error", "Error");
     }
     await showHud();
-    hideSoon(900);
+    // Shake is ~380ms; hold ~1.6s after that so the message lingers long
+    // enough to read before the blur-fade exit.
+    hideSoon(1800);
   }
 }
 
@@ -378,6 +398,10 @@ stopButton?.addEventListener("click", async (event) => {
 
 void listen("dictation-event", async (event) => {
   await handleDictationEventPayload(event.payload);
+});
+
+void listen<boolean>("hud-stop-hover", (event) => {
+  setStopHover(Boolean(event.payload));
 });
 
 void invoke<string | undefined>("latest_dictation_event")
