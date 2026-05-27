@@ -52,6 +52,7 @@ function baseProps() {
     onSelectNote: vi.fn(),
     onAssignNoteToFolder: vi.fn(async () => undefined),
     onRemoveNoteFromFolder: vi.fn(),
+    onOpenMoveDialog: vi.fn(),
     onDeleteNote: vi.fn(),
   };
 }
@@ -74,6 +75,8 @@ describe("Sidebar — Folders nav item", () => {
         onSelectFolder={vi.fn()}
         onSelectNote={vi.fn()}
         onDeleteNote={vi.fn()}
+        onOpenMoveDialog={vi.fn()}
+        onRemoveNoteFromFolder={vi.fn()}
       />,
     );
 
@@ -96,6 +99,8 @@ describe("Sidebar — Folders nav item", () => {
         onSelectFolder={vi.fn()}
         onSelectNote={vi.fn()}
         onDeleteNote={vi.fn()}
+        onOpenMoveDialog={vi.fn()}
+        onRemoveNoteFromFolder={vi.fn()}
       />,
     );
 
@@ -120,6 +125,8 @@ describe("Sidebar — Folders nav item", () => {
         onSelectFolder={vi.fn()}
         onSelectNote={vi.fn()}
         onDeleteNote={vi.fn()}
+        onOpenMoveDialog={vi.fn()}
+        onRemoveNoteFromFolder={vi.fn()}
       />,
     );
 
@@ -144,6 +151,8 @@ describe("Sidebar — Folders nav item", () => {
         onSelectFolder={vi.fn()}
         onSelectNote={vi.fn()}
         onDeleteNote={vi.fn()}
+        onOpenMoveDialog={vi.fn()}
+        onRemoveNoteFromFolder={vi.fn()}
       />,
     );
 
@@ -169,6 +178,8 @@ describe("Sidebar — Folders nav item", () => {
         onSelectFolder={vi.fn()}
         onSelectNote={vi.fn()}
         onDeleteNote={vi.fn()}
+        onOpenMoveDialog={vi.fn()}
+        onRemoveNoteFromFolder={vi.fn()}
       />,
     );
 
