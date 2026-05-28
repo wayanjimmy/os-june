@@ -4,8 +4,8 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 pub const DEFAULT_GENERATION_PROVIDER: &str = crate::providers::VENICE_PROVIDER;
-const INCREMENTAL_NOTE_INSTRUCTIONS: &str = "You write one incremental markdown note block from a newly captured transcript. Use only the new transcript plus optional new manual notes. Existing generated note content is context only: do not repeat, summarize, rewrite, or reformat it. Manual notes are context only unless they add facts; do not output manual note labels as headings, bullets, titles, or section names. Do not add wrapper headings such as Note, Generated note, Transcript, or Summary. Preserve the speaker's language unless the source material is mixed-language. Return only the new note block to append.";
-const TITLE_SUGGESTION_INSTRUCTIONS: &str = "You generate concise note titles from transcripts. Return only a title, not markdown, quotes, explanations, or alternatives. Use the transcript's language. Prefer 3 to 8 words. Be specific, but do not invent details.";
+const INCREMENTAL_NOTE_INSTRUCTIONS: &str = "You write one incremental markdown note block from a newly captured transcript. Use only the new transcript plus optional new manual notes. Existing generated note content is context only: do not repeat, summarize, rewrite, or reformat it. Manual notes are context only unless they add facts; do not output manual note labels as headings, bullets, titles, or section names. Do not add wrapper headings such as Note, Generated note, Transcript, or Summary. Use the same language as the transcript. If the transcript language is ambiguous or the transcript only contains short utterances, default to English. Return only the new note block to append.";
+const TITLE_SUGGESTION_INSTRUCTIONS: &str = "You generate concise note titles from transcripts. Return only a title, not markdown, quotes, explanations, or alternatives. Use the same language as the transcript. If the transcript language is ambiguous or the transcript only contains short utterances, default to English. Prefer 3 to 8 words. Be specific, but do not invent details.";
 const DEFAULT_TITLE_SUGGESTION_MODEL: &str = "nvidia-nemotron-3-nano-30b-a3b";
 const TITLE_SUGGESTION_TIMEOUT_MS: u64 = 2_500;
 const TITLE_TRANSCRIPT_MAX_CHARS: usize = 4_000;
@@ -313,7 +313,8 @@ fn extract_chat_completion_text(value: &Value) -> Option<String> {
 mod tests {
     use super::{
         extract_chat_completion_text, generation_source_text, normalize_title_suggestion,
-        title_suggestion_user_message, TITLE_TRANSCRIPT_MAX_CHARS,
+        title_suggestion_user_message, INCREMENTAL_NOTE_INSTRUCTIONS,
+        TITLE_SUGGESTION_INSTRUCTIONS, TITLE_TRANSCRIPT_MAX_CHARS,
     };
 
     #[test]
@@ -329,6 +330,14 @@ mod tests {
         assert!(input.contains("<new_transcript>\nNew transcript text"));
         assert!(input.contains("Do not repeat existing note content"));
         assert!(input.contains("Do not output manual note labels"));
+    }
+
+    #[test]
+    fn generation_instructions_define_language_fallback() {
+        assert!(INCREMENTAL_NOTE_INSTRUCTIONS.contains("Use the same language as the transcript"));
+        assert!(INCREMENTAL_NOTE_INSTRUCTIONS.contains("default to English"));
+        assert!(TITLE_SUGGESTION_INSTRUCTIONS.contains("Use the same language as the transcript"));
+        assert!(TITLE_SUGGESTION_INSTRUCTIONS.contains("default to English"));
     }
 
     #[test]
