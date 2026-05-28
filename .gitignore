@@ -6,6 +6,7 @@ build/
 !.env.example
 
 target/
+scribe-api/target/
 debug/
 release/
 .tauri-helper/
@@ -21,3 +22,5 @@ Thumbs.db
 *.swp
 .vscode/
 .idea/
+.pnpm-store/
+.pre-flight-reviews/

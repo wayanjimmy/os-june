@@ -1,17 +1,7 @@
-use os_notetaker_lib::{
-    domain::{
-        processing::manual_notes_for_generation,
-        types::{NoteDto, ProcessingStatus},
-    },
-    providers::{
-        generation::{generate_note_from_transcript, GenerationRequest},
-        transcription::{
-            normalize_transcription_language, transcribe_saved_audio, transcription_audio_mime,
-            TranscriptionRequest,
-        },
-    },
+use os_notetaker_lib::domain::{
+    processing::manual_notes_for_generation,
+    types::{NoteDto, ProcessingStatus},
 };
-use tempfile::NamedTempFile;
 
 const NOW: &str = "2026-05-21T10:00:00Z";
 
@@ -37,53 +27,6 @@ fn note(overrides: impl FnOnce(&mut NoteDto)) -> NoteDto {
     };
     overrides(&mut note);
     note
-}
-
-#[tokio::test]
-async fn venice_transcription_fails_for_missing_audio() {
-    let err = transcribe_saved_audio(TranscriptionRequest {
-        provider: "venice".to_string(),
-        audio_path: "/tmp/os-notetaker-missing.wav".into(),
-        title: "Missing".to_string(),
-        context: None,
-    })
-    .await
-    .expect_err("missing audio should fail");
-
-    assert_eq!(err.code, "audio_artifact_missing");
-}
-
-#[tokio::test]
-async fn mock_transcription_provider_is_rejected() {
-    let file = NamedTempFile::new().expect("temp audio");
-    std::fs::write(file.path(), b"audio").expect("audio bytes");
-
-    let err = transcribe_saved_audio(TranscriptionRequest {
-        provider: "mock".to_string(),
-        audio_path: file.path().to_path_buf(),
-        title: "Planning note".to_string(),
-        context: None,
-    })
-    .await
-    .expect_err("mock provider should be rejected");
-
-    assert_eq!(err.code, "provider_not_configured");
-}
-
-#[tokio::test]
-async fn mock_generation_provider_is_rejected() {
-    let err = generate_note_from_transcript(GenerationRequest {
-        provider: "mock".to_string(),
-        title: "Meeting notes".to_string(),
-        existing_generated_note: Some("Existing generated note".to_string()),
-        transcript: "System: The launch deadline is Friday.".to_string(),
-        manual_notes: Some("Ask Marta about the release checklist.".to_string()),
-        language: Some("en".to_string()),
-    })
-    .await
-    .expect_err("mock provider should be rejected");
-
-    assert_eq!(err.code, "provider_not_configured");
 }
 
 #[test]
@@ -125,51 +68,19 @@ fn manual_notes_for_generation_uses_new_tail_after_manual_preface() {
 
 #[tokio::test]
 async fn generation_rejects_empty_transcript() {
-    let err = generate_note_from_transcript(GenerationRequest {
-        provider: "venice".to_string(),
-        title: "Empty".to_string(),
-        existing_generated_note: None,
-        transcript: "   ".to_string(),
-        manual_notes: None,
-        language: None,
-    })
+    let err = os_notetaker_lib::scribe_api::generate_note_from_transcript(
+        os_notetaker_lib::scribe_api::GenerationRequest {
+            provider: "venice".to_string(),
+            operation_id: None,
+            title: "Empty".to_string(),
+            existing_generated_note: None,
+            transcript: "   ".to_string(),
+            manual_notes: None,
+            language: None,
+        },
+    )
     .await
     .expect_err("empty transcript should fail");
 
     assert_eq!(err.code, "transcription_empty");
-}
-
-#[test]
-fn transcription_language_override_accepts_iso_639_1_codes() {
-    assert_eq!(
-        normalize_transcription_language(" es "),
-        Some("es".to_string())
-    );
-    assert_eq!(
-        normalize_transcription_language("EN"),
-        Some("en".to_string())
-    );
-}
-
-#[test]
-fn transcription_language_override_rejects_invalid_values() {
-    assert_eq!(normalize_transcription_language(""), None);
-    assert_eq!(normalize_transcription_language("spanish"), None);
-    assert_eq!(normalize_transcription_language("es-ES"), None);
-}
-
-#[test]
-fn transcription_audio_mime_uses_file_extension() {
-    assert_eq!(
-        transcription_audio_mime("recording.wav".as_ref()),
-        "audio/wav"
-    );
-    assert_eq!(
-        transcription_audio_mime("dictation.m4a".as_ref()),
-        "audio/mp4"
-    );
-    assert_eq!(
-        transcription_audio_mime("dictation.MP4".as_ref()),
-        "audio/mp4"
-    );
 }

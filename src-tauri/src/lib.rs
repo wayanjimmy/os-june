@@ -4,7 +4,9 @@ pub mod commands;
 pub mod db;
 pub mod dictation;
 pub mod domain;
+pub mod os_accounts;
 pub mod providers;
+pub mod scribe_api;
 
 #[cfg(target_os = "macos")]
 use tauri::Manager;
@@ -52,8 +54,14 @@ pub fn run() {
             dictation::latest_dictation_event,
             providers::provider_model_settings,
             providers::list_venice_models,
-            providers::set_venice_model
+            providers::set_venice_model,
+            os_accounts::os_accounts_status,
+            os_accounts::os_accounts_login,
+            os_accounts::os_accounts_cancel_login,
+            os_accounts::os_accounts_logout,
+            os_accounts::os_accounts_top_up
         ])
+        .manage(os_accounts::LoginFlow::default())
         .setup(|app| {
             providers::setup(app);
             dictation::setup(app);

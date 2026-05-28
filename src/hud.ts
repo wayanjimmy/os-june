@@ -317,7 +317,15 @@ async function handleDictationEventPayload(payload: unknown) {
       void hideHud();
       return;
     }
-    setHud("error", "Error");
+    const code = String(dictationEvent.payload?.code ?? "");
+    if (code === "not_signed_in") {
+      setHud(
+        "error",
+        String(dictationEvent.payload?.message ?? "Sign in to use dictation"),
+      );
+    } else {
+      setHud("error", "Error");
+    }
     await showHud();
     // Hold long enough for the shake to finish and the message to read.
     hideSoon(1800);

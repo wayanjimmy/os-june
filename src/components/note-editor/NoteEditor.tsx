@@ -1,4 +1,3 @@
-import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconClipboard } from "central-icons/IconClipboard";
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconFolder1 } from "central-icons/IconFolder1";
@@ -23,6 +22,7 @@ import { InlineNotice } from "../ui/InlineNotice";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { RecorderBar } from "../recorder/RecorderBar";
 import { NoteRecoveryPrompt } from "../recorder/NoteRecoveryPrompt";
+import { NoteFailureBanner } from "./NoteFailureBanner";
 import { NotePreview } from "./NotePreview";
 
 type NoteEditorProps = {
@@ -42,7 +42,8 @@ type NoteEditorProps = {
   onPauseRecording: (sessionId: string) => void;
   onResumeRecording: (sessionId: string) => void;
   onFinishRecording: (sessionId: string) => void;
-  onRetry: () => void;
+  onRetry: () => void | Promise<void>;
+  onTopUp: () => void;
   onRecoverRecording: (sessionId: string) => void;
   onDiscardRecording: (sessionId: string) => void;
   onAssignFolder: (folderId: string) => void;
@@ -91,6 +92,7 @@ export function NoteEditor({
   onResumeRecording,
   onFinishRecording,
   onRetry,
+  onTopUp,
   onRecoverRecording,
   onDiscardRecording,
   onAssignFolder,
@@ -129,9 +131,6 @@ export function NoteEditor({
   // stays disabled via processingLock so nothing can re-trigger.
   const shellState = recordingForNote?.state ?? "idle";
   const processingText = processingMessage(note.processingStatus);
-  const canRetry =
-    note.processingStatus === "failed" &&
-    !!(note.audio || note.audioSources?.length);
   // System audio is optional — the record button only blocks when the
   // microphone itself isn't ready. handleStartRecording re-checks on
   // click and silently falls back to mic-only if system audio is denied.
@@ -177,6 +176,14 @@ export function NoteEditor({
             disabled={processingLock}
           />
         ) : null}
+        {note.processingStatus === "failed" ? (
+          <NoteFailureBanner
+            errorMessage={note.lastError}
+            audioPreserved={!!(note.audio || note.audioSources?.length)}
+            onRetry={onRetry}
+            onTopUp={onTopUp}
+          />
+        ) : null}
         {activeTab === "transcription" ? (
           <div className="transcript-view">
             {transcriptToText(note) ? (
@@ -213,15 +220,11 @@ export function NoteEditor({
               <div className="empty-state">
                 <p>
                   {processingText ??
-                    note.lastError ??
-                    "No transcript is available yet."}
+                    (note.processingStatus === "failed"
+                      ? "No transcript was produced."
+                      : (note.lastError ??
+                        "No transcript is available yet."))}
                 </p>
-                {canRetry ? (
-                  <button type="button" onClick={onRetry}>
-                    <IconArrowRotateClockwise size={14} />
-                    Retry
-                  </button>
-                ) : null}
               </div>
             )}
           </div>

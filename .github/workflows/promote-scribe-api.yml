@@ -1,0 +1,57 @@
+name: promote-scribe-api
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "Existing tag in ghcr.io/<owner>/scribe-api to promote (e.g. a1b2c3d, staging)"
+        required: true
+        default: staging
+      destination_tag:
+        description: "Destination tag to write (production | staging | rollback-<sha>)"
+        required: true
+        default: production
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: promote-scribe-api
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify source manifest exists
+        env:
+          OWNER: ${{ github.repository_owner }}
+          SRC: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "ghcr.io/${OWNER}/scribe-api:${SRC}"
+
+      - name: Re-tag source as destination
+        env:
+          OWNER: ${{ github.repository_owner }}
+          SRC: ${{ inputs.source_tag }}
+          DEST: ${{ inputs.destination_tag }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            "ghcr.io/${OWNER}/scribe-api:${SRC}" \
+            --tag "ghcr.io/${OWNER}/scribe-api:${DEST}"
+
+      - name: Confirm destination tag
+        env:
+          OWNER: ${{ github.repository_owner }}
+          DEST: ${{ inputs.destination_tag }}
+        run: docker buildx imagetools inspect "ghcr.io/${OWNER}/scribe-api:${DEST}"

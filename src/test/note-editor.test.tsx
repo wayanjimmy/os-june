@@ -36,6 +36,7 @@ const props = {
   onResumeRecording: vi.fn(),
   onFinishRecording: vi.fn(),
   onRetry: vi.fn(),
+  onTopUp: vi.fn(),
   onRecoverRecording: vi.fn(),
   onDiscardRecording: vi.fn(),
   onAssignFolder: vi.fn(),
@@ -173,7 +174,9 @@ describe("NoteEditor", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(
+      screen.getByRole("button", { name: /Retry transcription/i }),
+    );
 
     expect(onRetry).toHaveBeenCalled();
   });

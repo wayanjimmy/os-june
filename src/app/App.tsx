@@ -2,6 +2,11 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { AccountSettings } from "../components/account/AccountSettings";
+import {
+  SignInPrompt,
+  type SignInPromptReason,
+} from "../components/account/SignInPrompt";
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
 import { FoldersWorkspace } from "../components/folders/FoldersWorkspace";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
@@ -25,6 +30,7 @@ import {
   getNote,
   listNotes,
   openPrivacySettings,
+  osAccountsTopUp,
   pauseRecording,
   removeNoteFromFolder,
   recoverRecording,
@@ -48,6 +54,8 @@ import type {
   RecordingSourceMode,
   RecordingSourceReadinessDto,
 } from "../lib/tauri";
+import { useAccountStatus } from "../lib/account-status";
+import { shouldBlockOnSignIn } from "../lib/account-gate";
 import { shouldPollProcessingStatus } from "./processing-polling";
 import { createInitialState, notesReducer } from "./state/app-state";
 
@@ -81,6 +89,16 @@ export function App() {
     userWantsSystemAudio && systemGranted
       ? "microphonePlusSystem"
       : "microphoneOnly";
+  const {
+    account,
+    loading: accountLoading,
+    refresh: refreshAccount,
+    setAccount,
+  } = useAccountStatus();
+  const [signInPrompt, setSignInPrompt] = useState<{
+    reason: SignInPromptReason;
+    pendingAction?: () => void;
+  } | null>(null);
   const selectedNote = state.selectedNote;
   const originFolder = originFolderId
     ? state.folders.find((folder) => folder.id === originFolderId)
@@ -447,6 +465,13 @@ export function App() {
 
   async function handleStartRecording() {
     if (!selectedNote) return;
+    if (shouldBlockOnSignIn(account)) {
+      setSignInPrompt({
+        reason: "record",
+        pendingAction: () => void handleStartRecording(),
+      });
+      return;
+    }
     dispatch({
       type: "recordingStatusChanged",
       status: startingRecordingStatus(sourceMode),
@@ -545,6 +570,17 @@ export function App() {
         data-tauri-drag-region
         onPointerDown={handleTitlebarPointerDown}
       />
+      <SignInPrompt
+        open={signInPrompt !== null}
+        reason={signInPrompt?.reason ?? "record"}
+        onClose={() => setSignInPrompt(null)}
+        onSignedIn={(next) => {
+          setAccount(next);
+          const pending = signInPrompt?.pendingAction;
+          setSignInPrompt(null);
+          pending?.();
+        }}
+      />
       <Sidebar
         folders={state.folders}
         notes={state.notes}
@@ -585,7 +621,14 @@ export function App() {
         <div className="main-panel-body">
           {error ? <p className="error-banner">{error}</p> : null}
           <div className="workspace">
-            {activeView === "settings" ? (
+            {activeView === "account" ? (
+              <AccountSettings
+                account={account}
+                loading={accountLoading}
+                onAccountChanged={setAccount}
+                onRefresh={refreshAccount}
+              />
+            ) : activeView === "settings" ? (
               <AppSettings
                 sourceMode={sourceMode}
                 sourceReadiness={sourceReadiness}
@@ -718,12 +761,15 @@ export function App() {
                   onFinishRecording={(sessionId) =>
                     void handleFinishRecording(sessionId)
                   }
-                  onRetry={() =>
-                    selectedNote
-                      ? void retryProcessing(selectedNote.id).then((note) =>
-                          dispatch({ type: "noteUpdated", note }),
-                        )
-                      : undefined
+                  onRetry={async () => {
+                    if (!selectedNote) return;
+                    const note = await retryProcessing(selectedNote.id);
+                    dispatch({ type: "noteUpdated", note });
+                  }}
+                  onTopUp={() =>
+                    void osAccountsTopUp().catch((err: unknown) =>
+                      setError(messageFromError(err)),
+                    )
                   }
                   onAssignFolder={(folderId) =>
                     void handleSetNoteFolder(selectedNote.id, folderId)

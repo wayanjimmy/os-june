@@ -500,6 +500,46 @@ export async function recoverRecording(
   });
 }
 
+export type AccountUser = {
+  id: string;
+  handle: string;
+  email?: string;
+  displayName?: string;
+  avatarUrl?: string;
+};
+
+export type AccountBalance = {
+  credits: number;
+  usdMillis: number;
+};
+
+export type AccountStatus = {
+  signedIn: boolean;
+  configured: boolean;
+  user?: AccountUser;
+  balance?: AccountBalance;
+};
+
+export async function osAccountsStatus() {
+  return invoke<AccountStatus>("os_accounts_status");
+}
+
+export async function osAccountsLogin() {
+  return invoke<AccountStatus>("os_accounts_login");
+}
+
+export async function osAccountsCancelLogin() {
+  return invoke<void>("os_accounts_cancel_login");
+}
+
+export async function osAccountsLogout() {
+  return invoke<void>("os_accounts_logout");
+}
+
+export async function osAccountsTopUp() {
+  return invoke<void>("os_accounts_top_up");
+}
+
 export async function dictationSettings() {
   return invoke<DictationSettingsResponse>("dictation_settings");
 }

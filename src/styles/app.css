@@ -2152,6 +2152,42 @@ input:focus-visible,
   margin: 0 0 var(--sp-5);
 }
 
+.note-failure-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  margin: 0 0 var(--sp-5);
+  padding: var(--sp-4) var(--sp-3) var(--sp-4) var(--sp-5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+
+.note-failure-copy {
+  min-width: 0;
+}
+
+.note-failure-title {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.note-failure-message {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.note-failure-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
 .editor-empty,
 .notes-empty {
   display: grid;
@@ -2248,6 +2284,14 @@ input:focus-visible,
   text-decoration-color: var(--foreground);
 }
 
+.settings-row-inline-error {
+  display: block;
+  margin-top: var(--sp-px);
+  color: var(--destructive);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
 /* Group label sits outside the card so multiple cards can sit under one
  * section, like macOS System Settings. */
 .settings-group {
@@ -2322,7 +2366,7 @@ input:focus-visible,
 
 .settings-row-info {
   display: grid;
-  gap: 2px;
+  gap: var(--sp-px);
   min-width: 0;
 }
 
@@ -2434,6 +2478,59 @@ input:focus-visible,
 .dictionary-toolbar .folders-search {
   width: 200px;
   max-width: 60%;
+}
+
+.sign-in-prompt-status {
+  margin: var(--sp-4) 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+.sign-in-prompt-busy {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0 0;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--surface-subtle);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+.sign-in-prompt-busy p {
+  margin: 0;
+}
+
+.sign-in-prompt-spinner {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--foreground);
+  animation: sign-in-prompt-spin 0.9s linear infinite;
+}
+
+@keyframes sign-in-prompt-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+[data-spinning="true"] {
+  animation: sign-in-prompt-spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sign-in-prompt-spinner {
+    animation: none;
+    border-top-color: var(--border);
+    opacity: 0.6;
+  }
 }
 
 /* Keycap frame — wraps one or more keycaps in a 28px-tall container with a

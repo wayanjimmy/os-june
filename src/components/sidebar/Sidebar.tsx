@@ -1,3 +1,4 @@
+import { IconCirclePerson } from "central-icons/IconCirclePerson";
 import { IconDotGrid1x3Vertical } from "central-icons/IconDotGrid1x3Vertical";
 import { IconFileText } from "central-icons/IconFileText";
 import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
@@ -19,7 +20,8 @@ export type SidebarView =
   | "all-notes"
   | "settings"
   | "folders"
-  | "dictation";
+  | "dictation"
+  | "account";
 
 type SidebarProps = {
   folders: FolderDto[];
@@ -205,6 +207,18 @@ export function Sidebar({
             <IconMicrophone size={16} />
           </span>
           <span className="sidebar-nav-label">Dictation</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-nav-item"
+          data-active={activeView === "account"}
+          aria-current={activeView === "account" ? "page" : undefined}
+          onClick={() => onChangeView("account")}
+        >
+          <span className="sidebar-nav-icon">
+            <IconCirclePerson size={16} />
+          </span>
+          <span className="sidebar-nav-label">Account</span>
         </button>
       </nav>
 

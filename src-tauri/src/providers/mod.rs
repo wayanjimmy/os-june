@@ -1,25 +1,27 @@
-pub mod generation;
-pub mod transcription;
+//! Model-picker state. The Tauri side persists which transcription /
+//! generation models the user selected; provider keys and URLs live in
+//! Scribe API, never here.
 
 use crate::domain::types::AppError;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Mutex, OnceLock},
 };
 use tauri::{AppHandle, Manager, State};
 
-pub const OPENAI_PROVIDER: &str = "openai";
-pub const DEFAULT_OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
-pub const DEFAULT_OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
-pub const VENICE_PROVIDER: &str = "venice";
-pub const DEFAULT_VENICE_API_BASE_URL: &str = "https://api.venice.ai/api/v1";
-pub const DEFAULT_VENICE_TRANSCRIPTION_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v3";
-pub const DEFAULT_VENICE_GENERATION_MODEL: &str = "zai-org-glm-5";
+pub const PROVIDER_OPENAI: &str = "openai";
+pub const PROVIDER_VENICE: &str = "venice";
+pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v3";
+pub const DEFAULT_GENERATION_MODEL: &str = "zai-org-glm-5";
 
-static ENV_LOADED: OnceLock<()> = OnceLock::new();
-static PROVIDER_MODEL_SETTINGS: OnceLock<Mutex<ProviderModelSettings>> = OnceLock::new();
+// Kept exported under the legacy names so existing callers compile until they
+// migrate to the names above.
+pub use PROVIDER_OPENAI as OPENAI_PROVIDER;
+pub use PROVIDER_VENICE as VENICE_PROVIDER;
+
+static MODEL_SETTINGS: OnceLock<Mutex<ProviderModelSettings>> = OnceLock::new();
 
 pub struct ProviderSettingsState {
     path: PathBuf,
@@ -63,7 +65,7 @@ pub struct VeniceModelsResponse {
     pub models: Vec<VeniceModelDto>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VeniceModelDto {
     pub provider: String,
@@ -82,75 +84,72 @@ pub struct VeniceModelDto {
     pub capabilities: Vec<String>,
 }
 
+impl From<crate::scribe_api::ModelDto> for VeniceModelDto {
+    fn from(value: crate::scribe_api::ModelDto) -> Self {
+        Self {
+            description: Some(format!(
+                "{} credit(s) per {}",
+                value.credits_per_unit, value.price_unit
+            )),
+            provider: value.provider,
+            id: value.id,
+            name: value.name,
+            model_type: value.model_type,
+            privacy: None,
+            pricing: None,
+            context_tokens: None,
+            traits: Vec::new(),
+            capabilities: Vec::new(),
+        }
+    }
+}
+
 pub fn configured_provider() -> String {
-    load_local_env();
-    VENICE_PROVIDER.to_string()
+    PROVIDER_VENICE.to_string()
 }
 
 pub fn configured_transcription_provider() -> String {
-    current_provider_model_settings().transcription_provider
-}
-
-pub fn openai_api_key() -> Option<String> {
-    load_local_env();
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-pub fn openai_api_base_url() -> String {
-    load_local_env();
-    std::env::var("OPENAI_API_BASE_URL")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_OPENAI_API_BASE_URL.to_string())
-}
-
-pub fn venice_api_key() -> Option<String> {
-    load_local_env();
-    std::env::var("VENICE_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    current_settings().transcription_provider
 }
 
 pub fn provider_configured() -> bool {
-    let transcription_ready = match configured_transcription_provider().as_str() {
-        OPENAI_PROVIDER => openai_api_key().is_some(),
-        _ => venice_api_key().is_some(),
-    };
-    transcription_ready && venice_api_key().is_some()
-}
-
-pub fn venice_api_base_url() -> String {
-    load_local_env();
-    std::env::var("VENICE_API_BASE_URL")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_VENICE_API_BASE_URL.to_string())
+    crate::scribe_api::configured()
 }
 
 pub fn transcription_model() -> String {
-    current_provider_model_settings().transcription_model
+    current_settings().transcription_model
 }
 
+pub fn generation_model() -> String {
+    current_settings().generation_model
+}
+
+// Legacy name kept for callers we haven't migrated yet.
 pub fn venice_generation_model() -> String {
-    current_provider_model_settings().generation_model
+    generation_model()
+}
+
+pub fn transcription_provider_for_model(model: &str) -> &'static str {
+    if matches!(
+        model.trim(),
+        "gpt-4o-mini-transcribe" | "gpt-4o-transcribe" | "whisper-1"
+    ) {
+        PROVIDER_OPENAI
+    } else {
+        PROVIDER_VENICE
+    }
 }
 
 #[tauri::command]
 pub fn provider_model_settings(
     state: State<'_, ProviderSettingsState>,
 ) -> Result<ProviderModelSettingsResponse, AppError> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
     Ok(ProviderModelSettingsResponse {
-        settings: state
-            .settings
-            .lock()
-            .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?
-            .clone(),
+        settings: settings.clone(),
     })
 }
 
@@ -164,7 +163,7 @@ pub fn set_venice_model(
     if model_id.is_empty() {
         return Err(AppError::new("provider_model_required", "Select a model."));
     }
-    update_provider_settings(&state, |settings| match mode {
+    update_settings(&state, |settings| match mode {
         ModelMode::Transcription => {
             settings.transcription_provider =
                 transcription_provider_for_model(model_id).to_string();
@@ -180,53 +179,13 @@ pub async fn list_venice_models(
     request: VeniceModelsRequest,
 ) -> Result<VeniceModelsResponse, AppError> {
     let mode = model_mode(&request.mode)?;
-    let model_type = mode.venice_type();
+    let model_type = mode.api_type();
     let selected_model = selected_model_for_mode(&state, mode)?;
-    let openai_models = if mode == ModelMode::Transcription {
-        openai_transcription_models()
-    } else {
-        Vec::new()
-    };
-    if mode == ModelMode::Transcription {
-        if venice_api_key().is_none() {
-            return Ok(VeniceModelsResponse {
-                mode: mode.as_str().to_string(),
-                model_type: model_type.to_string(),
-                selected_model,
-                models: openai_models,
-            });
-        }
-    }
-    let api_key = venice_api_key().ok_or_else(|| {
-        AppError::new(
-            "provider_not_configured",
-            "VENICE_API_KEY is required to load Venice models.",
-        )
-    })?;
-    let response = reqwest::Client::new()
-        .get(format!("{}/models", venice_api_base_url()))
-        .query(&[("type", model_type)])
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .map_err(|error| AppError::new("provider_request_failed", error.to_string()))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| AppError::new("provider_request_failed", error.to_string()))?;
-    if !status.is_success() {
-        return Err(AppError::new(
-            "provider_request_failed",
-            format!("Venice models request failed with status {status}: {body}"),
-        ));
-    }
-    let parsed: VeniceModelsApiResponse = serde_json::from_str(&body)
-        .map_err(|error| AppError::new("provider_response_invalid", error.to_string()))?;
-    let mut models = venice_model_items(parsed, model_type);
-    if mode == ModelMode::Transcription {
-        models.extend(openai_models);
-    }
+    let mut models = crate::scribe_api::list_models(model_type)
+        .await?
+        .into_iter()
+        .map(VeniceModelDto::from)
+        .collect::<Vec<_>>();
     models.sort_by(|left, right| {
         left.name
             .to_ascii_lowercase()
@@ -244,8 +203,8 @@ pub async fn list_venice_models(
 pub fn setup(app: &mut tauri::App) {
     let path = provider_settings_path(app.handle())
         .unwrap_or_else(|| PathBuf::from("provider-settings.json"));
-    let settings = load_provider_settings(app.handle());
-    replace_current_provider_model_settings(settings.clone());
+    let settings = load_settings_from_disk(app.handle());
+    replace_current_settings(settings.clone());
     app.manage(ProviderSettingsState {
         path,
         settings: Mutex::new(settings),
@@ -253,78 +212,36 @@ pub fn setup(app: &mut tauri::App) {
 }
 
 pub fn load_local_env() {
-    ENV_LOADED.get_or_init(|| {
-        for candidate in env_candidates() {
-            if candidate.exists() {
-                let _ = dotenvy::from_path(&candidate);
-                break;
-            }
-        }
-    });
+    crate::os_accounts::load_local_env();
 }
 
-fn env_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(current_dir) = std::env::current_dir() {
-        push_env_candidate(&mut candidates, &current_dir);
-        if let Some(parent) = current_dir.parent() {
-            push_env_candidate(&mut candidates, parent);
-        }
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    push_env_candidate(&mut candidates, &manifest_dir);
-    if let Some(parent) = manifest_dir.parent() {
-        push_env_candidate(&mut candidates, parent);
-    }
-    candidates
-}
-
-fn push_env_candidate(candidates: &mut Vec<PathBuf>, dir: &Path) {
-    let candidate = dir.join(".env");
-    if !candidates.contains(&candidate) {
-        candidates.push(candidate);
-    }
-}
-
-fn current_provider_model_settings() -> ProviderModelSettings {
-    provider_model_settings_store()
+fn current_settings() -> ProviderModelSettings {
+    settings_store()
         .lock()
         .map(|settings| settings.clone())
-        .unwrap_or_else(|_| default_provider_model_settings())
+        .unwrap_or_else(|_| default_settings())
 }
 
-fn provider_model_settings_store() -> &'static Mutex<ProviderModelSettings> {
-    PROVIDER_MODEL_SETTINGS.get_or_init(|| Mutex::new(default_provider_model_settings()))
+fn settings_store() -> &'static Mutex<ProviderModelSettings> {
+    MODEL_SETTINGS.get_or_init(|| Mutex::new(default_settings()))
 }
 
-fn replace_current_provider_model_settings(settings: ProviderModelSettings) {
-    if let Ok(mut current) = provider_model_settings_store().lock() {
+fn replace_current_settings(settings: ProviderModelSettings) {
+    if let Ok(mut current) = settings_store().lock() {
         *current = settings;
     }
 }
 
-fn default_provider_model_settings() -> ProviderModelSettings {
-    load_local_env();
-    let transcription_model = env_value("VENICE_TRANSCRIPTION_MODEL")
-        .or_else(|| env_value("OPENAI_TRANSCRIPTION_MODEL"))
-        .unwrap_or_else(|| DEFAULT_VENICE_TRANSCRIPTION_MODEL.to_string());
+fn default_settings() -> ProviderModelSettings {
     ProviderModelSettings {
-        transcription_provider: transcription_provider_for_model(&transcription_model).to_string(),
-        transcription_model,
-        generation_model: env_value("VENICE_GENERATION_MODEL")
-            .unwrap_or_else(|| DEFAULT_VENICE_GENERATION_MODEL.to_string()),
+        transcription_provider: PROVIDER_VENICE.to_string(),
+        transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
+        generation_model: DEFAULT_GENERATION_MODEL.to_string(),
     }
 }
 
 fn default_transcription_provider() -> String {
-    VENICE_PROVIDER.to_string()
-}
-
-fn env_value(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    PROVIDER_VENICE.to_string()
 }
 
 fn provider_settings_path(app: &AppHandle) -> Option<PathBuf> {
@@ -334,8 +251,8 @@ fn provider_settings_path(app: &AppHandle) -> Option<PathBuf> {
         .map(|directory| directory.join("provider-settings.json"))
 }
 
-fn load_provider_settings(app: &AppHandle) -> ProviderModelSettings {
-    let defaults = default_provider_model_settings();
+fn load_settings_from_disk(app: &AppHandle) -> ProviderModelSettings {
+    let defaults = default_settings();
     let Some(path) = provider_settings_path(app) else {
         return defaults;
     };
@@ -344,10 +261,8 @@ fn load_provider_settings(app: &AppHandle) -> ProviderModelSettings {
         .ok()
         .and_then(|settings| serde_json::from_str::<ProviderModelSettings>(&settings).ok())
         .map(|settings| {
-            let transcription_model = non_empty_or(
-                sanitized_transcription_model(settings.transcription_model),
-                &defaults.transcription_model,
-            );
+            let transcription_model =
+                non_empty_or(settings.transcription_model, &defaults.transcription_model);
             ProviderModelSettings {
                 transcription_provider: transcription_provider_for_model(&transcription_model)
                     .to_string(),
@@ -370,26 +285,7 @@ fn non_empty_or(value: String, fallback: &str) -> String {
     }
 }
 
-fn sanitized_transcription_model(model: String) -> String {
-    model.trim().to_string()
-}
-
-fn transcription_provider_for_model(model: &str) -> &'static str {
-    if is_openai_transcription_model(model) {
-        OPENAI_PROVIDER
-    } else {
-        VENICE_PROVIDER
-    }
-}
-
-fn is_openai_transcription_model(model: &str) -> bool {
-    matches!(
-        model.trim(),
-        "gpt-4o-mini-transcribe" | "gpt-4o-transcribe" | "whisper-1"
-    )
-}
-
-fn update_provider_settings(
+fn update_settings(
     state: &ProviderSettingsState,
     update: impl FnOnce(&mut ProviderModelSettings),
 ) -> Result<ProviderModelSettings, AppError> {
@@ -398,12 +294,12 @@ fn update_provider_settings(
         .lock()
         .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
     update(&mut settings);
-    save_provider_settings(state, &settings)?;
-    replace_current_provider_model_settings(settings.clone());
+    save_settings(state, &settings)?;
+    replace_current_settings(settings.clone());
     Ok(settings.clone())
 }
 
-fn save_provider_settings(
+fn save_settings(
     state: &ProviderSettingsState,
     settings: &ProviderModelSettings,
 ) -> Result<(), AppError> {
@@ -445,7 +341,7 @@ impl ModelMode {
         }
     }
 
-    fn venice_type(self) -> &'static str {
+    fn api_type(self) -> &'static str {
         match self {
             Self::Transcription => "asr",
             Self::Generation => "text",
@@ -461,248 +357,5 @@ fn model_mode(value: &str) -> Result<ModelMode, AppError> {
             "provider_model_mode_invalid",
             "Unknown model mode.",
         )),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct VeniceModelsApiResponse {
-    data: Vec<VeniceModelApiItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VeniceModelApiItem {
-    id: String,
-    #[serde(rename = "type")]
-    model_type: String,
-    model_spec: Option<VeniceModelSpec>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VeniceModelSpec {
-    name: Option<String>,
-    description: Option<String>,
-    privacy: Option<String>,
-    pricing: Option<serde_json::Value>,
-    #[serde(rename = "availableContextTokens")]
-    available_context_tokens: Option<i64>,
-    capabilities: Option<serde_json::Value>,
-    traits: Option<Vec<String>>,
-    offline: Option<bool>,
-}
-
-fn venice_model_items(response: VeniceModelsApiResponse, model_type: &str) -> Vec<VeniceModelDto> {
-    response
-        .data
-        .into_iter()
-        .filter(|model| model.model_type == model_type)
-        .filter(|model| model.model_spec.as_ref().and_then(|spec| spec.offline) != Some(true))
-        .map(|model| {
-            let spec = model.model_spec;
-            let name = spec
-                .as_ref()
-                .and_then(|spec| spec.name.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(&model.id)
-                .to_string();
-            let description = spec.as_ref().and_then(|spec| {
-                spec.description
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-            });
-            let privacy = spec.as_ref().and_then(|spec| {
-                spec.privacy
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-            });
-            let pricing = spec.as_ref().and_then(|spec| spec.pricing.clone());
-            let context_tokens = spec.as_ref().and_then(|spec| spec.available_context_tokens);
-            let traits = spec
-                .as_ref()
-                .and_then(|spec| spec.traits.clone())
-                .unwrap_or_default();
-            let capabilities = spec
-                .as_ref()
-                .and_then(|spec| spec.capabilities.as_ref())
-                .map(capability_names)
-                .unwrap_or_default();
-            VeniceModelDto {
-                provider: VENICE_PROVIDER.to_string(),
-                id: model.id,
-                name,
-                model_type: model.model_type,
-                description,
-                privacy,
-                pricing,
-                context_tokens,
-                traits,
-                capabilities,
-            }
-        })
-        .collect()
-}
-
-fn openai_transcription_models() -> Vec<VeniceModelDto> {
-    vec![
-        VeniceModelDto {
-            provider: OPENAI_PROVIDER.to_string(),
-            id: "gpt-4o-mini-transcribe".to_string(),
-            name: "GPT-4o mini Transcribe".to_string(),
-            model_type: "asr".to_string(),
-            description: Some("Fast, lower-cost OpenAI speech-to-text model.".to_string()),
-            privacy: Some("OpenAI".to_string()),
-            pricing: Some(serde_json::json!({
-                "display": "$0.003/min audio"
-            })),
-            context_tokens: Some(16_000),
-            traits: vec!["prompt".to_string()],
-            capabilities: vec![],
-        },
-        VeniceModelDto {
-            provider: OPENAI_PROVIDER.to_string(),
-            id: "gpt-4o-transcribe".to_string(),
-            name: "GPT-4o Transcribe".to_string(),
-            model_type: "asr".to_string(),
-            description: Some("Higher-accuracy OpenAI speech-to-text model.".to_string()),
-            privacy: Some("OpenAI".to_string()),
-            pricing: Some(serde_json::json!({
-                "display": "$0.006/min audio"
-            })),
-            context_tokens: Some(16_000),
-            traits: vec!["prompt".to_string()],
-            capabilities: vec![],
-        },
-        VeniceModelDto {
-            provider: OPENAI_PROVIDER.to_string(),
-            id: "whisper-1".to_string(),
-            name: "Whisper".to_string(),
-            model_type: "asr".to_string(),
-            description: Some("Original OpenAI general-purpose transcription model.".to_string()),
-            privacy: Some("OpenAI".to_string()),
-            pricing: Some(serde_json::json!({
-                "display": "$0.006/min audio"
-            })),
-            context_tokens: None,
-            traits: vec!["prompt".to_string()],
-            capabilities: vec![],
-        },
-    ]
-}
-
-fn capability_names(value: &serde_json::Value) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_capability_names(value, "", &mut names);
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn collect_capability_names(value: &serde_json::Value, prefix: &str, names: &mut Vec<String>) {
-    let serde_json::Value::Object(map) = value else {
-        return;
-    };
-    for (key, value) in map {
-        let name = if prefix.is_empty() {
-            key.to_string()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        match value {
-            serde_json::Value::Bool(true) => names.push(name),
-            serde_json::Value::Object(_) => collect_capability_names(value, &name, names),
-            _ => {}
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        configured_provider, default_transcription_provider, openai_transcription_models,
-        venice_model_items, VeniceModelsApiResponse, OPENAI_PROVIDER, VENICE_PROVIDER,
-    };
-
-    #[test]
-    fn venice_remains_the_generation_provider() {
-        assert_eq!(configured_provider(), VENICE_PROVIDER);
-    }
-
-    #[test]
-    fn venice_is_the_default_transcription_provider() {
-        assert_eq!(default_transcription_provider(), VENICE_PROVIDER);
-    }
-
-    #[test]
-    fn exposes_openai_transcription_models() {
-        let models = openai_transcription_models();
-
-        assert!(models
-            .iter()
-            .any(|model| model.id == "gpt-4o-mini-transcribe"));
-        assert!(models.iter().all(|model| model.provider == OPENAI_PROVIDER));
-    }
-
-    #[test]
-    fn parses_online_models_for_requested_type() {
-        let response: VeniceModelsApiResponse = serde_json::from_value(serde_json::json!({
-            "data": [
-                {
-                    "id": "text-model",
-                    "type": "text",
-                    "model_spec": {
-                        "name": "Text Model",
-                        "description": "Writes notes",
-                        "privacy": "private",
-                        "pricing": {
-                            "input": { "usd": 0.15 },
-                            "output": { "usd": 0.60 }
-                        },
-                        "availableContextTokens": 32768,
-                        "capabilities": {
-                            "supportsFunctionCalling": true,
-                            "supportsVision": false,
-                            "nested": { "enabled": true }
-                        },
-                        "traits": ["default"],
-                        "offline": false
-                    }
-                },
-                {
-                    "id": "offline-text-model",
-                    "type": "text",
-                    "model_spec": {
-                        "name": "Offline",
-                        "offline": true
-                    }
-                },
-                {
-                    "id": "asr-model",
-                    "type": "asr",
-                    "model_spec": {
-                        "name": "ASR Model",
-                        "offline": false
-                    }
-                }
-            ]
-        }))
-        .expect("models response");
-
-        let models = venice_model_items(response, "text");
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "text-model");
-        assert_eq!(models[0].name, "Text Model");
-        assert_eq!(models[0].privacy.as_deref(), Some("private"));
-        assert_eq!(models[0].context_tokens, Some(32768));
-        assert_eq!(models[0].traits, vec!["default"]);
-        assert_eq!(
-            models[0].capabilities,
-            vec!["nested.enabled", "supportsFunctionCalling"]
-        );
-        assert!(models[0].pricing.is_some());
     }
 }
