@@ -88,6 +88,15 @@ pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::migrate::Mig
                 .map_err(sqlx::migrate::MigrateError::Execute)?;
         }
     }
+    for statement in include_str!("../../migrations/005_dictation_history.sql").split(';') {
+        let statement = statement.trim();
+        if !statement.is_empty() {
+            sqlx::query(statement)
+                .execute(_pool)
+                .await
+                .map_err(sqlx::migrate::MigrateError::Execute)?;
+        }
+    }
     Ok(())
 }
 

@@ -41,6 +41,7 @@ pub fn run() {
             commands::retry_processing,
             commands::recover_recording,
             dictation::dictation_settings,
+            dictation::list_dictation_history,
             dictation::set_dictation_shortcut,
             dictation::set_dictation_microphone,
             dictation::set_dictation_style,

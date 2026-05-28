@@ -4,6 +4,7 @@ import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
 import { IconFolderDelete } from "central-icons/IconFolderDelete";
 import { IconFolders } from "central-icons/IconFolders";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
+import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconSidebarHiddenLeftWide } from "central-icons/IconSidebarHiddenLeftWide";
@@ -13,7 +14,12 @@ import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { NOTE_DND_MIME } from "../../lib/dnd";
 import type { FolderDto, NoteListItemDto } from "../../lib/tauri";
 
-export type SidebarView = "notes" | "all-notes" | "settings" | "folders";
+export type SidebarView =
+  | "notes"
+  | "all-notes"
+  | "settings"
+  | "folders"
+  | "dictation";
 
 type SidebarProps = {
   folders: FolderDto[];
@@ -187,6 +193,18 @@ export function Sidebar({
             <IconFolders size={16} />
           </span>
           <span className="sidebar-nav-label">Folders</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-nav-item"
+          data-active={activeView === "dictation"}
+          aria-current={activeView === "dictation" ? "page" : undefined}
+          onClick={() => onChangeView("dictation")}
+        >
+          <span className="sidebar-nav-icon">
+            <IconMicrophone size={16} />
+          </span>
+          <span className="sidebar-nav-label">Dictation</span>
         </button>
       </nav>
 

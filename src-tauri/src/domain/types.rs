@@ -174,6 +174,23 @@ pub struct DictionaryEntryDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictationHistoryItemDto {
+    pub id: String,
+    pub text: String,
+    pub language: Option<String>,
+    pub provider: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDictationHistoryResponse {
+    pub items: Vec<DictationHistoryItemDto>,
+    pub retention_days: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateDictionaryEntryRequest {
     pub phrase: String,
 }

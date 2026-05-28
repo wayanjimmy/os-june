@@ -1,10 +1,13 @@
 use crate::domain::types::{
-    AppError, AudioArtifactDto, DictionaryEntryDto, FolderDto, ListNotesResponse, NoteDto,
-    NoteListItemDto, ProcessingStatus, RecordingSourceMode, TranscriptDto,
+    AppError, AudioArtifactDto, DictationHistoryItemDto, DictionaryEntryDto, FolderDto,
+    ListDictationHistoryResponse, ListNotesResponse, NoteDto, NoteListItemDto, ProcessingStatus,
+    RecordingSourceMode, TranscriptDto,
 };
-use chrono::{SecondsFormat, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
+
+const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
 
 #[derive(Clone)]
 pub struct Repositories {
@@ -265,6 +268,72 @@ impl Repositories {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(dictionary_entry_from_row).collect())
+    }
+
+    pub async fn create_dictation_history_item(
+        &self,
+        text: &str,
+        language: Option<String>,
+        provider: &str,
+    ) -> Result<Option<DictationHistoryItemDto>, sqlx::Error> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let item = DictationHistoryItemDto {
+            id: Uuid::new_v4().to_string(),
+            text: text.to_string(),
+            language,
+            provider: provider.to_string(),
+            created_at: timestamp(),
+        };
+        sqlx::query(
+            "INSERT INTO dictation_history (id, text, language, provider, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&item.id)
+        .bind(&item.text)
+        .bind(&item.language)
+        .bind(&item.provider)
+        .bind(&item.created_at)
+        .execute(&self.pool)
+        .await?;
+        self.prune_old_dictation_history().await?;
+        Ok(Some(item))
+    }
+
+    pub async fn list_dictation_history(
+        &self,
+        limit: i64,
+    ) -> Result<ListDictationHistoryResponse, sqlx::Error> {
+        self.prune_old_dictation_history().await?;
+        let rows = sqlx::query(
+            "SELECT id, text, language, provider, created_at
+             FROM dictation_history
+             WHERE created_at >= ?
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?",
+        )
+        .bind(dictation_history_cutoff_timestamp())
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(ListDictationHistoryResponse {
+            items: rows
+                .into_iter()
+                .map(dictation_history_item_from_row)
+                .collect(),
+            retention_days: DICTATION_HISTORY_RETENTION_DAYS,
+        })
+    }
+
+    pub async fn prune_old_dictation_history(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM dictation_history WHERE created_at < ?")
+            .bind(dictation_history_cutoff_timestamp())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn create_dictionary_entry(
@@ -1597,6 +1666,21 @@ fn dictionary_entry_from_row(row: sqlx::sqlite::SqliteRow) -> DictionaryEntryDto
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
+}
+
+fn dictation_history_item_from_row(row: sqlx::sqlite::SqliteRow) -> DictationHistoryItemDto {
+    DictationHistoryItemDto {
+        id: row.get("id"),
+        text: row.get("text"),
+        language: row.get("language"),
+        provider: row.get("provider"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn dictation_history_cutoff_timestamp() -> String {
+    (Utc::now() - Duration::days(DICTATION_HISTORY_RETENTION_DAYS))
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 fn preview_for(title: &str, content: &str) -> String {

@@ -1200,8 +1200,8 @@ final class DictationController {
     }
 
     func paste(text: String) {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
+        let text = dictationPasteText(text)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             fail(DictationError.missingTranscript)
             return
         }
@@ -1387,6 +1387,14 @@ final class DictationController {
         cleanupRecordingFile()
         recordingURL = nil
     }
+}
+
+func dictationPasteText(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+        return ""
+    }
+    return "\(trimmed) "
 }
 
 struct PasteboardSnapshot {

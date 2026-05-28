@@ -1,3 +1,4 @@
+use chrono::{Duration, SecondsFormat, Utc};
 use os_notetaker_lib::db::{migrations::run_migrations, repositories::Repositories};
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -9,6 +10,39 @@ async fn repos() -> Repositories {
         .expect("sqlite memory");
     run_migrations(&pool).await.expect("migrations");
     Repositories::new(pool)
+}
+
+#[tokio::test]
+async fn dictation_history_keeps_recent_items_and_prunes_old_items() {
+    let repos = repos().await;
+    let old_created_at =
+        (Utc::now() - Duration::days(8)).to_rfc3339_opts(SecondsFormat::Millis, true);
+
+    sqlx::query(
+        "INSERT INTO dictation_history (id, text, language, provider, created_at)
+         VALUES ('old', 'Old dictation', NULL, 'openai', ?)",
+    )
+    .bind(old_created_at)
+    .execute(&repos.pool)
+    .await
+    .expect("insert old history item");
+
+    let created = repos
+        .create_dictation_history_item("  Recent dictation.  ", Some("en".to_string()), "openai")
+        .await
+        .expect("create history item")
+        .expect("non-empty dictation should be stored");
+
+    assert_eq!(created.text, "Recent dictation.");
+
+    let history = repos
+        .list_dictation_history(50)
+        .await
+        .expect("list history");
+    assert_eq!(history.retention_days, 7);
+    assert_eq!(history.items.len(), 1);
+    assert_eq!(history.items[0].id, created.id);
+    assert_eq!(history.items[0].language.as_deref(), Some("en"));
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
 import { FoldersWorkspace } from "../components/folders/FoldersWorkspace";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
@@ -592,6 +593,8 @@ export function App() {
                 onSourceModeChange={handleSourceModeChange}
                 onEnableSystemAudio={handleEnableSystemAudio}
               />
+            ) : activeView === "dictation" ? (
+              <DictationHistoryView />
             ) : activeView === "all-notes" ? (
               <NotesList
                 notes={state.notes}

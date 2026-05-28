@@ -1,6 +1,6 @@
 use crate::domain::{
     processing::{build_dictionary_context, merge_transcription_context},
-    types::AppError,
+    types::{AppError, ListDictationHistoryResponse},
 };
 use crate::providers::{
     configured_transcription_provider,
@@ -518,6 +518,17 @@ pub fn dictation_settings(
         .map_err(|_| AppError::new("dictation_settings_unavailable", "Settings lock failed."))?
         .clone();
     Ok(DictationSettingsResponse { settings })
+}
+
+#[tauri::command]
+pub async fn list_dictation_history(
+    app: AppHandle,
+) -> Result<ListDictationHistoryResponse, AppError> {
+    crate::commands::repositories(&app)
+        .await?
+        .list_dictation_history(200)
+        .await
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -1184,6 +1195,9 @@ async fn transcribe_recording_ready(app: AppHandle, audio_path: PathBuf) {
         emit_dictation_event_value(&app, app_error_event(error));
         return;
     }
+    if let Some(transcript) = outcome.transcript.as_ref() {
+        store_dictation_history_item(&app, transcript).await;
+    }
     if let Some(event) = outcome.event {
         emit_dictation_event_value(&app, event);
     }
@@ -1435,6 +1449,7 @@ fn recording_path_from_event(event: &serde_json::Value) -> Result<PathBuf, AppEr
 struct DictationTranscriptionOutcome {
     helper_command: serde_json::Value,
     event: Option<serde_json::Value>,
+    transcript: Option<TranscriptionProviderResult>,
 }
 
 fn outcome_from_transcription_result(
@@ -1444,14 +1459,39 @@ fn outcome_from_transcription_result(
         Ok(transcript) => DictationTranscriptionOutcome {
             helper_command: serde_json::json!({
                 "type": "paste_text",
-                "text": transcript.text,
+                "text": transcript.text.clone(),
             }),
             event: None,
+            transcript: Some(transcript),
         },
         Err(error) => DictationTranscriptionOutcome {
             helper_command: serde_json::json!({ "type": "discard_recording" }),
             event: Some(app_error_event(error)),
+            transcript: None,
         },
+    }
+}
+
+async fn store_dictation_history_item(app: &AppHandle, transcript: &TranscriptionProviderResult) {
+    match crate::commands::repositories(app).await {
+        Ok(repos) => {
+            if let Err(error) = repos
+                .create_dictation_history_item(
+                    &transcript.text,
+                    transcript.language.clone(),
+                    &transcript.provider,
+                )
+                .await
+            {
+                eprintln!("[dictation] history save failed: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "[dictation] history unavailable code={} message={}",
+                error.code, error.message
+            );
+        }
     }
 }
 
@@ -2098,6 +2138,10 @@ mod tests {
             })
         );
         assert!(outcome.event.is_none());
+        assert_eq!(
+            outcome.transcript.as_ref().map(|item| item.text.as_str()),
+            Some("Paste this transcript.")
+        );
     }
 
     #[test]
@@ -2121,6 +2165,7 @@ mod tests {
                 },
             }))
         );
+        assert!(outcome.transcript.is_none());
     }
 
     #[test]

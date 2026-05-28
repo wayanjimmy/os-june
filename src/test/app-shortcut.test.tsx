@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   retryProcessing: vi.fn(),
   recoverRecording: vi.fn(),
   dictationHelperCommand: vi.fn(),
+  listDictationHistory: vi.fn(),
   playRecordingSound: vi.fn(),
   preloadRecordingSounds: vi.fn(),
 }));
@@ -67,6 +68,7 @@ vi.mock("../lib/tauri", () => ({
   retryProcessing: mocks.retryProcessing,
   recoverRecording: mocks.recoverRecording,
   dictationHelperCommand: mocks.dictationHelperCommand,
+  listDictationHistory: mocks.listDictationHistory,
 }));
 
 const now = "2026-05-19T10:00:00Z";
@@ -119,6 +121,10 @@ describe("App shortcuts", () => {
       ],
     });
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
+    mocks.listDictationHistory.mockResolvedValue({
+      items: [],
+      retentionDays: 7,
+    });
     mocks.updateNote.mockImplementation(async (input) => ({
       ...first,
       ...input,

@@ -108,6 +108,19 @@ export type DictationSettingsResponse = {
   settings: DictationSettingsDto;
 };
 
+export type DictationHistoryItemDto = {
+  id: string;
+  text: string;
+  language?: string;
+  provider: string;
+  createdAt: string;
+};
+
+export type ListDictationHistoryResponse = {
+  items: DictationHistoryItemDto[];
+  retentionDays: number;
+};
+
 export type DictationMicrophoneDeviceDto = {
   id: string;
   name: string;
@@ -489,6 +502,10 @@ export async function recoverRecording(
 
 export async function dictationSettings() {
   return invoke<DictationSettingsResponse>("dictation_settings");
+}
+
+export async function listDictationHistory() {
+  return invoke<ListDictationHistoryResponse>("list_dictation_history");
 }
 
 export async function providerModelSettings() {

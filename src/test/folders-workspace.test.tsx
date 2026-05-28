@@ -144,7 +144,9 @@ describe("Sidebar — Folders nav item", () => {
     expect(onChangeView).toHaveBeenCalledWith("settings");
   });
 
-  it("does not render a separate dictation settings view", () => {
+  it("opens dictation history from the primary nav", async () => {
+    const user = userEvent.setup();
+    const onChangeView = vi.fn();
     render(
       <Sidebar
         folders={folders}
@@ -152,7 +154,7 @@ describe("Sidebar — Folders nav item", () => {
         selectedNoteId={undefined}
         selectedFolderId={undefined}
         activeView="settings"
-        onChangeView={vi.fn()}
+        onChangeView={onChangeView}
         onCreateFolder={vi.fn()}
         onCreateNote={vi.fn()}
         onSelectAll={vi.fn()}
@@ -164,9 +166,8 @@ describe("Sidebar — Folders nav item", () => {
       />,
     );
 
-    expect(
-      screen.queryByRole("button", { name: "Dictation" }),
-    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dictation" }));
+    expect(onChangeView).toHaveBeenCalledWith("dictation");
   });
 });
 
