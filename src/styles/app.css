@@ -1290,6 +1290,7 @@ input:focus-visible,
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: var(--sp-2);
   height: 100%;
   padding: 0 var(--sp-4);
   border: 0;
@@ -1300,6 +1301,16 @@ input:focus-visible,
   font-weight: 500;
   cursor: pointer;
   transition: color var(--t-fast) var(--ease-out);
+}
+
+.segmented button > svg {
+  color: var(--muted-foreground);
+  transition: color var(--t-fast) var(--ease-out);
+}
+
+.segmented button[aria-pressed="true"] > svg,
+.segmented button:hover > svg {
+  color: var(--foreground);
 }
 
 .segmented button[aria-pressed="true"] {
@@ -3734,7 +3745,7 @@ input:focus-visible,
 }
 
 .add-notes-search:focus-within {
-  border-color: var(--ring);
+  border-color: var(--ring-focus);
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
@@ -3841,7 +3852,7 @@ input:focus-visible,
   display: grid;
   place-items: center;
   padding: var(--sp-8);
-  background: color-mix(in oklch, var(--foreground) 12%, transparent);
+  background: var(--scrim);
   backdrop-filter: saturate(140%) blur(8px);
   -webkit-backdrop-filter: saturate(140%) blur(8px);
   animation: dialog-backdrop-in var(--t-med) var(--ease-out);
@@ -3984,7 +3995,7 @@ input:focus-visible,
 .dialog-input:focus-visible,
 .dialog-textarea:focus-visible {
   outline: none;
-  border-color: var(--ring);
+  border-color: var(--ring-focus);
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 

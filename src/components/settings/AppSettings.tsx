@@ -6,6 +6,9 @@ import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconFire1 } from "central-icons/IconFire1";
 import { IconGhost2 } from "central-icons/IconGhost2";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
+import { IconMoonStar } from "central-icons/IconMoonStar";
+import { IconSun } from "central-icons/IconSun";
+import { IconTelevision } from "central-icons/IconTelevision";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -31,9 +34,52 @@ import type {
   VeniceModelDto,
 } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
+import { SegmentedControl } from "../ui/SegmentedControl";
 import { Switch } from "../ui/Switch";
 import { APP_COMMIT_HASH, APP_VERSION } from "../../app/build-info";
+import {
+  getStoredTheme,
+  setStoredTheme,
+  type ThemePreference,
+} from "../../lib/theme";
 import { ProviderLogo } from "./ProviderLogo";
+
+const THEME_OPTIONS: readonly {
+  value: ThemePreference;
+  label: ReactNode;
+  ariaLabel: string;
+}[] = [
+  {
+    value: "system",
+    label: (
+      <>
+        <IconTelevision size={14} />
+        System
+      </>
+    ),
+    ariaLabel: "Match system theme",
+  },
+  {
+    value: "light",
+    label: (
+      <>
+        <IconSun size={14} />
+        Light
+      </>
+    ),
+    ariaLabel: "Use light theme",
+  },
+  {
+    value: "dark",
+    label: (
+      <>
+        <IconMoonStar size={14} />
+        Dark
+      </>
+    ),
+    ariaLabel: "Use dark theme",
+  },
+];
 
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
   command: false,
@@ -107,6 +153,7 @@ export function AppSettings({
   const [shortcutError, setShortcutError] = useState<string>();
   const [status, setStatus] = useState<string>();
   const [micOpen, setMicOpen] = useState(false);
+  const [theme, setTheme] = useState<ThemePreference>(() => getStoredTheme());
   const [pickerMode, setPickerMode] = useState<ProviderModelMode>();
   const [modelSearch, setModelSearch] = useState("");
   const micWrapRef = useRef<HTMLDivElement>(null);
@@ -374,6 +421,38 @@ export function AppSettings({
         </p>
       </header>
 
+      <section
+        className="settings-group"
+        aria-labelledby="appearance-heading"
+      >
+        <h2 id="appearance-heading" className="settings-group-heading">
+          Appearance
+        </h2>
+        <div className="settings-card">
+          <div className="settings-rows">
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">Theme</h3>
+                <p className="settings-row-description">
+                  Match the system or force light or dark mode.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <SegmentedControl<ThemePreference>
+                  aria-label="App theme"
+                  value={theme}
+                  options={THEME_OPTIONS}
+                  onValueChange={(next) => {
+                    setTheme(next);
+                    setStoredTheme(next);
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="settings-group" aria-labelledby="dictation-heading">
         <h2 id="dictation-heading" className="settings-group-heading">
           Dictation
@@ -437,10 +516,12 @@ export function AppSettings({
                   <IconChevronDownSmall size={14} />
                 </button>
                 {micOpen ? (
+                  // 2px = (trigger 32 - item 28) / 2, so the selected item
+                  // overlays the trigger label exactly with no visual jump.
                   <ul
                     className="select-popover"
                     role="listbox"
-                    style={{ top: -(4 + selectedMicrophoneIndex * 28) }}
+                    style={{ top: -(2 + selectedMicrophoneIndex * 28) }}
                   >
                     {microphoneOptions.map((option) => {
                       const selected =
