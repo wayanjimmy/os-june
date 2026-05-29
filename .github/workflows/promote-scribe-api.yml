@@ -51,6 +51,9 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: write # push the digest-record git tag
+      packages: write # retag :production
     env:
       FROM_TAG: ${{ inputs.from-tag }}
     steps:
@@ -91,6 +94,7 @@ jobs:
 
           sha_short="${rev:0:7}"
           echo "sha_short=${sha_short}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=${rev}" >> "$GITHUB_OUTPUT"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "Resolved $source → digest=${digest} sha=${sha_short}"
 
@@ -112,3 +116,31 @@ jobs:
           target="${{ env.IMAGE }}:production"
           docker buildx imagetools create --tag "$target" "${{ env.IMAGE }}@${{ steps.image.outputs.digest }}"
           echo "Retagged ${{ env.IMAGE }}@${{ steps.image.outputs.digest }} as $target"
+
+      # Anchor "b": in-repo immutable record that <sha> deployed digest <D>.
+      - name: Record deployed digest
+        if: steps.phala.outputs.deployed == 'true'
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMG: ${{ env.IMAGE }}:${{ steps.image.outputs.sha_short }}
+          SHA_SHORT: ${{ steps.image.outputs.sha_short }}
+          FULL_SHA: ${{ steps.image.outputs.full_sha }}
+        run: |
+          set -euo pipefail
+          tag="deploy/production/${SHA_SHORT}"
+          # Tag the promoted image's SOURCE commit (full_sha), not the workflow
+          # checkout (a workflow_dispatch checks out the dispatch ref, not the
+          # source). Create-once so the record stays immutable; fetch the source
+          # commit since the checkout is shallow. Non-fatal — a record failure
+          # must not fail an already-successful promotion.
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag \`${tag}\` already recorded; left unchanged." >> "$GITHUB_STEP_SUMMARY"
+          elif git fetch --depth=1 origin "${FULL_SHA}" 2>/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" "${FULL_SHA}" -m "production deploy: ${IMG} = ${DIGEST} (commit ${FULL_SHA})"
+            git push origin "refs/tags/${tag}"
+            echo "Recorded \`${tag}\` → \`${DIGEST}\` @ \`${FULL_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not fetch source commit ${FULL_SHA}; skipped digest record for ${tag}."
+          fi
