@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{sync::OnceLock, time::Duration};
+use std::{error::Error as StdError, sync::OnceLock, time::Duration};
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(debug_assertions)]
 use tokio::{
@@ -577,6 +577,7 @@ fn parse_callback_query(path: &str) -> (Option<String>, Option<String>) {
 fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .no_proxy()
             .timeout(HTTP_TIMEOUT)
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Some(Duration::from_secs(30)))
@@ -726,7 +727,14 @@ async fn fetch_snapshot(cfg: &Config) -> Result<(AccountUser, AccountBalance), A
 }
 
 fn net_error(e: reqwest::Error) -> AppError {
-    AppError::new("network_error", e.to_string())
+    let mut message = e.to_string();
+    let mut source = e.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    AppError::new("network_error", message)
 }
 
 async fn store_tokens(pair: &TokenPair) -> Result<(), AppError> {
