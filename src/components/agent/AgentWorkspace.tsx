@@ -4,7 +4,6 @@ import {
   CircleStopIcon,
   ClockIcon,
   MessageSquareIcon,
-  PauseIcon,
   PlayIcon,
   RotateCwIcon,
   SendIcon,
@@ -506,11 +505,9 @@ export function AgentWorkspace() {
                   <StatusPill status={task.status} />
                   <span>{relativeDate(task.updatedAt)}</span>
                 </span>
-                {task.progressSummary ? (
-                  <span className="agent-task-row-summary">
-                    {task.progressSummary}
-                  </span>
-                ) : null}
+                <span className="agent-task-row-summary">
+                  {taskActivitySummary(task)}
+                </span>
               </button>
             ))}
           </div>
@@ -533,7 +530,7 @@ export function AgentWorkspace() {
                 <StatusIcon status={selectedTask.status} />
                 <div>
                   <h2>{selectedTask.title}</h2>
-                  <p>{selectedTask.progressSummary ?? "Ready"}</p>
+                  <p>{taskActivitySummary(selectedTask)}</p>
                 </div>
               </div>
               <div className="agent-actions">
@@ -1828,7 +1825,7 @@ function StatusIcon({ status }: { status: AgentTaskStatus }) {
   if (status === "running" || status === "queued")
     return <PlayIcon size={18} />;
   if (status === "cancelled") return <CircleStopIcon size={18} />;
-  if (status === "paused") return <PauseIcon size={18} />;
+  if (status === "paused") return <CircleStopIcon size={18} />;
   return <ClockIcon size={18} />;
 }
 
@@ -1843,10 +1840,38 @@ function toolStatusToTaskStatus(
 
 function statusLabel(status: AgentTaskStatus) {
   switch (status) {
+    case "queued":
+    case "running":
+      return "Working";
     case "waitingForUser":
-      return "Waiting";
+      return "Needs input";
+    case "paused":
+      return "Idle";
+    case "cancelled":
+      return "Stopped";
     default:
       return status[0].toUpperCase() + status.slice(1);
+  }
+}
+
+function taskActivitySummary(task: AgentTaskDto) {
+  switch (task.status) {
+    case "queued":
+      return "Starting work.";
+    case "running":
+      return task.progressSummary || "Working now.";
+    case "waitingForUser":
+      return "Waiting for your input.";
+    case "completed":
+      return "Finished.";
+    case "failed":
+      return task.lastError || "Stopped because something failed.";
+    case "cancelled":
+      return "Stopped.";
+    case "paused":
+      return "Not actively working.";
+    default:
+      return "Not actively working.";
   }
 }
 
