@@ -529,6 +529,13 @@ pub struct SendAgentMessageRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SaveAgentAssistantMessageRequest {
+    pub task_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentTaskRequest {
     pub task_id: String,
 }

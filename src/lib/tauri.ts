@@ -579,6 +579,15 @@ export async function sendAgentMessage(input: {
   return invoke<AgentTaskDto>("send_agent_message", { request: input });
 }
 
+export async function saveAgentAssistantMessage(input: {
+  taskId: string;
+  content: string;
+}) {
+  return invoke<AgentTaskDto>("save_agent_assistant_message", {
+    request: input,
+  });
+}
+
 export async function cancelAgentTask(taskId: string) {
   return invoke<AgentTaskDto>("cancel_agent_task", { request: { taskId } });
 }

@@ -59,6 +59,7 @@ pub fn run() {
             commands::create_agent_task,
             commands::get_agent_task,
             commands::send_agent_message,
+            commands::save_agent_assistant_message,
             commands::cancel_agent_task,
             commands::retry_agent_task,
             commands::list_agent_tool_events,

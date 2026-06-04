@@ -33,6 +33,7 @@ import {
   hermesBridgeToolsets,
   listAgentTasks,
   retryAgentTask,
+  saveAgentAssistantMessage,
   sendAgentMessage,
   startHermesBridge,
   toggleHermesBridgeSkill,
@@ -98,6 +99,8 @@ export function AgentWorkspace() {
     Record<string, string>
   >({});
   const gatewayRef = useRef<HermesGatewayClient | null>(null);
+  const liveEventsRef = useRef<Record<string, LiveHermesEvent[]>>({});
+  const hydratedTaskIdsRef = useRef<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement | null>(null);
   const autoStartRequestedRef = useRef(false);
 
@@ -132,6 +135,29 @@ export function AgentWorkspace() {
   useEffect(() => {
     void loadTasks();
   }, [loadTasks]);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const task = tasks.find((item) => item.id === selectedTaskId);
+    if (!task || task.messages.length || task.toolEvents.length) return;
+    if (hydratedTaskIdsRef.current.has(selectedTaskId)) return;
+    hydratedTaskIdsRef.current.add(selectedTaskId);
+    let cancelled = false;
+    getAgentTask(selectedTaskId)
+      .then((fullTask) => {
+        if (!cancelled) {
+          setTasks((current) =>
+            current.map((item) => (item.id === fullTask.id ? fullTask : item)),
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(messageFromError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTaskId, tasks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -247,19 +273,39 @@ export function AgentWorkspace() {
       setHermesSessions((prev) => ({ ...prev, [task.id]: sessionId }));
       const unlisten = gateway.onEvent((event) => {
         if (event.session_id !== sessionId) return;
-        setLiveEvents((prev) => ({
-          ...prev,
-          [task.id]: [
-            ...(prev[task.id] ?? []),
-            { ...event, receivedAt: new Date().toISOString() },
-          ].slice(-200),
-        }));
-        if (event.type === "message.complete") unlisten();
+        const liveEvent = { ...event, receivedAt: new Date().toISOString() };
+        const nextTaskEvents = [
+          ...(liveEventsRef.current[task.id] ?? []),
+          liveEvent,
+        ].slice(-200);
+        liveEventsRef.current = {
+          ...liveEventsRef.current,
+          [task.id]: nextTaskEvents,
+        };
+        setLiveEvents(liveEventsRef.current);
+        if (event.type === "message.complete") {
+          unlisten();
+          const completedText = completedHermesMessageText(nextTaskEvents);
+          if (completedText) {
+            void persistHermesAssistantMessage(task.id, completedText);
+          }
+        }
       });
       await gateway.request("prompt.submit", {
         session_id: sessionId,
         text: content,
       });
+    } catch (err) {
+      setError(messageFromError(err));
+    }
+  }
+
+  async function persistHermesAssistantMessage(taskId: string, content: string) {
+    try {
+      const savedTask = await saveAgentAssistantMessage({ taskId, content });
+      liveEventsRef.current = { ...liveEventsRef.current, [taskId]: [] };
+      setLiveEvents(liveEventsRef.current);
+      upsertTask(savedTask);
     } catch (err) {
       setError(messageFromError(err));
     }
@@ -857,6 +903,16 @@ function normalizeHermesEvents(events: LiveHermesEvent[]): TimelineItem[] {
     });
   }
   return items;
+}
+
+function completedHermesMessageText(events: LiveHermesEvent[]) {
+  const message = normalizeHermesEvents(events)
+    .filter((item): item is Extract<TimelineItem, { kind: "hermes-message" }> =>
+      item.kind === "hermes-message",
+    )
+    .at(-1);
+  if (!message || message.item.status !== "completed") return "";
+  return message.item.text.trim();
 }
 
 function SafetyPanel() {

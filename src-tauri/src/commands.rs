@@ -29,8 +29,9 @@ use crate::{
             NoteDto, OpenPrivacySettingsRequest, RecordingSessionDto, RecordingSource,
             RecordingSourceMode, RecordingSourceReadinessDto, RecordingStatusDto,
             RemoveNoteFromFolderRequest, RenameFolderRequest, RetryProcessingRequest,
-            SendAgentMessageRequest, SessionRequest, SourceReadinessDto, StartRecordingRequest,
-            UpdateDictionaryEntryRequest, UpdateNoteRequest,
+            SaveAgentAssistantMessageRequest, SendAgentMessageRequest, SessionRequest,
+            SourceReadinessDto, StartRecordingRequest, UpdateDictionaryEntryRequest,
+            UpdateNoteRequest,
         },
     },
 };
@@ -274,6 +275,25 @@ pub async fn send_agent_message(
     if request.run_placeholder.unwrap_or(true) {
         schedule_agent_runtime_placeholder(repos.clone(), request.task_id.clone());
     }
+    Ok(repos.get_agent_task(&request.task_id).await?)
+}
+
+#[tauri::command]
+pub async fn save_agent_assistant_message(
+    app: AppHandle,
+    request: SaveAgentAssistantMessageRequest,
+) -> Result<AgentTaskDto, AppError> {
+    let content = request.content.trim();
+    if content.is_empty() {
+        return Err(AppError::new(
+            "agent_message_required",
+            "Message content is required.",
+        ));
+    }
+    let repos = repositories(&app).await?;
+    repos
+        .add_agent_message(&request.task_id, AgentMessageRole::Assistant, content)
+        .await?;
     Ok(repos.get_agent_task(&request.task_id).await?)
 }
 
