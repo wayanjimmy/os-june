@@ -354,6 +354,36 @@ impl Repositories {
         Ok(())
     }
 
+    pub async fn complete_agent_tasks_with_assistant_messages(&self) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE agent_tasks
+             SET status = 'completed',
+                 progress_summary = 'Completed.',
+                 updated_at = COALESCE(
+                     (SELECT MAX(created_at)
+                      FROM agent_messages
+                      WHERE task_id = agent_tasks.id AND role = 'assistant'),
+                     updated_at
+                 ),
+                 completed_at = COALESCE(
+                     completed_at,
+                     (SELECT MAX(created_at)
+                      FROM agent_messages
+                      WHERE task_id = agent_tasks.id AND role = 'assistant'),
+                     updated_at
+                 )
+             WHERE status IN ('queued', 'running', 'paused', 'waiting_for_user')
+               AND EXISTS (
+                   SELECT 1
+                   FROM agent_messages
+                   WHERE task_id = agent_tasks.id AND role = 'assistant'
+               )",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_agent_tasks(&self) -> Result<AgentTaskListResponse, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, title, prompt, status, safety_profile, progress_summary, last_error,

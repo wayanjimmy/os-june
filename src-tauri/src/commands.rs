@@ -46,6 +46,7 @@ use tauri::{AppHandle, Manager};
 pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError> {
     let repos = repositories(&app).await?;
     repos.pause_running_agent_tasks_on_launch().await?;
+    repos.complete_agent_tasks_with_assistant_messages().await?;
     let active_recoveries = scan_recoverable_recordings(&repos.pool)
         .await
         .map_err(|error| AppError::new("recovery_scan_failed", error.to_string()))?;
@@ -211,6 +212,7 @@ pub async fn list_dictionary_entries(app: AppHandle) -> Result<Vec<DictionaryEnt
 #[tauri::command]
 pub async fn list_agent_tasks(app: AppHandle) -> Result<AgentTaskListResponse, AppError> {
     let repos = repositories(&app).await?;
+    repos.complete_agent_tasks_with_assistant_messages().await?;
     let response = repos.list_agent_tasks().await?;
     for task in &response.items {
         if let Err(error) = hydrate_agent_task_from_hermes(&app, &repos, &task.id).await {
@@ -309,6 +311,14 @@ pub async fn save_agent_assistant_message(
     let repos = repositories(&app).await?;
     repos
         .add_agent_message(&request.task_id, AgentMessageRole::Assistant, content)
+        .await?;
+    repos
+        .update_agent_task_status(
+            &request.task_id,
+            AgentTaskStatus::Completed,
+            Some("Completed."),
+            None,
+        )
         .await?;
     Ok(repos.get_agent_task(&request.task_id).await?)
 }
@@ -1127,6 +1137,10 @@ async fn hydrate_agent_task_from_hermes(
     task_id: &str,
 ) -> Result<(), AppError> {
     let task = repos.get_agent_task(task_id).await?;
+    let already_has_assistant_message = task
+        .messages
+        .iter()
+        .any(|message| message.role == AgentMessageRole::Assistant);
     let paths = app_paths(app)?;
     let hermes_db_path = paths.data_dir.join("hermes").join("state.db");
     if !hermes_db_path.exists() {
@@ -1188,6 +1202,7 @@ async fn hydrate_agent_task_from_hermes(
     .fetch_all(&pool)
     .await
     .map_err(|error| AppError::new("hermes_state_unavailable", error.to_string()))?;
+    let found_hermes_assistant_messages = !rows.is_empty();
 
     for row in rows {
         let content: String = row.get("content");
@@ -1199,6 +1214,21 @@ async fn hydrate_agent_task_from_hermes(
                 AgentMessageRole::Assistant,
                 content.trim(),
                 &created_at,
+            )
+            .await?;
+    }
+    if (already_has_assistant_message || found_hermes_assistant_messages)
+        && matches!(
+            task.status,
+            AgentTaskStatus::Queued | AgentTaskStatus::Running
+        )
+    {
+        repos
+            .update_agent_task_status(
+                task_id,
+                AgentTaskStatus::Completed,
+                Some("Completed."),
+                None,
             )
             .await?;
     }

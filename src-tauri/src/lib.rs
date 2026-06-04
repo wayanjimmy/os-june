@@ -108,6 +108,7 @@ pub fn run() {
         .setup(|app| {
             providers::setup(app);
             dictation::setup(app);
+            repair_agent_task_statuses_on_app_start(app);
             hermes_bridge::start_on_app_start(app);
             os_accounts::setup_deep_link(app);
             #[cfg(target_os = "macos")]
@@ -125,6 +126,23 @@ pub fn run() {
             tauri::RunEvent::Reopen { .. } => show_main_window(app),
             _ => {}
         });
+}
+
+fn repair_agent_task_statuses_on_app_start(app: &tauri::App) {
+    let app = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        match commands::repositories(&app).await {
+            Ok(repos) => {
+                if let Err(error) = repos.complete_agent_tasks_with_assistant_messages().await {
+                    eprintln!("failed to repair agent task statuses on app startup: {error}");
+                }
+            }
+            Err(error) => eprintln!(
+                "failed to open repositories for agent task status repair: {}",
+                error.message
+            ),
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
