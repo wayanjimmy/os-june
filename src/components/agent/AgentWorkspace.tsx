@@ -24,8 +24,6 @@ import {
   createAgentTask,
   getAgentTask,
   hermesBridgeMessagingPlatforms,
-  hermesBridgeSessionMessages,
-  hermesBridgeSessions,
   hermesBridgeSkills,
   hermesBridgeStatus,
   hermesBridgeToolsets,
@@ -50,6 +48,12 @@ import {
   type HermesToolsetInfo,
   type HermesBridgeStatus,
 } from "../../lib/tauri";
+import {
+  listHermesSessionMessages,
+  listHermesSessions,
+  sessionTimestamp,
+  titleFromPrompt,
+} from "../../lib/hermes-adapter";
 import {
   HermesGatewayClient,
   type HermesGatewayEvent,
@@ -199,19 +203,7 @@ export function AgentWorkspace() {
     if (!bridge.running) return;
     setHermesSessionsLoading(true);
     try {
-      const response = await hermesBridgeSessions({
-        limit: 100,
-        offset: 0,
-        archived: "exclude",
-        minMessages: 0,
-        order: "recent",
-      });
-      const sessions = (
-        response.sessions ??
-        response.items ??
-        response.data ??
-        []
-      ).sort((a, b) => sessionTimestamp(b).localeCompare(sessionTimestamp(a)));
+      const sessions = await listHermesSessions();
       setHermesSessionItems(sessions);
       setSelectedHermesSessionId((current) => {
         if (current && sessions.some((session) => session.id === current)) {
@@ -246,11 +238,9 @@ export function AgentWorkspace() {
   useEffect(() => {
     if (!bridge.running || !selectedHermesSessionId) return;
     let cancelled = false;
-    hermesBridgeSessionMessages(selectedHermesSessionId)
-      .then((response) => {
+    listHermesSessionMessages(selectedHermesSessionId)
+      .then((messages) => {
         if (cancelled) return;
-        const messages =
-          response.messages ?? response.items ?? response.data ?? [];
         setHermesSessionMessages((current) => ({
           ...current,
           [selectedHermesSessionId]: messages,
@@ -522,10 +512,10 @@ export function AgentWorkspace() {
 
   async function refreshHermesSession(sessionId: string) {
     try {
-      const response = await hermesBridgeSessionMessages(sessionId);
+      const messages = await listHermesSessionMessages(sessionId);
       setHermesSessionMessages((current) => ({
         ...current,
-        [sessionId]: response.messages ?? response.items ?? response.data ?? [],
+        [sessionId]: messages,
       }));
       setPendingHermesMessages((current) => ({ ...current, [sessionId]: [] }));
       liveEventsRef.current = { ...liveEventsRef.current, [sessionId]: [] };
@@ -2289,21 +2279,6 @@ function relativeDate(value: string) {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
-}
-
-function sessionTimestamp(session: HermesSessionInfo) {
-  return (
-    session.last_active ??
-    session.started_at ??
-    session.ended_at ??
-    new Date(0).toISOString()
-  );
-}
-
-function titleFromPrompt(prompt: string) {
-  const title = prompt.replace(/\s+/g, " ").trim();
-  if (title.length <= 72) return title || "Untitled session";
-  return `${title.slice(0, 69).trim()}...`;
 }
 
 function messageFromError(err: unknown) {
