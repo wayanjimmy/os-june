@@ -442,16 +442,22 @@ export type HermesSessionMessage = {
   id: string;
   session_id?: string;
   role: "system" | "user" | "assistant" | "tool";
-  content?: string | null;
+  content?: unknown;
+  text?: unknown;
+  context?: unknown;
+  name?: string | null;
   tool_call_id?: string | null;
   tool_calls?: unknown;
   tool_name?: string | null;
-  timestamp?: string;
-  created_at?: string;
+  timestamp?: string | number;
+  created_at?: string | number;
   token_count?: number | null;
   finish_reason?: string | null;
   reasoning?: string | null;
   reasoning_content?: string | null;
+  reasoning_details?: unknown;
+  codex_reasoning_items?: unknown;
+  codex_message_items?: unknown;
 };
 
 export type HermesSessionMessagesResponse = {

@@ -75,7 +75,7 @@ export function buildHermesSessionChatTurns(
       upsertToolPart(turn.parts, {
         id,
         name: message.tool_name ?? "Tool",
-        text: stringValue(message.content, true) ?? "",
+        text: textFromHermesContent(message.content) ?? "",
         status: "complete",
       });
       turn.status = "complete";
@@ -97,7 +97,8 @@ export function buildHermesSessionChatTurns(
 
     const reasoning =
       stringValue(message.reasoning, true) ??
-      stringValue(message.reasoning_content, true);
+      stringValue(message.reasoning_content, true) ??
+      textFromHermesContent(message.reasoning_details);
     if (reasoning) {
       turn.parts.push({
         type: "reasoning",
@@ -113,14 +114,14 @@ export function buildHermesSessionChatTurns(
         id: call.id,
         name: humanizeToolName(call.name),
         text:
-          stringValue(result?.content, true) ??
+          textFromHermesContent(result?.content) ??
           stringifyObject(call.arguments) ??
           "",
         status: "complete",
       });
     }
 
-    const content = stringValue(message.content, true);
+    const content = displayContentForHermesMessage(message);
     if (content) {
       turn.parts.push({
         type: "text",
@@ -394,7 +395,7 @@ function eventText(event: HermesGatewayEvent) {
 }
 
 function messageTimestamp(message: HermesSessionMessage) {
-  return message.timestamp ?? message.created_at ?? new Date().toISOString();
+  return timestampString(message.timestamp ?? message.created_at);
 }
 
 function parseToolCalls(value: unknown) {
@@ -428,6 +429,71 @@ function safeJsonParse(value: string) {
   } catch {
     return undefined;
   }
+}
+
+function displayContentForHermesMessage(message: HermesSessionMessage) {
+  const content =
+    textFromHermesContent(message.content) ??
+    textFromHermesContent(message.text) ??
+    textFromHermesContent(message.context) ??
+    stringValue(message.name, true) ??
+    "";
+  if (message.role !== "user") return content.trim();
+  return stripHermesContextMarkers(content);
+}
+
+function textFromHermesContent(value: unknown, depth = 0): string | undefined {
+  if (value === null || value === undefined || depth > 4) return undefined;
+  if (typeof value === "string") {
+    if (!value.trim()) return undefined;
+    const parsed = parseLikelyJsonContent(value);
+    if (parsed !== undefined) {
+      const parsedText = textFromHermesContent(parsed, depth + 1);
+      if (parsedText?.trim()) return parsedText;
+    }
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean")
+    return String(value);
+  if (Array.isArray(value)) {
+    const text = value
+      .map((item) => textFromHermesContent(item, depth + 1) ?? "")
+      .join("");
+    return text.trim() ? text : undefined;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of [
+      "text",
+      "output_text",
+      "content",
+      "message",
+      "delta",
+      "summary",
+    ]) {
+      const text = textFromHermesContent(record[key], depth + 1);
+      if (text?.trim()) return text;
+    }
+    return stringifyObject(value) || undefined;
+  }
+  return undefined;
+}
+
+function parseLikelyJsonContent(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
+  return safeJsonParse(trimmed);
+}
+
+function stripHermesContextMarkers(value: string) {
+  const withoutWarnings = value.replace(
+    /\n*--- Context Warnings ---[\s\S]*$/m,
+    "",
+  );
+  const marker = withoutWarnings.search(/\n*--- Attached Context ---/m);
+  const visible =
+    marker >= 0 ? withoutWarnings.slice(0, marker) : withoutWarnings;
+  return visible.trim();
 }
 
 function stringifyObject(value: unknown) {
@@ -543,6 +609,19 @@ function stringValue(value: unknown, preserveWhitespace = false) {
   if (typeof value === "number" || typeof value === "boolean")
     return String(value);
   return undefined;
+}
+
+function timestampString(value: unknown) {
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds =
+      value > 0 && value < 10_000_000_000 ? value * 1000 : value;
+    return new Date(milliseconds).toISOString();
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+  return new Date().toISOString();
 }
 
 function humanizeToolName(value: string) {

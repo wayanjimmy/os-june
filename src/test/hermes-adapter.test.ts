@@ -40,7 +40,7 @@ describe("Hermes adapter", () => {
   it("normalizes raw gateway message lists", () => {
     const messages = normalizeHermesSessionMessagesResponse({
       data: [
-        { id: "m1", role: "user", content: "Hello" },
+        { id: 1, role: "user", content: "Hello" } as never,
         { id: "m2", role: "assistant", content: "Hi" },
         {
           id: "bad",
@@ -54,6 +54,7 @@ describe("Hermes adapter", () => {
       "user",
       "assistant",
     ]);
+    expect(messages.map((message) => message.id)).toEqual(["1", "m2"]);
   });
 
   it("keeps session display helpers stable", () => {

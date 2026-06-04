@@ -46,7 +46,9 @@ export function normalizeHermesSessionsResponse(
 export function normalizeHermesSessionMessagesResponse(
   response: HermesSessionMessagesResponse,
 ) {
-  return extractList(response, "messages").filter(isHermesSessionMessage);
+  return extractList(response, "messages").flatMap(
+    normalizeHermesSessionMessage,
+  );
 }
 
 export function sessionTimestamp(session: HermesSessionInfo) {
@@ -91,16 +93,22 @@ function isHermesSessionInfo(value: unknown): value is HermesSessionInfo {
   );
 }
 
-function isHermesSessionMessage(value: unknown): value is HermesSessionMessage {
-  if (!value || typeof value !== "object") return false;
-  const message = value as { id?: unknown; role?: unknown };
-  return (
-    typeof message.id === "string" &&
-    (message.role === "system" ||
-      message.role === "user" ||
-      message.role === "assistant" ||
-      message.role === "tool")
-  );
+function normalizeHermesSessionMessage(value: unknown): HermesSessionMessage[] {
+  if (!value || typeof value !== "object") return [];
+  const message = value as HermesSessionMessage & {
+    id?: unknown;
+    role?: unknown;
+  };
+  if (typeof message.id !== "string" && typeof message.id !== "number")
+    return [];
+  if (
+    message.role !== "system" &&
+    message.role !== "user" &&
+    message.role !== "assistant" &&
+    message.role !== "tool"
+  )
+    return [];
+  return [{ ...message, id: String(message.id) }];
 }
 
 function timestampString(value: unknown) {
