@@ -113,13 +113,19 @@ pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::migrate::Mig
             }
         }
     }
+    for statement in include_str!("../../migrations/007_agent.sql").split(';') {
+        let statement = statement.trim();
+        if !statement.is_empty() {
+            sqlx::query(statement)
+                .execute(_pool)
+                .await
+                .map_err(sqlx::migrate::MigrateError::Execute)?;
+        }
+    }
     Ok(())
 }
 
-async fn index_exists(
-    pool: &SqlitePool,
-    index: &str,
-) -> Result<bool, sqlx::migrate::MigrateError> {
+async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool, sqlx::migrate::MigrateError> {
     let row = sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?")
         .bind(index)
         .fetch_optional(pool)

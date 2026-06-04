@@ -4,6 +4,7 @@ pub mod commands;
 pub mod db;
 pub mod dictation;
 pub mod domain;
+pub mod hermes_bridge;
 pub mod os_accounts;
 pub mod providers;
 pub mod scribe_api;
@@ -54,6 +55,16 @@ pub fn run() {
             commands::create_dictionary_entry,
             commands::update_dictionary_entry,
             commands::delete_dictionary_entry,
+            commands::list_agent_tasks,
+            commands::create_agent_task,
+            commands::get_agent_task,
+            commands::send_agent_message,
+            commands::cancel_agent_task,
+            commands::retry_agent_task,
+            commands::list_agent_tool_events,
+            hermes_bridge::hermes_bridge_status,
+            hermes_bridge::start_hermes_bridge,
+            hermes_bridge::stop_hermes_bridge,
             commands::get_microphone_permission_state,
             commands::check_recording_source_readiness,
             commands::open_privacy_settings,
@@ -84,6 +95,7 @@ pub fn run() {
             os_accounts::os_accounts_logout,
             os_accounts::os_accounts_top_up
         ])
+        .manage(hermes_bridge::HermesBridge::default())
         .manage(os_accounts::LoginFlow::default())
         .setup(|app| {
             providers::setup(app);
@@ -96,7 +108,10 @@ pub fn run() {
         .build(context)
         .expect("failed to build OS Scribe")
         .run(|app, event| match event {
-            tauri::RunEvent::Exit => dictation::stop_helper(app),
+            tauri::RunEvent::Exit => {
+                dictation::stop_helper(app);
+                hermes_bridge::shutdown(app);
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_main_window(app),
             _ => {}

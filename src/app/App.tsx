@@ -11,6 +11,7 @@ import {
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import { AccountGate } from "../components/account/AccountGate";
+import { AgentWorkspace } from "../components/agent/AgentWorkspace";
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
 import { FoldersWorkspace } from "../components/folders/FoldersWorkspace";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
@@ -805,6 +806,8 @@ export function App() {
                   }, 80);
                 }}
               />
+            ) : activeView === "agent" ? (
+              <AgentWorkspace />
             ) : activeView === "all-notes" ? (
               <NotesList
                 notes={state.notes}
@@ -1102,7 +1105,10 @@ function handleSidebarResizeStart(
     // rides the white, not the gray) since the bar is positioned off it too.
     if (mainPanel)
       mainPanel.style.marginLeft = width === 0 ? "var(--sp-3)" : "0px";
-    shell?.style.setProperty("--main-gutter", width === 0 ? "var(--sp-3)" : "0px");
+    shell?.style.setProperty(
+      "--main-gutter",
+      width === 0 ? "var(--sp-3)" : "0px",
+    );
     latestWidth = width;
   }
 

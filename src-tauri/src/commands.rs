@@ -19,15 +19,17 @@ use crate::{
         },
         processing_queue,
         types::{
-            AppError, AssignNoteToFolderRequest, BootstrapResponse,
-            CheckRecordingSourceReadinessRequest, CreateDictionaryEntryRequest,
-            CreateFolderRequest, CreateNoteRequest, DeleteDictionaryEntryRequest,
-            DeleteFolderRequest, DeleteNoteRequest, DictionaryEntryDto, FinishRecordingResponse,
+            AgentMessageRole, AgentTaskDto, AgentTaskListResponse, AgentTaskRequest,
+            AgentTaskStatus, AgentToolEventDto, AgentToolEventStatus, AppError,
+            AssignNoteToFolderRequest, BootstrapResponse, CheckRecordingSourceReadinessRequest,
+            CreateAgentTaskRequest, CreateDictionaryEntryRequest, CreateFolderRequest,
+            CreateNoteRequest, DeleteDictionaryEntryRequest, DeleteFolderRequest,
+            DeleteNoteRequest, DictionaryEntryDto, FinishRecordingResponse, GetAgentTaskRequest,
             GetNoteRequest, ListNotesRequest, ListNotesResponse, MicrophonePermissionResponse,
             NoteDto, OpenPrivacySettingsRequest, RecordingSessionDto, RecordingSource,
             RecordingSourceMode, RecordingSourceReadinessDto, RecordingStatusDto,
             RemoveNoteFromFolderRequest, RenameFolderRequest, RetryProcessingRequest,
-            SessionRequest, SourceReadinessDto, StartRecordingRequest,
+            SendAgentMessageRequest, SessionRequest, SourceReadinessDto, StartRecordingRequest,
             UpdateDictionaryEntryRequest, UpdateNoteRequest,
         },
     },
@@ -40,6 +42,7 @@ use tauri::{AppHandle, Manager};
 #[tauri::command]
 pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError> {
     let repos = repositories(&app).await?;
+    repos.pause_running_agent_tasks_on_launch().await?;
     let active_recoveries = scan_recoverable_recordings(&repos.pool)
         .await
         .map_err(|error| AppError::new("recovery_scan_failed", error.to_string()))?;
@@ -200,6 +203,124 @@ pub async fn remove_note_from_folder(
 #[tauri::command]
 pub async fn list_dictionary_entries(app: AppHandle) -> Result<Vec<DictionaryEntryDto>, AppError> {
     Ok(repositories(&app).await?.list_dictionary_entries().await?)
+}
+
+#[tauri::command]
+pub async fn list_agent_tasks(app: AppHandle) -> Result<AgentTaskListResponse, AppError> {
+    Ok(repositories(&app).await?.list_agent_tasks().await?)
+}
+
+#[tauri::command]
+pub async fn create_agent_task(
+    app: AppHandle,
+    request: CreateAgentTaskRequest,
+) -> Result<AgentTaskDto, AppError> {
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() {
+        return Err(AppError::new(
+            "agent_prompt_required",
+            "Describe what the agent should do.",
+        ));
+    }
+    let repos = repositories(&app).await?;
+    let task = repos
+        .create_agent_task(
+            prompt,
+            request.title.as_deref(),
+            request.safety_profile.unwrap_or_default(),
+        )
+        .await?;
+    if request.run_placeholder.unwrap_or(true) {
+        schedule_agent_runtime_placeholder(repos, task.id.clone());
+    }
+    Ok(task)
+}
+
+#[tauri::command]
+pub async fn get_agent_task(
+    app: AppHandle,
+    request: GetAgentTaskRequest,
+) -> Result<AgentTaskDto, AppError> {
+    Ok(repositories(&app)
+        .await?
+        .get_agent_task(&request.task_id)
+        .await?)
+}
+
+#[tauri::command]
+pub async fn send_agent_message(
+    app: AppHandle,
+    request: SendAgentMessageRequest,
+) -> Result<AgentTaskDto, AppError> {
+    let content = request.content.trim();
+    if content.is_empty() {
+        return Err(AppError::new(
+            "agent_message_required",
+            "Message content is required.",
+        ));
+    }
+    let repos = repositories(&app).await?;
+    repos
+        .add_agent_message(&request.task_id, AgentMessageRole::User, content)
+        .await?;
+    repos
+        .update_agent_task_status(
+            &request.task_id,
+            AgentTaskStatus::Queued,
+            Some("Queued for the agent runtime."),
+            None,
+        )
+        .await?;
+    if request.run_placeholder.unwrap_or(true) {
+        schedule_agent_runtime_placeholder(repos.clone(), request.task_id.clone());
+    }
+    Ok(repos.get_agent_task(&request.task_id).await?)
+}
+
+#[tauri::command]
+pub async fn cancel_agent_task(
+    app: AppHandle,
+    request: AgentTaskRequest,
+) -> Result<AgentTaskDto, AppError> {
+    repositories(&app)
+        .await?
+        .update_agent_task_status(
+            &request.task_id,
+            AgentTaskStatus::Cancelled,
+            Some("Cancelled by the user."),
+            None,
+        )
+        .await
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn retry_agent_task(
+    app: AppHandle,
+    request: AgentTaskRequest,
+) -> Result<AgentTaskDto, AppError> {
+    let repos = repositories(&app).await?;
+    repos
+        .update_agent_task_status(
+            &request.task_id,
+            AgentTaskStatus::Queued,
+            Some("Queued for the agent runtime."),
+            None,
+        )
+        .await?;
+    schedule_agent_runtime_placeholder(repos.clone(), request.task_id.clone());
+    Ok(repos.get_agent_task(&request.task_id).await?)
+}
+
+#[tauri::command]
+pub async fn list_agent_tool_events(
+    app: AppHandle,
+    request: AgentTaskRequest,
+) -> Result<Vec<AgentToolEventDto>, AppError> {
+    Ok(repositories(&app)
+        .await?
+        .agent_tool_events(&request.task_id)
+        .await?)
 }
 
 #[tauri::command]
@@ -893,6 +1014,56 @@ fn recovery_source_path(info: &crate::db::repositories::SourceArtifactPath) -> O
         }
     }
     None
+}
+
+fn schedule_agent_runtime_placeholder(repos: Repositories, task_id: String) {
+    tokio::spawn(async move {
+        let _ = repos
+            .update_agent_task_status(
+                &task_id,
+                AgentTaskStatus::Running,
+                Some("Preparing local privacy and tool policy."),
+                None,
+            )
+            .await;
+        let _ = repos
+            .add_agent_tool_event(
+                &task_id,
+                "local_tool_policy",
+                AgentToolEventStatus::Completed,
+                "Autonomous private mode is active. Sensitive actions will be blocked or escalated.",
+                Some(r#"{"profile":"autonomous_private"}"#),
+                Some(r#"{"localToolsReady":true,"rawOutputShared":false}"#),
+                true,
+            )
+            .await;
+        let _ = repos
+            .add_agent_tool_event(
+                &task_id,
+                "backend_agent_runtime",
+                AgentToolEventStatus::Blocked,
+                "Backend agent orchestration is not configured in this build.",
+                Some(r#"{"endpoint":"/v1/agent/tasks"}"#),
+                Some(r#"{"reason":"agent_backend_unavailable"}"#),
+                true,
+            )
+            .await;
+        let _ = repos
+            .add_agent_message(
+                &task_id,
+                AgentMessageRole::Assistant,
+                "I created the task and set up the local privacy/tool policy. The backend agent runtime endpoint is not configured yet, so I paused execution before taking desktop actions.",
+            )
+            .await;
+        let _ = repos
+            .update_agent_task_status(
+                &task_id,
+                AgentTaskStatus::Paused,
+                Some("Paused until the backend agent runtime is configured."),
+                Some("Backend agent orchestration is not configured in this build."),
+            )
+            .await;
+    });
 }
 
 pub(crate) async fn repositories(app: &AppHandle) -> Result<Repositories, AppError> {

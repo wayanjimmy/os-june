@@ -274,6 +274,84 @@ export type RecoverableSourceDto = {
   lastError?: string;
 };
 
+export type AgentSafetyProfile = "autonomousPrivate";
+
+export type AgentTaskStatus =
+  | "draft"
+  | "queued"
+  | "running"
+  | "waitingForUser"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AgentMessageRole = "system" | "assistant" | "user";
+
+export type AgentToolEventStatus =
+  | "proposed"
+  | "running"
+  | "completed"
+  | "failed"
+  | "blocked";
+
+export type AgentMessageDto = {
+  id: string;
+  taskId: string;
+  role: AgentMessageRole;
+  content: string;
+  createdAt: string;
+};
+
+export type AgentToolEventDto = {
+  id: string;
+  taskId: string;
+  toolName: string;
+  status: AgentToolEventStatus;
+  summary: string;
+  argumentsJson?: string;
+  resultJson?: string;
+  redacted: boolean;
+  createdAt: string;
+  completedAt?: string;
+};
+
+export type AgentTaskDto = {
+  id: string;
+  title: string;
+  prompt: string;
+  status: AgentTaskStatus;
+  safetyProfile: AgentSafetyProfile;
+  progressSummary?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  messages: AgentMessageDto[];
+  toolEvents: AgentToolEventDto[];
+};
+
+export type AgentTaskListResponse = {
+  items: AgentTaskDto[];
+};
+
+export type HermesBridgeConnection = {
+  baseUrl: string;
+  wsUrl: string;
+  token: string;
+  port: number;
+  command: string;
+  hermesHome: string;
+  providerProxyPort: number;
+  pid: number;
+};
+
+export type HermesBridgeStatus = {
+  running: boolean;
+  connection?: HermesBridgeConnection;
+  message?: string;
+};
+
 export type BootstrapResponse = {
   folders: FolderDto[];
   notes: NoteListItemDto[];
@@ -419,6 +497,59 @@ export async function deleteDictionaryEntry(entryId: string) {
   return invoke<void>("delete_dictionary_entry", {
     request: { entryId },
   });
+}
+
+export async function listAgentTasks() {
+  return invoke<AgentTaskListResponse>("list_agent_tasks");
+}
+
+export async function createAgentTask(input: {
+  prompt: string;
+  title?: string;
+  safetyProfile?: AgentSafetyProfile;
+  runPlaceholder?: boolean;
+}) {
+  return invoke<AgentTaskDto>("create_agent_task", { request: input });
+}
+
+export async function getAgentTask(taskId: string) {
+  return invoke<AgentTaskDto>("get_agent_task", { request: { taskId } });
+}
+
+export async function sendAgentMessage(input: {
+  taskId: string;
+  content: string;
+  runPlaceholder?: boolean;
+}) {
+  return invoke<AgentTaskDto>("send_agent_message", { request: input });
+}
+
+export async function cancelAgentTask(taskId: string) {
+  return invoke<AgentTaskDto>("cancel_agent_task", { request: { taskId } });
+}
+
+export async function retryAgentTask(taskId: string) {
+  return invoke<AgentTaskDto>("retry_agent_task", { request: { taskId } });
+}
+
+export async function listAgentToolEvents(taskId: string) {
+  return invoke<AgentToolEventDto[]>("list_agent_tool_events", {
+    request: { taskId },
+  });
+}
+
+export async function hermesBridgeStatus() {
+  return invoke<HermesBridgeStatus>("hermes_bridge_status");
+}
+
+export async function startHermesBridge(cwd?: string) {
+  return invoke<HermesBridgeStatus>("start_hermes_bridge", {
+    request: { cwd },
+  });
+}
+
+export async function stopHermesBridge() {
+  return invoke<HermesBridgeStatus>("stop_hermes_bridge");
 }
 
 export async function listNotes(folderId?: string) {
