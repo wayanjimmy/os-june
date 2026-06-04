@@ -469,13 +469,7 @@ pub async fn hermes_bridge_filesystem_snapshot(
         .as_ref()
         .map(|item| PathBuf::from(&item.hermes_home))
         .unwrap_or(resolve_scribe_hermes_home(&app)?);
-    let cwd = connection
-        .as_ref()
-        .and_then(|item| item.cwd.as_deref())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok());
-
-    let roots = filesystem_roots(&hermes_home, cwd.as_deref())?
+    let roots = filesystem_roots(&hermes_home)?
         .into_iter()
         .filter_map(|root| {
             if !root.path.exists() {
@@ -680,25 +674,8 @@ struct FilesystemRootCandidate {
     description: String,
 }
 
-fn filesystem_roots(
-    hermes_home: &Path,
-    cwd: Option<&Path>,
-) -> Result<Vec<FilesystemRootCandidate>, AppError> {
+fn filesystem_roots(hermes_home: &Path) -> Result<Vec<FilesystemRootCandidate>, AppError> {
     let mut roots = Vec::new();
-    if let Some(cwd) = cwd {
-        roots.push(FilesystemRootCandidate {
-            id: "cwd".to_string(),
-            label: "Working directory".to_string(),
-            path: cwd.to_path_buf(),
-            description: "The directory Hermes uses for local terminal and file tools.".to_string(),
-        });
-    }
-    roots.push(FilesystemRootCandidate {
-        id: "hermes-home".to_string(),
-        label: "Hermes home".to_string(),
-        path: hermes_home.to_path_buf(),
-        description: "Scribe's isolated Hermes runtime state.".to_string(),
-    });
     for (id, label, relative, description) in [
         (
             "memory",
@@ -716,7 +693,19 @@ fn filesystem_roots(
             "sessions",
             "Sessions",
             "sessions",
-            "Filesystem-backed session metadata alongside the SQLite store.",
+            "Saved Hermes conversations and task artifacts.",
+        ),
+        (
+            "artifacts",
+            "Artifacts",
+            "artifacts",
+            "Files created by Hermes during agent work.",
+        ),
+        (
+            "cache",
+            "Cache",
+            "cache",
+            "Hermes-generated screenshots and temporary task context.",
         ),
         (
             "logs",
