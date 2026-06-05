@@ -2070,20 +2070,11 @@ input:focus-visible,
 }
 
 .agent-sidebar-row .note-row-main {
-  grid-template-rows: auto auto;
+  grid-template-rows: auto;
 }
 
 .agent-sidebar-row .note-row-icon {
-  grid-row: 1 / span 2;
-}
-
-.agent-sidebar-preview {
-  grid-column: 2;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  grid-row: 1;
 }
 
 .agent-sidebar-working {
@@ -3829,6 +3820,38 @@ input:focus-visible,
   margin-bottom: var(--sp-8);
 }
 
+.settings-nav {
+  position: sticky;
+  top: var(--sp-4);
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-8);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--background) 88%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.settings-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-sm);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-sm);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+}
+
+.settings-nav a:hover,
+.settings-nav a:focus-visible {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
 .settings-title {
   margin: 0;
   color: var(--foreground);
@@ -3935,6 +3958,50 @@ input:focus-visible,
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-lg);
   background: var(--card);
+}
+
+.settings-agent-card {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 640px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.settings-agent-card .settings-row-error {
+  margin: var(--sp-4) var(--sp-5) 0;
+}
+
+.settings-agent-card .agent-management-panel {
+  min-height: 0;
+}
+
+.settings-agent-card .agent-messaging-layout {
+  min-height: 540px;
+}
+
+.settings-section-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in oklch, var(--muted) 22%, transparent);
+}
+
+.settings-section-tabs button {
+  min-height: var(--control-sm);
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.settings-section-tabs button[aria-selected="true"] {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: 0 0 0 1px var(--border-subtle);
 }
 
 .settings-rows {

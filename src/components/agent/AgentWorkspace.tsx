@@ -853,76 +853,11 @@ export function AgentWorkspace() {
     }
   }
 
-  const managementPanel =
-    activePanel === "skills" ? (
-      <SkillsToolsPanel
-        loading={capabilityLoading}
-        query={capabilityQuery}
-        saving={capabilitySaving}
-        skills={skills}
-        toolsets={toolsets}
-        onQueryChange={setCapabilityQuery}
-        onRefresh={() => void loadCapabilities()}
-        onToggleSkill={(skill, enabled) => void setSkillEnabled(skill, enabled)}
-        onToggleToolset={(toolset, enabled) =>
-          void setToolsetEnabled(toolset, enabled)
-        }
-      />
-    ) : activePanel === "messaging" ? (
-      <MessagingPanel
-        loading={capabilityLoading}
-        platforms={messagingPlatforms}
-        query={capabilityQuery}
-        saving={capabilitySaving}
-        selectedPlatformId={selectedMessagingPlatformId}
-        envEdits={messagingEnvEdits}
-        onQueryChange={setCapabilityQuery}
-        onRefresh={() => void loadMessagingPlatforms()}
-        onSelectPlatform={(platform) => {
-          setSelectedMessagingPlatformId(platform.id);
-          setMessagingEnvEdits({});
-        }}
-        onEditEnv={(key, value) =>
-          setMessagingEnvEdits((current) => ({
-            ...current,
-            [key]: value,
-          }))
-        }
-        onSaveEnv={(platform) => void saveMessagingPlatformEnv(platform)}
-        onToggle={(platform, enabled) =>
-          void setMessagingPlatformEnabled(platform, enabled)
-        }
-      />
-    ) : null;
-
   return (
     <section className="agent-workspace" aria-label="Agent">
       <section className="agent-main" aria-label="Agent task details">
         {error ? <p className="error-banner">{error}</p> : null}
-        {managementPanel ? (
-          <>
-            <header className="agent-detail-header">
-              <div className="agent-detail-title">
-                <BotIcon size={18} />
-                <div>
-                  <h2>Agent</h2>
-                  <p>
-                    {bridge.running
-                      ? `Hermes bridge running on ${bridge.connection?.port ?? "local"}`
-                      : "Desktop tasks with private local-tool policy."}
-                  </p>
-                </div>
-              </div>
-              <div className="agent-actions">
-                <PanelTabs
-                  activePanel={activePanel}
-                  onChange={setActivePanel}
-                />
-              </div>
-            </header>
-            {managementPanel}
-          </>
-        ) : selectedHermesSessionId ? (
+        {selectedHermesSessionId ? (
           <>
             <header className="agent-detail-header">
               <div className="agent-detail-title">
@@ -939,10 +874,6 @@ export function AgentWorkspace() {
                 </div>
               </div>
               <div className="agent-actions">
-                <PanelTabs
-                  activePanel={activePanel}
-                  onChange={setActivePanel}
-                />
                 <button
                   type="button"
                   className="agent-icon-button"
@@ -992,10 +923,6 @@ export function AgentWorkspace() {
                 </div>
               </div>
               <div className="agent-actions">
-                <PanelTabs
-                  activePanel={activePanel}
-                  onChange={setActivePanel}
-                />
                 {selectedTask.status !== "cancelled" &&
                 selectedTask.status !== "completed" ? (
                   <button
@@ -1058,10 +985,6 @@ export function AgentWorkspace() {
                 </div>
               </div>
               <div className="agent-actions">
-                <PanelTabs
-                  activePanel={activePanel}
-                  onChange={setActivePanel}
-                />
                 {!bridge.running ? (
                   <button
                     type="button"
@@ -1416,7 +1339,7 @@ function PanelTabs({
   );
 }
 
-function SkillsToolsPanel({
+export function SkillsToolsPanel({
   loading,
   query,
   saving,
@@ -1503,7 +1426,7 @@ function SkillsToolsPanel({
   );
 }
 
-function MessagingPanel({
+export function MessagingPanel({
   envEdits,
   loading,
   platforms,

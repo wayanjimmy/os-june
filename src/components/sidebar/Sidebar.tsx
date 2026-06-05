@@ -487,11 +487,6 @@ function AgentSessionRow({
             />
           ) : null}
         </span>
-        <span className="agent-sidebar-preview">
-          {working
-            ? "Working now"
-            : session.preview || relativeDate(sessionTimestamp(session))}
-        </span>
       </div>
     </article>
   );

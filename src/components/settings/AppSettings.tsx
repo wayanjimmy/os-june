@@ -46,6 +46,7 @@ import {
   type ThemePreference,
 } from "../../lib/theme";
 import { ProviderLogo } from "./ProviderLogo";
+import { AgentSettingsSection } from "./AgentSettingsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { StyleSettingsSection } from "./StyleSettingsSection";
 
@@ -430,9 +431,18 @@ export function AppSettings({
       <header className="settings-header">
         <h1 className="settings-title">Settings</h1>
         <p className="settings-description">
-          Manage audio, dictation, and AI models for notes.
+          Manage audio, dictation, AI models, and agent capabilities.
         </p>
       </header>
+
+      <nav className="settings-nav" aria-label="Settings sections">
+        <a href="#account-heading">Account</a>
+        <a href="#dictation-heading">Dictation</a>
+        <a href="#audio-heading">Audio</a>
+        <a href="#models-heading">Models</a>
+        <a href="#agent-heading">Agent</a>
+        <a href="#about-heading">About</a>
+      </nav>
 
       <AccountSettingsSection
         account={account}
@@ -649,6 +659,8 @@ export function AppSettings({
       </section>
 
       <DictionarySettingsSection />
+
+      <AgentSettingsSection />
 
       <section className="settings-group" aria-labelledby="about-heading">
         <h2 id="about-heading" className="settings-group-heading">
