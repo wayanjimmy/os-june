@@ -627,10 +627,15 @@ export function AgentWorkspace() {
 
   async function startBridge() {
     setBridgeStarting(true);
+    setError(null);
     try {
       const status = await startHermesBridge();
       setBridge(status);
       return status;
+    } catch (err) {
+      const message = messageFromError(err);
+      setError(message);
+      throw err;
     } finally {
       setBridgeStarting(false);
     }
@@ -1066,9 +1071,11 @@ export function AgentWorkspace() {
                 <div>
                   <h2>Agent</h2>
                   <p>
-                    {bridge.running
-                      ? `Hermes bridge running on ${bridge.connection?.port ?? "local"}`
-                      : "Desktop tasks with private local-tool policy."}
+                    {bridgeStarting
+                      ? "Setting up the local agent runtime..."
+                      : bridge.running
+                        ? `Hermes bridge running on ${bridge.connection?.port ?? "local"}`
+                        : "Desktop tasks with private local-tool policy."}
                   </p>
                 </div>
               </div>
@@ -1078,9 +1085,9 @@ export function AgentWorkspace() {
                     type="button"
                     className="agent-new-task"
                     disabled={bridgeStarting}
-                    onClick={() => void startBridge()}
+                    onClick={() => void startBridge().catch(() => undefined)}
                   >
-                    {bridgeStarting ? "Starting Hermes" : "Start Hermes"}
+                    {bridgeStarting ? "Setting up Agent" : "Start Agent"}
                   </button>
                 ) : null}
               </div>
