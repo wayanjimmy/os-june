@@ -11,15 +11,21 @@ import { IconTrashCan } from "central-icons/IconTrashCan";
 import { BotIcon } from "lucide-react";
 import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
-  AGENT_NEW_SESSION_PENDING_KEY,
   AGENT_SELECT_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
+  markAgentNewSessionPending,
   type AgentSessionsChangedDetail,
 } from "../agent/AgentWorkspace";
-import { listHermesSessions, sessionTimestamp } from "../../lib/hermes-adapter";
+import {
+  deleteHermesSession,
+  listHermesSessions,
+  sessionTimestamp,
+} from "../../lib/hermes-adapter";
 import { NOTE_DND_MIME } from "../../lib/dnd";
 import type { HermesSessionInfo, NoteListItemDto } from "../../lib/tauri";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 
 export type SidebarView =
   | "notes"
@@ -64,6 +70,14 @@ export function Sidebar({
   const [agentSessions, setAgentSessions] = useState<HermesSessionInfo[]>([]);
   const [selectedAgentSessionId, setSelectedAgentSessionId] =
     useState<string>();
+  const [agentSessionToDelete, setAgentSessionToDelete] =
+    useState<HermesSessionInfo | null>(null);
+  const [agentSessionDeleteError, setAgentSessionDeleteError] = useState<
+    string | null
+  >(null);
+  const [deletingAgentSessionIds, setDeletingAgentSessionIds] = useState<
+    Set<string>
+  >(() => new Set());
   const [workingAgentSessionIds, setWorkingAgentSessionIds] = useState<
     Set<string>
   >(() => new Set());
@@ -165,6 +179,41 @@ export function Sidebar({
       right: window.innerWidth - rect.right,
       top: rect.bottom + 4,
     });
+  }
+
+  async function handleDeleteAgentSession(session: HermesSessionInfo) {
+    setDeletingAgentSessionIds((current) => {
+      const next = new Set(current);
+      next.add(session.id);
+      return next;
+    });
+    try {
+      await deleteHermesSession(session.id);
+      setAgentSessions((current) =>
+        current.filter((item) => item.id !== session.id),
+      );
+      setSelectedAgentSessionId((current) =>
+        current === session.id ? undefined : current,
+      );
+      setWorkingAgentSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(session.id);
+        return next;
+      });
+      dispatchAgentEvent(AGENT_DELETE_SESSION_EVENT, {
+        sessionId: session.id,
+      });
+      setAgentSessionDeleteError(null);
+    } catch (err) {
+      setAgentSessionDeleteError(messageFromError(err));
+      throw err;
+    } finally {
+      setDeletingAgentSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(session.id);
+        return next;
+      });
+    }
   }
 
   return (
@@ -269,12 +318,17 @@ export function Sidebar({
                     selectedAgentSessionId === session.id
                   }
                   working={workingAgentSessionIds.has(session.id)}
+                  deleting={deletingAgentSessionIds.has(session.id)}
                   onSelect={() => {
                     onChangeView("agent");
                     setSelectedAgentSessionId(session.id);
                     dispatchAgentEvent(AGENT_SELECT_SESSION_EVENT, {
                       sessionId: session.id,
                     });
+                  }}
+                  onDelete={() => {
+                    setAgentSessionDeleteError(null);
+                    setAgentSessionToDelete(session);
                   }}
                 />
               ))
@@ -315,20 +369,30 @@ export function Sidebar({
           onClose={() => setMenu(null)}
         />
       ) : null}
+      <ConfirmDialog
+        open={Boolean(agentSessionToDelete)}
+        onClose={() => {
+          setAgentSessionToDelete(null);
+          setAgentSessionDeleteError(null);
+        }}
+        onConfirm={() =>
+          agentSessionToDelete
+            ? handleDeleteAgentSession(agentSessionToDelete)
+            : undefined
+        }
+        title={`Delete "${
+          agentSessionToDelete?.title ||
+          agentSessionToDelete?.preview ||
+          "Untitled session"
+        }"?`}
+        description={
+          agentSessionDeleteError || "This agent session cannot be restored."
+        }
+        confirmLabel="Delete session"
+        destructive
+      />
     </aside>
   );
-}
-
-function markAgentNewSessionPending() {
-  try {
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      String(Date.now()),
-    );
-  } catch {
-    // Session storage can be unavailable in restricted webviews; the event path
-    // still handles already-mounted Agent workspaces.
-  }
 }
 
 function NoteRow({
@@ -429,12 +493,16 @@ function AgentSessionRow({
   session,
   selected,
   working,
+  deleting,
   onSelect,
+  onDelete,
 }: {
   session: HermesSessionInfo;
   selected: boolean;
   working: boolean;
+  deleting: boolean;
   onSelect: () => void;
+  onDelete: () => void;
 }) {
   const title = session.title || session.preview || "Untitled session";
   return (
@@ -465,6 +533,20 @@ function AgentSessionRow({
           ) : null}
         </span>
       </div>
+      <button
+        type="button"
+        className="note-row-menu agent-session-delete"
+        aria-label="Delete session"
+        title="Delete session"
+        disabled={deleting}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onDelete();
+        }}
+      >
+        <IconTrashCan size={14} />
+      </button>
     </article>
   );
 }
@@ -553,4 +635,11 @@ function relativeDate(value: string) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function messageFromError(err: unknown) {
+  if (err && typeof err === "object" && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
 }

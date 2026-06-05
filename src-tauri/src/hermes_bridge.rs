@@ -123,6 +123,18 @@ pub struct HermesSessionMessagesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteHermesSessionRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenHermesFileRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HermesFilesystemSnapshot {
     pub roots: Vec<HermesFilesystemRoot>,
 }
@@ -460,6 +472,20 @@ pub async fn hermes_bridge_session_messages(
 }
 
 #[tauri::command]
+pub async fn delete_hermes_bridge_session(
+    bridge: State<'_, HermesBridge>,
+    request: DeleteHermesSessionRequest,
+) -> Result<serde_json::Value, AppError> {
+    hermes_api_json(
+        &bridge,
+        reqwest::Method::DELETE,
+        &format!("/api/sessions/{}", urlencoding::encode(&request.session_id)),
+        None,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn hermes_bridge_filesystem_snapshot(
     app: AppHandle,
     bridge: State<'_, HermesBridge>,
@@ -488,6 +514,40 @@ pub async fn hermes_bridge_filesystem_snapshot(
         .collect();
 
     Ok(HermesFilesystemSnapshot { roots })
+}
+
+#[tauri::command]
+pub async fn open_hermes_bridge_file(
+    app: AppHandle,
+    request: OpenHermesFileRequest,
+) -> Result<(), AppError> {
+    let hermes_home = resolve_scribe_hermes_home(&app)?;
+    let requested = PathBuf::from(&request.path)
+        .canonicalize()
+        .map_err(|error| AppError::new("hermes_file_open_failed", error.to_string()))?;
+    if !requested.is_file() {
+        return Err(AppError::new(
+            "hermes_file_open_failed",
+            "Only files in the Hermes workspace or memory can be opened.",
+        ));
+    }
+    if is_hidden_secret_path(&requested) {
+        return Err(AppError::new(
+            "hermes_file_open_denied",
+            "This Hermes file is hidden or sensitive.",
+        ));
+    }
+    let allowed = filesystem_roots(&hermes_home)?
+        .into_iter()
+        .filter_map(|root| root.path.canonicalize().ok())
+        .any(|root| requested.starts_with(root));
+    if !allowed {
+        return Err(AppError::new(
+            "hermes_file_open_denied",
+            "Only files in this app's Hermes workspace or memory can be opened.",
+        ));
+    }
+    open_file_with_system(&requested)
 }
 
 pub fn shutdown(app: &tauri::AppHandle) {
@@ -776,6 +836,30 @@ fn is_hidden_secret_path(path: &Path) -> bool {
     ) || name.ends_with(".lock")
         || name.ends_with(".key")
         || name.ends_with(".pem")
+}
+
+#[cfg(target_os = "macos")]
+fn open_file_with_system(path: &Path) -> Result<(), AppError> {
+    let status = Command::new("/usr/bin/open")
+        .arg(path)
+        .status()
+        .map_err(|error| AppError::new("hermes_file_open_failed", error.to_string()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "hermes_file_open_failed",
+            format!("open exited with status {status}"),
+        ))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_file_with_system(_path: &Path) -> Result<(), AppError> {
+    Err(AppError::new(
+        "hermes_file_open_unsupported",
+        "Opening Hermes files is only supported on macOS.",
+    ))
 }
 
 fn system_time_to_iso(value: std::time::SystemTime) -> String {
