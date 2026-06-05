@@ -179,6 +179,10 @@ describe("FoldersWorkspace — list view", () => {
       screen.getByRole("heading", { name: "Folders" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("All notes")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Meetings/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Roadmap")).toBeNull();
     expect(screen.getByText("Ideas")).toBeInTheDocument();
     expect(screen.getByText("Work")).toBeInTheDocument();
     const workCard = screen.getByText("Work").closest("article");
@@ -191,6 +195,21 @@ describe("FoldersWorkspace — list view", () => {
     expect(
       within(ideasCard as HTMLElement).getByText(/0 notes/),
     ).toBeInTheDocument();
+  });
+
+  it("opens the meetings folder before showing meeting notes", async () => {
+    const user = userEvent.setup();
+    const props = baseProps();
+    render(<FoldersWorkspace {...props} />);
+
+    await user.click(screen.getByRole("button", { name: /Meetings/ }));
+
+    expect(
+      screen.getByRole("heading", { name: "Meetings" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Roadmap")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Roadmap/ }));
+    expect(props.onSelectNote).toHaveBeenCalledWith("note-1");
   });
 
   it("opens the create dialog and submits name + description", async () => {

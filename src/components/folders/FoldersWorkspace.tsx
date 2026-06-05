@@ -2,7 +2,6 @@ import { IconCheckmark1 } from "central-icons-filled/IconCheckmark1";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal";
 import { IconFolder1 } from "central-icons/IconFolder1";
-import { IconFolders as IconFoldersFilled } from "central-icons-filled/IconFolders";
 import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
 import { IconFolderDelete } from "central-icons/IconFolderDelete";
 import { IconFolderOpen } from "central-icons/IconFolderOpen";
@@ -24,6 +23,7 @@ import {
 } from "../../lib/tauri";
 import {
   type DragEvent,
+  type ReactNode,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -33,7 +33,6 @@ import {
 import { NOTE_DND_MIME } from "../../lib/dnd";
 import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { EmptyState } from "../ui/EmptyState";
 import { AddNotesToFolderDialog } from "./AddNotesToFolderDialog";
 import { CreateFolderDialog } from "./CreateFolderDialog";
 import { EditFolderDialog } from "./EditFolderDialog";
@@ -84,6 +83,7 @@ export function FoldersWorkspace(props: FoldersWorkspaceProps) {
 /* List view -------------------------------------------------------- */
 
 type SortKey = "updated" | "created" | "name" | "nameDesc";
+type VirtualFolderId = "meetings" | "workspace" | "memory";
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "updated", label: "Recent" },
@@ -110,8 +110,8 @@ function FolderList({
   const [editId, setEditId] = useState<string | null>(null);
   const [filesystemSnapshot, setFilesystemSnapshot] =
     useState<HermesFilesystemSnapshot | null>(null);
-  const [selectedFileRootId, setSelectedFileRootId] =
-    useState<string>("workspace");
+  const [selectedVirtualFolder, setSelectedVirtualFolder] =
+    useState<VirtualFolderId | null>(null);
   const deleteFolderTarget = folders.find((f) => f.id === deleteId);
   const editFolderTarget = folders.find((f) => f.id === editId);
 
@@ -152,17 +152,18 @@ function FolderList({
       ),
     [filesystemSnapshot],
   );
-  const selectedFileRoot =
-    hermesFileRoots.find((root) => root.id === selectedFileRootId) ??
-    hermesFileRoots[0];
+  const selectedFileRoot = hermesFileRoots.find(
+    (root) => root.id === selectedVirtualFolder,
+  );
+
+  const normalizedQuery = query.trim().toLowerCase();
 
   const sortedAndFiltered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    const filtered = normalized
+    const filtered = normalizedQuery
       ? folders.filter((folder) =>
           `${folder.name} ${folder.description ?? ""}`
             .toLowerCase()
-            .includes(normalized),
+            .includes(normalizedQuery),
         )
       : folders;
     return [...filtered].sort((a, b) => {
@@ -182,17 +183,124 @@ function FolderList({
           return b.updatedAt.localeCompare(a.updatedAt);
       }
     });
-  }, [folders, query, sort]);
+  }, [folders, normalizedQuery, sort]);
 
   const filteredMeetingNotes = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    const filtered = normalized
+    const filtered = normalizedQuery
       ? notes.filter((note) =>
-          `${note.title} ${note.preview}`.toLowerCase().includes(normalized),
+          `${note.title} ${note.preview}`
+            .toLowerCase()
+            .includes(normalizedQuery),
         )
       : notes;
     return [...filtered].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  }, [notes, query]);
+  }, [notes, normalizedQuery]);
+
+  const visibleHermesRoots = useMemo(() => {
+    if (!normalizedQuery) return hermesFileRoots;
+    return hermesFileRoots.filter((root) =>
+      `${root.label} ${root.description} ${root.path} ${root.entries
+        .map((entry) => entry.name)
+        .join(" ")}`
+        .toLowerCase()
+        .includes(normalizedQuery),
+    );
+  }, [hermesFileRoots, normalizedQuery]);
+
+  const showMeetingsFolder =
+    !normalizedQuery ||
+    "meetings saved meeting notes recording editing".includes(
+      normalizedQuery,
+    ) ||
+    filteredMeetingNotes.length > 0;
+
+  const hasTopLevelMatches =
+    showMeetingsFolder ||
+    sortedAndFiltered.length > 0 ||
+    visibleHermesRoots.length > 0;
+
+  const closeVirtualFolder = () => setSelectedVirtualFolder(null);
+
+  let content: ReactNode;
+  if (selectedVirtualFolder === "meetings") {
+    content = (
+      <MeetingsFolderDetail
+        notes={filteredMeetingNotes}
+        totalNotes={notes.length}
+        query={query}
+        onBack={closeVirtualFolder}
+        onSelectNote={onSelectNote}
+      />
+    );
+  } else if (selectedFileRoot) {
+    content = (
+      <AgentFileRootDetail
+        root={selectedFileRoot}
+        onBack={closeVirtualFolder}
+      />
+    );
+  } else {
+    content = hasTopLevelMatches ? (
+      <div className="folders-grid" role="list">
+        {showMeetingsFolder ? (
+          <VirtualFolderCard
+            name="Meetings"
+            description="Saved meeting notes from recording and editing."
+            meta={`${notes.length} ${notes.length === 1 ? "meeting" : "meetings"}`}
+            icon={<IconNoteText size={18} />}
+            onOpen={() => setSelectedVirtualFolder("meetings")}
+          />
+        ) : null}
+        {sortedAndFiltered.map((folder) => (
+          <FolderCard
+            key={folder.id}
+            folder={folder}
+            notes={notes}
+            menuOpen={menu?.folderId === folder.id}
+            onOpen={() => onSelectFolder(folder.id)}
+            onDropNote={(noteId) => {
+              const note = notes.find((item) => item.id === noteId);
+              if (
+                !note ||
+                (note.folderIds.length === 1 && note.folderIds[0] === folder.id)
+              ) {
+                return;
+              }
+              void onAssignNoteToFolder(noteId, folder.id);
+            }}
+            onOpenMenu={(anchor) => {
+              if (menu?.folderId === folder.id) {
+                setMenu(null);
+                return;
+              }
+              const rect = anchor.getBoundingClientRect();
+              setMenu({
+                folderId: folder.id,
+                right: window.innerWidth - rect.right,
+                top: rect.bottom + 4,
+              });
+            }}
+          />
+        ))}
+        {visibleHermesRoots.map((root) => (
+          <VirtualFolderCard
+            key={root.id}
+            name={root.label}
+            description={root.description}
+            meta={`${root.entries.length} ${
+              root.entries.length === 1 ? "entry" : "entries"
+            }`}
+            icon={<IconFolderOpen size={18} />}
+            onOpen={() => setSelectedVirtualFolder(root.id as VirtualFolderId)}
+          />
+        ))}
+      </div>
+    ) : (
+      <div className="folders-empty">
+        <p>No folders match “{query.trim()}”.</p>
+      </div>
+    );
+  }
 
   return (
     <section className="folders-workspace" aria-label="Folders">
@@ -200,7 +308,8 @@ function FolderList({
         <div className="folders-heading">
           <h1>Folders</h1>
           <p className="folders-subtitle">
-            Saved meetings, folders, and agent files.
+            Top-level folders for meetings, saved folders, workspace, and
+            memory.
           </p>
         </div>
         <button
@@ -227,133 +336,7 @@ function FolderList({
         <SortDropdown value={sort} onChange={setSort} />
       </div>
 
-      <section className="folders-meetings-files" aria-label="Meetings">
-        <header className="folders-hermes-header">
-          <div>
-            <h2>Meetings</h2>
-            <p>Saved meeting notes from recording and editing.</p>
-          </div>
-          <span className="folders-section-count">
-            {notes.length} {notes.length === 1 ? "meeting" : "meetings"}
-          </span>
-        </header>
-        {filteredMeetingNotes.length ? (
-          <div className="folders-meetings-list">
-            {filteredMeetingNotes.slice(0, 12).map((note) => (
-              <button
-                key={note.id}
-                type="button"
-                className="folders-meeting-row"
-                onClick={() => onSelectNote(note.id)}
-              >
-                <span className="folders-meeting-icon">
-                  <IconNoteText size={14} />
-                </span>
-                <span className="folders-meeting-body">
-                  <span className="folders-meeting-title">
-                    {note.title.trim() || "New meeting"}
-                  </span>
-                  <span className="folders-meeting-preview">
-                    {note.preview.trim() || "No preview yet"}
-                  </span>
-                </span>
-                <span className="folders-meeting-time">
-                  {formatNoteTime(note.updatedAt)}
-                </span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="folders-empty">
-            {notes.length === 0 ? "No meetings yet." : "No meetings match."}
-          </p>
-        )}
-      </section>
-
-      {folders.length === 0 ? (
-        <EmptyState
-          label="No folders yet"
-          icon={<IconFoldersFilled size={28} />}
-          title="No folders yet"
-          description="Group related meetings by project, client, or topic."
-        />
-      ) : sortedAndFiltered.length === 0 ? (
-        <div className="folders-empty">
-          <p>No folders match “{query.trim()}”.</p>
-        </div>
-      ) : (
-        <div className="folders-grid" role="list">
-          {sortedAndFiltered.map((folder) => (
-            <FolderCard
-              key={folder.id}
-              folder={folder}
-              notes={notes}
-              menuOpen={menu?.folderId === folder.id}
-              onOpen={() => onSelectFolder(folder.id)}
-              onDropNote={(noteId) => {
-                const note = notes.find((item) => item.id === noteId);
-                if (
-                  !note ||
-                  (note.folderIds.length === 1 &&
-                    note.folderIds[0] === folder.id)
-                ) {
-                  return;
-                }
-                void onAssignNoteToFolder(noteId, folder.id);
-              }}
-              onOpenMenu={(anchor) => {
-                if (menu?.folderId === folder.id) {
-                  setMenu(null);
-                  return;
-                }
-                const rect = anchor.getBoundingClientRect();
-                setMenu({
-                  folderId: folder.id,
-                  right: window.innerWidth - rect.right,
-                  top: rect.bottom + 4,
-                });
-              }}
-            />
-          ))}
-        </div>
-      )}
-
-      {hermesFileRoots.length ? (
-        <section className="folders-hermes-files" aria-label="Agent files">
-          <header className="folders-hermes-header">
-            <div>
-              <h2>Agent files</h2>
-              <p>Workspace outputs and persistent memory from Hermes.</p>
-            </div>
-          </header>
-          <div className="folders-grid folders-hermes-grid" role="list">
-            {hermesFileRoots.map((root) => (
-              <button
-                key={root.id}
-                type="button"
-                className="folder-card folders-file-root-card"
-                data-active={root.id === selectedFileRoot?.id}
-                onClick={() => setSelectedFileRootId(root.id)}
-              >
-                <span className="folder-card-icon">
-                  <IconFolderOpen size={18} />
-                </span>
-                <span className="folder-card-name">{root.label}</span>
-                <span className="folder-card-meta">
-                  {root.entries.length}{" "}
-                  {root.entries.length === 1 ? "entry" : "entries"}
-                </span>
-                <span className="folder-card-description">
-                  {root.description}
-                </span>
-              </button>
-            ))}
-          </div>
-          {selectedFileRoot ? (
-            <HermesRootEntries root={selectedFileRoot} />
-          ) : null}
-        </section>
-      ) : null}
+      {content}
 
       {menu ? (
         <FolderCardMenu
@@ -477,6 +460,118 @@ function SortDropdown({
 }
 
 type MenuState = { folderId: string; right: number; top: number };
+
+function VirtualFolderCard({
+  name,
+  meta,
+  description,
+  icon,
+  onOpen,
+}: {
+  name: string;
+  meta: string;
+  description: string;
+  icon: ReactNode;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="folder-card folders-virtual-folder-card"
+      onClick={onOpen}
+    >
+      <span className="folder-card-icon">{icon}</span>
+      <span className="folder-card-name">{name}</span>
+      <span className="folder-card-meta">{meta}</span>
+      <span className="folder-card-description">{description}</span>
+    </button>
+  );
+}
+
+function MeetingsFolderDetail({
+  notes,
+  totalNotes,
+  query,
+  onBack,
+  onSelectNote,
+}: {
+  notes: NoteListItemDto[];
+  totalNotes: number;
+  query: string;
+  onBack: () => void;
+  onSelectNote: (noteId: string) => void;
+}) {
+  return (
+    <section className="folders-virtual-detail" aria-label="Meetings">
+      <BreadcrumbBar
+        backLabel="Back to folders"
+        onBack={onBack}
+        items={[{ label: "Folders", onClick: onBack }, { label: "Meetings" }]}
+      />
+      <section className="folders-meetings-files">
+        <header className="folders-hermes-header">
+          <div>
+            <h2>Meetings</h2>
+            <p>Saved meeting notes from recording and editing.</p>
+          </div>
+          <span className="folders-section-count">
+            {totalNotes} {totalNotes === 1 ? "meeting" : "meetings"}
+          </span>
+        </header>
+        {notes.length ? (
+          <div className="folders-meetings-list">
+            {notes.map((note) => (
+              <button
+                key={note.id}
+                type="button"
+                className="folders-meeting-row"
+                onClick={() => onSelectNote(note.id)}
+              >
+                <span className="folders-meeting-icon">
+                  <IconNoteText size={14} />
+                </span>
+                <span className="folders-meeting-body">
+                  <span className="folders-meeting-title">
+                    {note.title.trim() || "New meeting"}
+                  </span>
+                  <span className="folders-meeting-preview">
+                    {note.preview.trim() || "No preview yet"}
+                  </span>
+                </span>
+                <span className="folders-meeting-time">
+                  {formatNoteTime(note.updatedAt)}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="folders-empty">
+            {query.trim() ? "No meetings match." : "No meetings yet."}
+          </p>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function AgentFileRootDetail({
+  root,
+  onBack,
+}: {
+  root: HermesFilesystemRoot;
+  onBack: () => void;
+}) {
+  return (
+    <section className="folders-virtual-detail" aria-label={root.label}>
+      <BreadcrumbBar
+        backLabel="Back to folders"
+        onBack={onBack}
+        items={[{ label: "Folders", onClick: onBack }, { label: root.label }]}
+      />
+      <HermesRootEntries root={root} />
+    </section>
+  );
+}
 
 function HermesRootEntries({ root }: { root: HermesFilesystemRoot }) {
   return (

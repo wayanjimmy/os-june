@@ -5234,11 +5234,20 @@ input:focus-visible,
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
 
+.folders-virtual-detail {
+  display: grid;
+  gap: var(--sp-4);
+}
+
 .folders-meetings-files,
 .folders-hermes-files {
   display: grid;
   gap: var(--sp-4);
   margin-top: var(--sp-8);
+}
+
+.folders-virtual-detail .folders-meetings-files {
+  margin-top: 0;
 }
 
 .folders-hermes-header {
@@ -5338,28 +5347,24 @@ input:focus-visible,
   white-space: nowrap;
 }
 
-.folders-hermes-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.folders-virtual-folder-card {
+  border-color: transparent;
 }
 
-.folders-file-root-card[data-active="true"] {
-  border-color: var(--focus-ring);
-  box-shadow: 0 0 0 1px var(--focus-ring);
-}
-
-.folders-file-root-card .folder-card-name,
-.folders-file-root-card .folder-card-meta,
-.folders-file-root-card .folder-card-description {
+.folders-virtual-folder-card .folder-card-name,
+.folders-virtual-folder-card .folder-card-meta,
+.folders-virtual-folder-card .folder-card-description {
   grid-column: 2 / span 2;
 }
 
-.folders-file-root-card .folder-card-name {
+.folders-virtual-folder-card .folder-card-name {
   color: var(--foreground);
+  font-size: var(--fs-lg);
   font-weight: 600;
 }
 
-.folders-file-root-card .folder-card-meta,
-.folders-file-root-card .folder-card-description {
+.folders-virtual-folder-card .folder-card-meta,
+.folders-virtual-folder-card .folder-card-description {
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
 }
