@@ -1518,7 +1518,7 @@ export function MessagingPanel({
   );
 }
 
-function FilesystemPanel({
+export function FilesystemPanel({
   loading,
   query,
   snapshot,
@@ -1564,7 +1564,10 @@ function FilesystemPanel({
             <section key={root.id} className="agent-files-root">
               <header>
                 <div>
-                  <h3>{root.label}</h3>
+                  <h3 className="agent-files-root-title">
+                    <BotIcon size={14} />
+                    {root.label}
+                  </h3>
                   <p>{root.description}</p>
                 </div>
                 <code>{compactPath(root.path)}</code>

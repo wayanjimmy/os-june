@@ -110,7 +110,7 @@ export function App() {
     "none",
   );
   const [bootstrapped, setBootstrapped] = useState(false);
-  const [activeView, setActiveView] = useState<SidebarView>("meetings");
+  const [activeView, setActiveView] = useState<SidebarView>("notes");
   const [originFolderId, setOriginFolderId] = useState<string | undefined>();
   // Tracks that the open note was drilled into from the All notes view, so the
   // note shows the same back-arrow + breadcrumb chrome folders use. Cleared
@@ -818,10 +818,7 @@ export function App() {
         <SidebarToggleGlyph />
       </button>
       <Sidebar
-        folders={state.folders}
         notes={state.notes}
-        selectedNoteId={state.selectedNoteId}
-        selectedFolderId={state.selectedFolderId}
         activeView={activeView}
         onChangeView={(view) => {
           setActiveView(view);
@@ -835,14 +832,6 @@ export function App() {
             setFolderReturnTarget(undefined);
           }
         }}
-        onCreateFolder={() => {
-          setActiveView("folders");
-          setFolderReturnTarget(undefined);
-          dispatch({ type: "folderSelected", folderId: undefined });
-        }}
-        onCreateNote={() => void handleCreateNote(null)}
-        onSelectAll={() => handleSelectFolder(undefined)}
-        onSelectFolder={(folderId) => handleSelectFolder(folderId)}
         onSelectNote={(noteId) => void handleSelectNote(noteId)}
         onDeleteNote={(noteId) => void handleDeleteNote(noteId)}
         onOpenMoveDialog={(noteId) => setMoveDialogNoteId(noteId)}
@@ -916,7 +905,7 @@ export function App() {
               />
             ) : activeView === "agent" ? (
               <AgentWorkspace />
-            ) : activeView === "all-notes" ? (
+            ) : activeView === "notes" || activeView === "all-notes" ? (
               <NotesList
                 notes={state.notes}
                 selectedNoteId={state.selectedNoteId}
@@ -994,25 +983,25 @@ export function App() {
                           setOriginFolderId(undefined);
                         },
                       },
-                      { label: selectedNote.title.trim() || "New meeting" },
+                      { label: selectedNote.title.trim() || "New note" },
                     ]}
                   />
                 ) : originAllNotes ? (
                   <BreadcrumbBar
-                    backLabel="Back to All meetings"
+                    backLabel="Back to Notes"
                     onBack={() => {
                       setActiveView("all-notes");
                       setOriginAllNotes(false);
                     }}
                     items={[
                       {
-                        label: "All meetings",
+                        label: "Notes",
                         onClick: () => {
                           setActiveView("all-notes");
                           setOriginAllNotes(false);
                         },
                       },
-                      { label: selectedNote.title.trim() || "New meeting" },
+                      { label: selectedNote.title.trim() || "New note" },
                     ]}
                   />
                 ) : null}
@@ -1078,7 +1067,7 @@ export function App() {
                     dispatch({ type: "folderSelected", folderId });
                     setFolderReturnTarget({
                       noteId: selectedNote.id,
-                      label: selectedNote.title.trim() || "New meeting",
+                      label: selectedNote.title.trim() || "New note",
                     });
                     setOriginFolderId(undefined);
                   }}
@@ -1093,7 +1082,7 @@ export function App() {
                 />
               </div>
             ) : (
-              <section className="editor-empty" aria-label="Opening meeting" />
+              <section className="editor-empty" aria-label="Opening note" />
             )}
           </div>
         </div>

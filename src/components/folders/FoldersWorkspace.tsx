@@ -11,17 +11,9 @@ import { IconMoveFolder } from "central-icons/IconMoveFolder";
 import { IconNoteText } from "central-icons/IconNoteText";
 import { IconPageSearch } from "central-icons/IconPageSearch";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
-import { IconRobot } from "central-icons/IconRobot";
 import { IconSortArrowUpDown } from "central-icons/IconSortArrowUpDown";
 import { IconTrashCan } from "central-icons/IconTrashCan";
-import {
-  hermesBridgeFilesystemSnapshot,
-  type HermesFilesystemEntry,
-  type HermesFilesystemRoot,
-  type HermesFilesystemSnapshot,
-  type FolderDto,
-  type NoteListItemDto,
-} from "../../lib/tauri";
+import { type FolderDto, type NoteListItemDto } from "../../lib/tauri";
 import {
   type DragEvent,
   type ReactNode,
@@ -84,7 +76,7 @@ export function FoldersWorkspace(props: FoldersWorkspaceProps) {
 /* List view -------------------------------------------------------- */
 
 type SortKey = "updated" | "created" | "name" | "nameDesc";
-type VirtualFolderId = "meetings" | "workspace" | "memory";
+type VirtualFolderId = "meetings";
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "updated", label: "Recent" },
@@ -109,8 +101,6 @@ function FolderList({
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
-  const [filesystemSnapshot, setFilesystemSnapshot] =
-    useState<HermesFilesystemSnapshot | null>(null);
   const [selectedVirtualFolder, setSelectedVirtualFolder] =
     useState<VirtualFolderId | null>(null);
   const deleteFolderTarget = folders.find((f) => f.id === deleteId);
@@ -131,31 +121,6 @@ function FolderList({
       window.removeEventListener("keydown", onKey);
     };
   }, [menu]);
-
-  useEffect(() => {
-    let cancelled = false;
-    hermesBridgeFilesystemSnapshot()
-      .then((snapshot) => {
-        if (!cancelled) setFilesystemSnapshot(snapshot);
-      })
-      .catch(() => {
-        if (!cancelled) setFilesystemSnapshot({ roots: [] });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const hermesFileRoots = useMemo(
-    () =>
-      (filesystemSnapshot?.roots ?? []).filter(
-        (root) => root.id === "workspace" || root.id === "memory",
-      ),
-    [filesystemSnapshot],
-  );
-  const selectedFileRoot = hermesFileRoots.find(
-    (root) => root.id === selectedVirtualFolder,
-  );
 
   const normalizedQuery = query.trim().toLowerCase();
 
@@ -197,35 +162,19 @@ function FolderList({
     return [...filtered].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }, [notes, normalizedQuery]);
 
-  const visibleHermesRoots = useMemo(() => {
-    if (!normalizedQuery) return hermesFileRoots;
-    return hermesFileRoots.filter((root) =>
-      `${root.label} ${root.description} ${root.path} ${root.entries
-        .map((entry) => entry.name)
-        .join(" ")}`
-        .toLowerCase()
-        .includes(normalizedQuery),
-    );
-  }, [hermesFileRoots, normalizedQuery]);
-
-  const showMeetingsFolder =
+  const showNotesFolder =
     !normalizedQuery ||
-    "meetings saved meeting notes recording editing".includes(
-      normalizedQuery,
-    ) ||
+    "notes saved notes recording editing".includes(normalizedQuery) ||
     filteredMeetingNotes.length > 0;
 
-  const hasTopLevelMatches =
-    showMeetingsFolder ||
-    sortedAndFiltered.length > 0 ||
-    visibleHermesRoots.length > 0;
+  const hasTopLevelMatches = showNotesFolder || sortedAndFiltered.length > 0;
 
   const closeVirtualFolder = () => setSelectedVirtualFolder(null);
 
   let content: ReactNode;
   if (selectedVirtualFolder === "meetings") {
     content = (
-      <MeetingsFolderDetail
+      <NotesFolderDetail
         notes={filteredMeetingNotes}
         totalNotes={notes.length}
         query={query}
@@ -233,21 +182,14 @@ function FolderList({
         onSelectNote={onSelectNote}
       />
     );
-  } else if (selectedFileRoot) {
-    content = (
-      <AgentFileRootDetail
-        root={selectedFileRoot}
-        onBack={closeVirtualFolder}
-      />
-    );
   } else {
     content = hasTopLevelMatches ? (
       <div className="folders-grid" role="list">
-        {showMeetingsFolder ? (
+        {showNotesFolder ? (
           <VirtualFolderCard
-            name="Meetings"
-            description="Saved meeting notes from recording and editing."
-            meta={`${notes.length} ${notes.length === 1 ? "meeting" : "meetings"}`}
+            name="Notes"
+            description="Saved notes from recording and editing."
+            meta={`${notes.length} ${notes.length === 1 ? "note" : "notes"}`}
             icon={<IconNoteText size={18} />}
             onOpen={() => setSelectedVirtualFolder("meetings")}
           />
@@ -283,19 +225,6 @@ function FolderList({
             }}
           />
         ))}
-        {visibleHermesRoots.map((root) => (
-          <VirtualFolderCard
-            key={root.id}
-            name={root.label}
-            description={root.description}
-            meta={`${root.entries.length} ${
-              root.entries.length === 1 ? "entry" : "entries"
-            }`}
-            icon={<IconFolderOpen size={18} />}
-            badge={<IconRobot size={12} />}
-            onOpen={() => setSelectedVirtualFolder(root.id as VirtualFolderId)}
-          />
-        ))}
       </div>
     ) : (
       <div className="folders-empty">
@@ -310,8 +239,7 @@ function FolderList({
         <div className="folders-heading">
           <h1>Folders</h1>
           <p className="folders-subtitle">
-            Top-level folders for meetings, saved folders, workspace, and
-            memory.
+            Top-level folders for notes and saved folders.
           </p>
         </div>
         <button
@@ -329,7 +257,7 @@ function FolderList({
           <IconMagnifyingGlass size={14} />
           <input
             type="search"
-            aria-label="Search folders and meetings"
+            aria-label="Search folders and notes"
             placeholder="Search"
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
@@ -502,7 +430,7 @@ function VirtualFolderCard({
   );
 }
 
-function MeetingsFolderDetail({
+function NotesFolderDetail({
   notes,
   totalNotes,
   query,
@@ -516,20 +444,20 @@ function MeetingsFolderDetail({
   onSelectNote: (noteId: string) => void;
 }) {
   return (
-    <section className="folders-virtual-detail" aria-label="Meetings">
+    <section className="folders-virtual-detail" aria-label="Notes">
       <BreadcrumbBar
         backLabel="Back to folders"
         onBack={onBack}
-        items={[{ label: "Folders", onClick: onBack }, { label: "Meetings" }]}
+        items={[{ label: "Folders", onClick: onBack }, { label: "Notes" }]}
       />
       <section className="folders-meetings-files">
         <header className="folders-hermes-header">
           <div>
-            <h2>Meetings</h2>
-            <p>Saved meeting notes from recording and editing.</p>
+            <h2>Notes</h2>
+            <p>Saved notes from recording and editing.</p>
           </div>
           <span className="folders-section-count">
-            {totalNotes} {totalNotes === 1 ? "meeting" : "meetings"}
+            {totalNotes} {totalNotes === 1 ? "note" : "notes"}
           </span>
         </header>
         {notes.length ? (
@@ -546,7 +474,7 @@ function MeetingsFolderDetail({
                 </span>
                 <span className="folders-meeting-body">
                   <span className="folders-meeting-title">
-                    {note.title.trim() || "New meeting"}
+                    {note.title.trim() || "New note"}
                   </span>
                   <span className="folders-meeting-preview">
                     {note.preview.trim() || "No preview yet"}
@@ -560,92 +488,12 @@ function MeetingsFolderDetail({
           </div>
         ) : (
           <p className="folders-empty">
-            {query.trim() ? "No meetings match." : "No meetings yet."}
+            {query.trim() ? "No notes match." : "No notes yet."}
           </p>
         )}
       </section>
     </section>
   );
-}
-
-function AgentFileRootDetail({
-  root,
-  onBack,
-}: {
-  root: HermesFilesystemRoot;
-  onBack: () => void;
-}) {
-  return (
-    <section className="folders-virtual-detail" aria-label={root.label}>
-      <BreadcrumbBar
-        backLabel="Back to folders"
-        onBack={onBack}
-        items={[{ label: "Folders", onClick: onBack }, { label: root.label }]}
-      />
-      <HermesRootEntries root={root} />
-    </section>
-  );
-}
-
-function HermesRootEntries({ root }: { root: HermesFilesystemRoot }) {
-  return (
-    <div className="folders-file-root-detail">
-      <div className="folders-file-root-title">
-        <h3>{root.label}</h3>
-        <code>{compactPath(root.path)}</code>
-      </div>
-      {root.entries.length ? (
-        <div className="folders-file-list">
-          {root.entries.map((entry) => (
-            <HermesFileEntry key={entry.path} entry={entry} level={0} />
-          ))}
-        </div>
-      ) : (
-        <p className="folders-empty">No visible entries.</p>
-      )}
-    </div>
-  );
-}
-
-function HermesFileEntry({
-  entry,
-  level,
-}: {
-  entry: HermesFilesystemEntry;
-  level: number;
-}) {
-  const isDirectory = entry.kind === "directory";
-  return (
-    <div>
-      <div
-        className="folders-file-entry"
-        style={{ paddingLeft: 12 + level * 18 }}
-      >
-        {isDirectory ? <IconFolder1 size={14} /> : <IconNoteText size={14} />}
-        <span>{entry.name}</span>
-        <small>
-          {isDirectory
-            ? "Folder"
-            : entry.size != null
-              ? formatBytes(entry.size)
-              : "File"}
-        </small>
-      </div>
-      {entry.children?.map((child) => (
-        <HermesFileEntry key={child.path} entry={child} level={level + 1} />
-      ))}
-    </div>
-  );
-}
-
-function compactPath(path: string) {
-  return path.replace(/^\/Users\/[^/]+/, "~");
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function FolderCard({

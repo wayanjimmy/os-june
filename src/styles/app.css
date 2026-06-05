@@ -628,6 +628,16 @@ input:focus-visible,
   text-transform: none;
 }
 
+.agent-files-root-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.agent-files-root-title svg {
+  color: var(--muted-foreground);
+}
+
 .agent-files-root p {
   margin: var(--sp-1) 0 0;
   color: var(--muted-foreground);

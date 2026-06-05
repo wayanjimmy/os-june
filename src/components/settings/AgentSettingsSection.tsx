@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
-import { MessagingPanel, SkillsToolsPanel } from "../agent/AgentWorkspace";
 import {
+  FilesystemPanel,
+  MessagingPanel,
+  SkillsToolsPanel,
+} from "../agent/AgentWorkspace";
+import {
+  hermesBridgeFilesystemSnapshot,
   hermesBridgeMessagingPlatforms,
   hermesBridgeSkills,
   hermesBridgeToolsets,
@@ -10,9 +15,10 @@ import {
   type HermesMessagingPlatformInfo,
   type HermesSkillInfo,
   type HermesToolsetInfo,
+  type HermesFilesystemSnapshot,
 } from "../../lib/tauri";
 
-type AgentSettingsPanel = "skills" | "messaging";
+type AgentSettingsPanel = "skills" | "messaging" | "files";
 
 export function AgentSettingsSection() {
   const [panel, setPanel] = useState<AgentSettingsPanel>("skills");
@@ -25,6 +31,8 @@ export function AgentSettingsSection() {
   const [platforms, setPlatforms] = useState<
     HermesMessagingPlatformInfo[] | null
   >(null);
+  const [filesystemSnapshot, setFilesystemSnapshot] =
+    useState<HermesFilesystemSnapshot | null>(null);
   const [selectedPlatformId, setSelectedPlatformId] = useState<string>();
   const [envEdits, setEnvEdits] = useState<Record<string, string>>({});
 
@@ -34,6 +42,9 @@ export function AgentSettingsSection() {
     }
     if (panel === "messaging" && !platforms) {
       void loadMessagingPlatforms();
+    }
+    if (panel === "files" && !filesystemSnapshot) {
+      void loadFilesystemSnapshot();
     }
   }, [panel]);
 
@@ -64,6 +75,23 @@ export function AgentSettingsSection() {
           return current;
         }
         return response.platforms[0]?.id;
+      });
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadFilesystemSnapshot() {
+    setLoading(true);
+    try {
+      const snapshot = await hermesBridgeFilesystemSnapshot();
+      setFilesystemSnapshot({
+        roots: snapshot.roots.filter(
+          (root) => root.id === "workspace" || root.id === "memory",
+        ),
       });
       setError(null);
     } catch (err) {
@@ -191,6 +219,16 @@ export function AgentSettingsSection() {
           >
             Messaging
           </button>
+          <button
+            type="button"
+            aria-selected={panel === "files"}
+            onClick={() => {
+              setPanel("files");
+              setQuery("");
+            }}
+          >
+            Files
+          </button>
         </div>
         {error ? <p className="settings-row-error">{error}</p> : null}
         {panel === "skills" ? (
@@ -209,7 +247,7 @@ export function AgentSettingsSection() {
               void setToolsetEnabled(toolset, enabled)
             }
           />
-        ) : (
+        ) : panel === "messaging" ? (
           <MessagingPanel
             loading={loading}
             platforms={platforms}
@@ -230,6 +268,14 @@ export function AgentSettingsSection() {
             onToggle={(platform, enabled) =>
               void setMessagingPlatformEnabled(platform, enabled)
             }
+          />
+        ) : (
+          <FilesystemPanel
+            loading={loading}
+            query={query}
+            snapshot={filesystemSnapshot}
+            onQueryChange={setQuery}
+            onRefresh={() => void loadFilesystemSnapshot()}
           />
         )}
       </div>

@@ -1,7 +1,6 @@
 import { IconDotGrid1x3Vertical } from "central-icons/IconDotGrid1x3Vertical";
 import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
 import { IconFolderDelete } from "central-icons/IconFolderDelete";
-import { IconFolders } from "central-icons/IconFolders";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconMoveFolder } from "central-icons/IconMoveFolder";
@@ -19,11 +18,7 @@ import {
 } from "../agent/AgentWorkspace";
 import { listHermesSessions, sessionTimestamp } from "../../lib/hermes-adapter";
 import { NOTE_DND_MIME } from "../../lib/dnd";
-import type {
-  FolderDto,
-  HermesSessionInfo,
-  NoteListItemDto,
-} from "../../lib/tauri";
+import type { HermesSessionInfo, NoteListItemDto } from "../../lib/tauri";
 
 export type SidebarView =
   | "notes"
@@ -35,16 +30,9 @@ export type SidebarView =
   | "agent";
 
 type SidebarProps = {
-  folders: FolderDto[];
   notes: NoteListItemDto[];
-  selectedNoteId?: string;
-  selectedFolderId?: string;
   activeView: SidebarView;
   onChangeView: (view: SidebarView) => void;
-  onCreateFolder: () => void;
-  onCreateNote: () => void;
-  onSelectAll: () => void;
-  onSelectFolder: (folderId: string) => void;
   onSelectNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
   onOpenMoveDialog: (noteId: string) => void;
@@ -60,12 +48,9 @@ type MenuState = {
 };
 
 export function Sidebar({
-  folders,
   notes,
-  selectedNoteId,
   activeView,
   onChangeView,
-  onCreateNote,
   onSelectNote,
   onDeleteNote,
   onOpenMoveDialog,
@@ -214,6 +199,19 @@ export function Sidebar({
         <button
           type="button"
           className="sidebar-nav-item"
+          onClick={() => {
+            onChangeView("agent");
+            dispatchAgentEvent(AGENT_NEW_SESSION_EVENT);
+          }}
+        >
+          <span className="sidebar-nav-icon">
+            <IconPlusMedium size={15} />
+          </span>
+          <span className="sidebar-nav-label">New Session +</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-nav-item"
           data-active={activeView === "meetings" || activeView === "notes"}
           aria-current={
             activeView === "meetings" || activeView === "notes"
@@ -221,26 +219,13 @@ export function Sidebar({
               : undefined
           }
           onClick={() => {
-            onChangeView("meetings");
-            if (!selectedNoteId && notes.length === 0) onCreateNote();
+            onChangeView("notes");
           }}
         >
           <span className="sidebar-nav-icon">
             <IconNoteText size={15} />
           </span>
-          <span className="sidebar-nav-label">Meetings</span>
-        </button>
-        <button
-          type="button"
-          className="sidebar-nav-item"
-          data-active={activeView === "folders"}
-          aria-current={activeView === "folders" ? "page" : undefined}
-          onClick={() => onChangeView("folders")}
-        >
-          <span className="sidebar-nav-icon">
-            <IconFolders size={16} />
-          </span>
-          <span className="sidebar-nav-label">Folders</span>
+          <span className="sidebar-nav-label">Notes</span>
         </button>
         <button
           type="button"
@@ -286,10 +271,9 @@ export function Sidebar({
             className="section-view-all"
             onClick={() => {
               onChangeView("agent");
-              dispatchAgentEvent(AGENT_NEW_SESSION_EVENT);
             }}
           >
-            New Session +
+            View all
           </button>
         </div>
         <div className="notes-nav-wrap">

@@ -8,14 +8,9 @@ import {
 } from "../components/agent/AgentWorkspace";
 import { NotesList } from "../components/notes-list/NotesList";
 import { Sidebar } from "../components/sidebar/Sidebar";
-import type { FolderDto, NoteListItemDto } from "../lib/tauri";
+import type { NoteListItemDto } from "../lib/tauri";
 
 const now = "2026-05-19T10:00:00Z";
-
-const folders: FolderDto[] = [
-  { id: "folder-1", name: "Ideas", createdAt: now, updatedAt: now },
-  { id: "folder-2", name: "Work", createdAt: now, updatedAt: now },
-];
 
 const notes: NoteListItemDto[] = [
   {
@@ -39,24 +34,16 @@ const notes: NoteListItemDto[] = [
 ];
 
 describe("folders UI", () => {
-  it("renders the meetings entry and starts agent sessions from the sidebar", async () => {
+  it("renders the notes entry and starts agent sessions from the sidebar", async () => {
     const user = userEvent.setup();
-    const onCreateNote = vi.fn();
     const onChangeView = vi.fn();
     const onNewSession = vi.fn();
     window.addEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
     render(
       <Sidebar
-        folders={folders}
         notes={notes}
-        selectedNoteId="note-2"
-        selectedFolderId={undefined}
-        activeView="meetings"
+        activeView="notes"
         onChangeView={onChangeView}
-        onCreateFolder={vi.fn()}
-        onCreateNote={onCreateNote}
-        onSelectAll={vi.fn()}
-        onSelectFolder={vi.fn()}
         onSelectNote={vi.fn()}
         onDeleteNote={vi.fn()}
         onOpenMoveDialog={vi.fn()}
@@ -65,17 +52,15 @@ describe("folders UI", () => {
     );
 
     expect(screen.getByText("Scribe")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Meetings" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Notes" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Folders" })).toBeNull();
     expect(screen.getAllByRole("button", { name: "Agent" })).toHaveLength(2);
 
-    await user.click(screen.getByRole("button", { name: "Meetings" }));
+    await user.click(screen.getByRole("button", { name: "Notes" }));
     await user.click(screen.getByRole("button", { name: "New Session +" }));
 
-    expect(onChangeView).toHaveBeenCalledWith("meetings");
+    expect(onChangeView).toHaveBeenCalledWith("notes");
     expect(onChangeView).toHaveBeenCalledWith("agent");
-    expect(onCreateNote).not.toHaveBeenCalled();
     await waitFor(() => expect(onNewSession).toHaveBeenCalled());
 
     window.removeEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
@@ -88,16 +73,9 @@ describe("folders UI", () => {
     window.addEventListener(AGENT_SELECT_SESSION_EVENT, onSelectAgentSession);
     render(
       <Sidebar
-        folders={folders}
         notes={notes}
-        selectedNoteId="note-2"
-        selectedFolderId={undefined}
         activeView="notes"
         onChangeView={onChangeView}
-        onCreateFolder={vi.fn()}
-        onCreateNote={vi.fn()}
-        onSelectAll={vi.fn()}
-        onSelectFolder={vi.fn()}
         onSelectNote={vi.fn()}
         onDeleteNote={vi.fn()}
         onOpenMoveDialog={vi.fn()}
