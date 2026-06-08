@@ -1,9 +1,19 @@
-use std::collections::BTreeSet;
+use serde::Serialize;
+use std::{collections::BTreeSet, thread, time::Duration};
+use tauri::{AppHandle, Emitter};
 
 const CLEAR_AFTER_INACTIVE_POLLS: u8 = 2;
 const HEARTBEAT_EVERY_ACTIVE_POLLS: u8 = 5;
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const MEETING_DETECTION_EVENT_NAME: &str = "meeting-detection-event";
 
-pub fn setup(_app: &mut tauri::App) {}
+pub fn setup(app: &mut tauri::App) {
+    #[cfg(target_os = "macos")]
+    spawn_monitor(app.handle().clone());
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MeetingDetectionEvent {
@@ -67,6 +77,82 @@ pub(crate) fn active_external_pids(
         .copied()
         .filter(|pid| *pid != 0 && !owned_pids.contains(pid))
         .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_monitor(app: AppHandle) {
+    thread::spawn(move || {
+        let mut state = MeetingDetectionState::default();
+        let mut warned_after_probe_error = false;
+
+        loop {
+            thread::sleep(POLL_INTERVAL);
+
+            let active_pids = match active_input_process_pids() {
+                Ok(active_pids) => {
+                    warned_after_probe_error = false;
+                    active_pids
+                }
+                Err(error) => {
+                    if !warned_after_probe_error {
+                        tracing::warn!(%error, "meeting detection probe failed");
+                        warned_after_probe_error = true;
+                    }
+                    Vec::new()
+                }
+            };
+            let external_pids = active_external_pids(&active_pids, &owned_pids(&app));
+            let capture_active = crate::audio::capture::is_capture_active();
+            if let Some(event) = state.update(!external_pids.is_empty(), capture_active) {
+                emit_detection_event(&app, event, external_pids.len());
+            }
+        }
+    });
+}
+
+fn owned_pids(app: &AppHandle) -> BTreeSet<u32> {
+    let mut pids = BTreeSet::from([std::process::id()]);
+    if let Some(helper_pid) = crate::dictation::dictation_helper_pid(app) {
+        pids.insert(helper_pid);
+    }
+    pids
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeetingDetectionPayload {
+    active_process_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct MeetingDetectionEnvelope {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    payload: MeetingDetectionPayload,
+}
+
+fn emit_detection_event(app: &AppHandle, event: MeetingDetectionEvent, active_process_count: usize) {
+    let event_type = match event {
+        MeetingDetectionEvent::Detected => {
+            crate::dictation::show_hud_window(app);
+            "meeting_detected"
+        }
+        MeetingDetectionEvent::Cleared => "meeting_cleared",
+    };
+    let payload = MeetingDetectionEnvelope {
+        event_type,
+        payload: MeetingDetectionPayload {
+            active_process_count,
+        },
+    };
+    match serde_json::to_string(&payload) {
+        Ok(payload) => {
+            let _ = app.emit(MEETING_DETECTION_EVENT_NAME, payload);
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to encode meeting detection event");
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

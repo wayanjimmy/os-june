@@ -777,6 +777,11 @@ pub fn stop_helper(app: &AppHandle) {
     let _ = process.child.wait();
 }
 
+pub(crate) fn dictation_helper_pid(app: &AppHandle) -> Option<u32> {
+    app.try_state::<HelperState>()
+        .and_then(|state| state.process.lock().ok()?.as_ref().map(|process| process.child.id()))
+}
+
 fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Result<(), AppError> {
     let mut guard = state
         .process
@@ -1735,7 +1740,7 @@ fn is_silent_transcription_error(event: &serde_json::Value) -> bool {
         || normalized_message.contains("dictation_text_empty")
 }
 
-fn show_hud_window(app: &AppHandle) {
+pub(crate) fn show_hud_window(app: &AppHandle) {
     if let Some(hud) = app.get_webview_window("hud") {
         // Only reposition when the HUD is coming up fresh. Within an active
         // session the user may have dragged the pill to a spot they like;
