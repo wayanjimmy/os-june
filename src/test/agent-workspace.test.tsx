@@ -226,7 +226,9 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByLabelText("Generated files")).toBeInTheDocument();
     expect(screen.getAllByText("sample.pdf").length).toBeGreaterThan(0);
 
-    await user.click(screen.getByRole("button", { name: "Download" }));
+    await user.click(
+      screen.getByRole("button", { name: "Download sample.pdf" }),
+    );
 
     expect(mocks.downloadHermesBridgeFile).toHaveBeenCalledWith(samplePath);
   });

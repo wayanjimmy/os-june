@@ -2,6 +2,7 @@ import {
   BotIcon,
   CheckIcon,
   CircleStopIcon,
+  DownloadIcon,
   FileIcon,
   FolderIcon,
   FolderTreeIcon,
@@ -88,7 +89,6 @@ const AGENT_TITLE_TIMEOUT_MS = 2500;
 type AgentPanel = "chat" | "skills" | "messaging";
 
 export const AGENT_NEW_SESSION_EVENT = "scribe:agent:new-session";
-export const AGENT_SELECT_SESSION_EVENT = "scribe:agent:select-session";
 export const AGENT_DELETE_SESSION_EVENT = "scribe:agent:delete-session";
 export const AGENT_SESSIONS_CHANGED_EVENT = "scribe:agent:sessions-changed";
 export const AGENT_NEW_SESSION_PENDING_KEY = "scribe:agent:new-session-pending";
@@ -97,10 +97,6 @@ export type AgentSessionsChangedDetail = {
   sessions: HermesSessionInfo[];
   selectedSessionId?: string;
   workingSessionIds: string[];
-};
-
-type AgentSelectSessionDetail = {
-  sessionId: string;
 };
 
 export type AgentNewSessionDetail = {
@@ -123,7 +119,12 @@ type HermesRuntimeSessionResponse = {
   stored_session_id?: string;
 };
 
-export function AgentWorkspace() {
+type AgentWorkspaceProps = {
+  initialSession?: HermesSessionInfo;
+};
+
+export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
+  const initialSessionId = initialSession?.id;
   const [tasks, setTasks] = useState<AgentTaskDto[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [activePanel, setActivePanel] = useState<AgentPanel>("chat");
@@ -140,9 +141,10 @@ export function AgentWorkspace() {
   );
   const [hermesSessionItems, setHermesSessionItems] = useState<
     HermesSessionInfo[]
-  >([]);
-  const [selectedHermesSessionId, setSelectedHermesSessionId] =
-    useState<string>();
+  >(() => (initialSession ? [initialSession] : []));
+  const [selectedHermesSessionId, setSelectedHermesSessionId] = useState<
+    string | undefined
+  >(initialSessionId);
   const [newSessionMode, setNewSessionMode] = useState(false);
   const [hermesSessionMessages, setHermesSessionMessages] = useState<
     Record<string, HermesSessionMessage[]>
@@ -305,6 +307,22 @@ export function AgentWorkspace() {
   }, [bridge.running, loadHermesSessions]);
 
   useEffect(() => {
+    if (!initialSessionId) return;
+    newSessionModeRef.current = false;
+    setNewSessionMode(false);
+    setActivePanel("chat");
+    setSelectedHermesSessionId(initialSessionId);
+    setSelectedTaskId(undefined);
+    if (initialSession) {
+      setHermesSessionItems((current) =>
+        current.some((session) => session.id === initialSession.id)
+          ? current
+          : [initialSession, ...current],
+      );
+    }
+  }, [initialSession, initialSessionId]);
+
+  useEffect(() => {
     window.dispatchEvent(
       new CustomEvent<AgentSessionsChangedDetail>(
         AGENT_SESSIONS_CHANGED_EVENT,
@@ -323,16 +341,6 @@ export function AgentWorkspace() {
     function handleNewSession(event: Event) {
       const detail = (event as CustomEvent<AgentNewSessionDetail>).detail;
       void startNewTask(detail?.prompt);
-    }
-
-    function handleSelectSession(event: Event) {
-      const detail = (event as CustomEvent<AgentSelectSessionDetail>).detail;
-      if (!detail?.sessionId) return;
-      newSessionModeRef.current = false;
-      setNewSessionMode(false);
-      setActivePanel("chat");
-      setSelectedHermesSessionId(detail.sessionId);
-      setSelectedTaskId(undefined);
     }
 
     function handleDeleteSession(event: Event) {
@@ -363,14 +371,9 @@ export function AgentWorkspace() {
     }
 
     window.addEventListener(AGENT_NEW_SESSION_EVENT, handleNewSession);
-    window.addEventListener(AGENT_SELECT_SESSION_EVENT, handleSelectSession);
     window.addEventListener(AGENT_DELETE_SESSION_EVENT, handleDeleteSession);
     return () => {
       window.removeEventListener(AGENT_NEW_SESSION_EVENT, handleNewSession);
-      window.removeEventListener(
-        AGENT_SELECT_SESSION_EVENT,
-        handleSelectSession,
-      );
       window.removeEventListener(
         AGENT_DELETE_SESSION_EVENT,
         handleDeleteSession,
@@ -2335,8 +2338,13 @@ function AgentArtifactList({
             </p>
           </div>
           {onDownload ? (
-            <button type="button" onClick={() => onDownload(artifact)}>
-              Download
+            <button
+              type="button"
+              aria-label={`Download ${artifact.name}`}
+              title="Download"
+              onClick={() => onDownload(artifact)}
+            >
+              <DownloadIcon size={16} />
             </button>
           ) : null}
         </article>

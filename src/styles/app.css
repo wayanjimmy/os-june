@@ -1265,13 +1265,19 @@ input:focus-visible,
 }
 
 .agent-artifact-card button {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-sm);
   min-height: var(--control-sm);
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-sm);
-  padding: 0 var(--sp-3);
+  padding: 0;
   background: var(--secondary);
   color: var(--secondary-foreground);
-  font-size: var(--fs-sm);
+}
+
+.agent-artifact-card button:hover {
+  background: var(--tertiary);
 }
 
 .agent-reasoning {

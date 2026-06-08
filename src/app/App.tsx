@@ -62,6 +62,7 @@ import type {
   NoteDto,
   RecordingStatusDto,
   AccountStatus,
+  HermesSessionInfo,
 } from "../lib/tauri";
 import type {
   RecordingSourceMode,
@@ -117,6 +118,8 @@ export function App() {
   );
   const [bootstrapped, setBootstrapped] = useState(false);
   const [activeView, setActiveView] = useState<SidebarView>("notes");
+  const [activeAgentSession, setActiveAgentSession] =
+    useState<HermesSessionInfo>();
   const [originFolderId, setOriginFolderId] = useState<string | undefined>();
   // Tracks that the open note was drilled into from the All notes view, so the
   // note shows the same back-arrow + breadcrumb chrome folders use. Cleared
@@ -861,6 +864,9 @@ export function App() {
         activeView={activeView}
         onChangeView={(view) => {
           setActiveView(view);
+          if (view !== "agent") {
+            setActiveAgentSession(undefined);
+          }
           if (view === "folders") {
             setFolderReturnTarget(undefined);
             dispatch({ type: "folderSelected", folderId: undefined });
@@ -877,6 +883,14 @@ export function App() {
         onRemoveNoteFromFolder={(noteId, folderId) =>
           void handleRemoveNoteFromFolder(noteId, folderId)
         }
+        onNewAgentSession={() => {
+          setActiveAgentSession(undefined);
+          setActiveView("agent");
+        }}
+        onSelectAgentSession={(session) => {
+          setActiveAgentSession(session);
+          setActiveView("agent");
+        }}
         recoverableNoteIds={recoverableNoteIds}
         collapsed={sidebarCollapsed}
       />
@@ -943,7 +957,7 @@ export function App() {
                 }}
               />
             ) : activeView === "agent" ? (
-              <AgentWorkspace />
+              <AgentWorkspace initialSession={activeAgentSession} />
             ) : activeView === "notes" || activeView === "all-notes" ? (
               <NotesList
                 notes={state.notes}
