@@ -28,7 +28,7 @@
         "label": "hud",
         "url": "/hud.html",
         "title": "OS Scribe Dictation",
-        "width": 220,
+        "width": 340,
         "height": 120,
         "resizable": false,
         "decorations": false,
