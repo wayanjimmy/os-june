@@ -123,7 +123,12 @@ type HermesRuntimeSessionResponse = {
   stored_session_id?: string;
 };
 
-export function AgentWorkspace() {
+type AgentWorkspaceProps = {
+  initialSession?: HermesSessionInfo;
+};
+
+export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
+  const initialSessionId = initialSession?.id;
   const [tasks, setTasks] = useState<AgentTaskDto[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [activePanel, setActivePanel] = useState<AgentPanel>("chat");
@@ -140,9 +145,10 @@ export function AgentWorkspace() {
   );
   const [hermesSessionItems, setHermesSessionItems] = useState<
     HermesSessionInfo[]
-  >([]);
-  const [selectedHermesSessionId, setSelectedHermesSessionId] =
-    useState<string>();
+  >(() => (initialSession ? [initialSession] : []));
+  const [selectedHermesSessionId, setSelectedHermesSessionId] = useState<
+    string | undefined
+  >(initialSessionId);
   const [newSessionMode, setNewSessionMode] = useState(false);
   const [hermesSessionMessages, setHermesSessionMessages] = useState<
     Record<string, HermesSessionMessage[]>
@@ -303,6 +309,22 @@ export function AgentWorkspace() {
     if (!bridge.running) return;
     void loadHermesSessions();
   }, [bridge.running, loadHermesSessions]);
+
+  useEffect(() => {
+    if (!initialSessionId) return;
+    newSessionModeRef.current = false;
+    setNewSessionMode(false);
+    setActivePanel("chat");
+    setSelectedHermesSessionId(initialSessionId);
+    setSelectedTaskId(undefined);
+    if (initialSession) {
+      setHermesSessionItems((current) =>
+        current.some((session) => session.id === initialSession.id)
+          ? current
+          : [initialSession, ...current],
+      );
+    }
+  }, [initialSession, initialSessionId]);
 
   useEffect(() => {
     window.dispatchEvent(
