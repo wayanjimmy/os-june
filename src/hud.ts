@@ -38,6 +38,7 @@ const meetingStartButton =
 const statusText = document.querySelector<HTMLElement>("#hud-status");
 
 let hideTimer: number | undefined;
+let meetingPromptTimer: number | undefined;
 let brailleTimer: number | undefined;
 let brailleFrame = 0;
 let meetingPromptSuppressed = false;
@@ -48,6 +49,7 @@ const brailleWave = spinners.waverows;
 
 // Matches the .hud[data-state="exiting"] transition in hud.css.
 const EXIT_TRANSITION_MS = 160;
+const MEETING_PROMPT_TIMEOUT_MS = 30_000;
 
 // Bar synthesis + ballistics live in the shared meter so the recorder waveform
 // moves identically. The meter holds the level history and the displayed bars.
@@ -267,8 +269,26 @@ function clearHideTimer() {
   }
 }
 
+function clearMeetingPromptTimer() {
+  if (meetingPromptTimer) {
+    window.clearTimeout(meetingPromptTimer);
+    meetingPromptTimer = undefined;
+  }
+}
+
+function startMeetingPromptTimer() {
+  if (meetingPromptTimer !== undefined) return;
+  meetingPromptTimer = window.setTimeout(() => {
+    meetingPromptTimer = undefined;
+    if (hud?.dataset.state !== "meeting") return;
+    meetingPromptSuppressed = true;
+    void hideHud();
+  }, MEETING_PROMPT_TIMEOUT_MS);
+}
+
 async function hideHud() {
   clearHideTimer();
+  clearMeetingPromptTimer();
   clearStopHover();
   clearPillBounds();
   if (hud) {
@@ -393,11 +413,13 @@ async function handleMeetingDetectionEventPayload(payload: unknown) {
     if (!canShowMeetingPrompt(hud?.dataset.state)) return;
     setHud("meeting", "Meeting detected");
     await showHud();
+    startMeetingPromptTimer();
     return;
   }
 
   if (meetingEvent.type === "meeting_cleared") {
     meetingPromptSuppressed = false;
+    clearMeetingPromptTimer();
     if (hud?.dataset.state === "meeting") {
       void hideHud();
     }
@@ -455,6 +477,7 @@ meetingStartButton?.addEventListener("click", async (event) => {
   if (hud?.dataset.state !== "meeting") return;
 
   meetingPromptSuppressed = true;
+  clearMeetingPromptTimer();
   meetingStartButton.disabled = true;
   try {
     await emit(MEETING_START_TRANSCRIPTION_EVENT);

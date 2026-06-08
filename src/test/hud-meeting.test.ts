@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type TauriListener = (event: { payload: unknown }) => unknown;
 
@@ -38,6 +38,10 @@ describe("meeting detection HUD", () => {
     vi.clearAllMocks();
     mocks.listeners.clear();
     document.body.innerHTML = hudMarkup();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("shows the start transcription prompt when a meeting is detected", async () => {
@@ -90,6 +94,40 @@ describe("meeting detection HUD", () => {
     await emit("meeting-detection-event", { type: "meeting_cleared" });
 
     expect(hudElement().dataset.state).toBe("exiting");
+  });
+
+  it("hides and suppresses the prompt after 30 seconds without a click", async () => {
+    vi.useFakeTimers();
+    await loadHud();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(hudElement().dataset.state).toBe("meeting");
+    expect(mocks.hide).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hudElement().dataset.state).toBe("exiting");
+    await vi.advanceTimersByTimeAsync(160);
+    expect(mocks.hide).toHaveBeenCalledOnce();
+
+    mocks.show.mockClear();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+
+    expect(mocks.show).not.toHaveBeenCalled();
+  });
+
+  it("allows the prompt again after a timed-out meeting clears", async () => {
+    vi.useFakeTimers();
+    await loadHud();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+    await vi.advanceTimersByTimeAsync(30_160);
+    await emit("meeting-detection-event", { type: "meeting_cleared" });
+
+    mocks.show.mockClear();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+
+    expect(hudElement().dataset.state).toBe("meeting");
+    expect(mocks.show).toHaveBeenCalledOnce();
   });
 
   it("does not override an active dictation HUD state", async () => {
