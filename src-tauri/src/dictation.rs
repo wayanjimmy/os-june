@@ -778,8 +778,14 @@ pub fn stop_helper(app: &AppHandle) {
 }
 
 pub(crate) fn dictation_helper_pid(app: &AppHandle) -> Option<u32> {
-    app.try_state::<HelperState>()
-        .and_then(|state| state.process.lock().ok()?.as_ref().map(|process| process.child.id()))
+    app.try_state::<HelperState>().and_then(|state| {
+        state
+            .process
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|process| process.child.id())
+    })
 }
 
 fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Result<(), AppError> {
