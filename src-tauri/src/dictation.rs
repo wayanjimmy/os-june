@@ -14,7 +14,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -26,6 +26,8 @@ const DICTATION_TRANSCRIPTION_CONTEXT: &str = "Transcribe this as clean hands-fr
 const DICTATION_CLEANUP_TIMEOUT_MS: u64 = 15_000;
 const DICTATION_AUDIO_ACTIVITY_THRESHOLD: f32 = 0.04;
 const DICTATION_EVENT_LOG: &str = "dictation-events.log";
+
+static SETTINGS_CACHE: OnceLock<Mutex<DictationSettings>> = OnceLock::new();
 
 pub struct HelperProcess {
     child: Child,
@@ -79,6 +81,13 @@ pub struct HudHoverState {
     last_passthrough: std::sync::atomic::AtomicBool,
 }
 
+pub fn configured_transcription_language() -> Option<String> {
+    settings_store()
+        .lock()
+        .ok()
+        .and_then(|settings| settings.language.clone())
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationSettings {
@@ -86,6 +95,7 @@ pub struct DictationSettings {
     pub toggle_shortcut: DictationShortcutSetting,
     pub microphone: DictationMicrophoneSetting,
     pub style: DictationStyle,
+    pub language: Option<String>,
 }
 
 impl Default for DictationSettings {
@@ -95,6 +105,7 @@ impl Default for DictationSettings {
             toggle_shortcut: DictationShortcutSetting::control_option_space(),
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
+            language: None,
         }
     }
 }
@@ -111,6 +122,7 @@ impl<'de> Deserialize<'de> for DictationSettings {
             toggle_shortcut: Option<DictationShortcutSetting>,
             microphone: Option<DictationMicrophoneSetting>,
             style: Option<DictationStyle>,
+            language: Option<String>,
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -139,6 +151,7 @@ impl<'de> Deserialize<'de> for DictationSettings {
                 .unwrap_or_else(DictationShortcutSetting::control_option_space),
             microphone: settings.microphone.unwrap_or(microphone),
             style: settings.style.unwrap_or_default(),
+            language: normalize_language(settings.language),
         })
     }
 }
@@ -607,6 +620,17 @@ pub fn set_dictation_style(
 }
 
 #[tauri::command]
+pub fn set_dictation_language(
+    state: State<'_, DictationSettingsState>,
+    language: Option<String>,
+) -> Result<DictationSettings, AppError> {
+    let language = normalize_language(language);
+    update_settings(&state, |settings| {
+        settings.language = language;
+    })
+}
+
+#[tauri::command]
 pub fn dictation_helper_command(
     state: State<'_, HelperState>,
     command: serde_json::Value,
@@ -1025,6 +1049,7 @@ fn settings_path(app: &AppHandle) -> Option<PathBuf> {
 fn manage_settings(app: &AppHandle) {
     let path = settings_path(app).unwrap_or_else(|| PathBuf::from("dictation-settings.json"));
     let settings = load_settings(app);
+    replace_current_settings(settings.clone());
     app.manage(DictationSettingsState {
         path,
         settings: Mutex::new(settings),
@@ -1042,6 +1067,27 @@ fn load_settings(app: &AppHandle) -> DictationSettings {
         .unwrap_or_default()
 }
 
+fn normalize_language(language: Option<String>) -> Option<String> {
+    language
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| {
+            value.len() == 2
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_lowercase())
+        })
+}
+
+fn settings_store() -> &'static Mutex<DictationSettings> {
+    SETTINGS_CACHE.get_or_init(|| Mutex::new(DictationSettings::default()))
+}
+
+fn replace_current_settings(settings: DictationSettings) {
+    if let Ok(mut current) = settings_store().lock() {
+        *current = settings;
+    }
+}
+
 fn update_settings(
     state: &DictationSettingsState,
     update: impl FnOnce(&mut DictationSettings),
@@ -1052,6 +1098,7 @@ fn update_settings(
         .map_err(|_| AppError::new("dictation_settings_unavailable", "Settings lock failed."))?;
     update(&mut settings);
     save_settings(state, &settings)?;
+    replace_current_settings(settings.clone());
     Ok(settings.clone())
 }
 
@@ -1243,9 +1290,9 @@ async fn transcribe_recording_ready(app: AppHandle, recording: RecordingReadyInf
         }
     };
     let provider_for_cleanup = provider.clone();
-    let style = current_dictation_settings(&app)
-        .map(|settings| settings.style)
-        .unwrap_or_default();
+    let current_settings = current_dictation_settings(&app).unwrap_or_default();
+    let style = current_settings.style;
+    let language = current_settings.language;
     let dictionary_context = dictionary_context_for_app(&app).await;
     let session_id = dictation_session_id();
     let utterance_id = uuid::Uuid::new_v4().to_string();
@@ -1256,6 +1303,7 @@ async fn transcribe_recording_ready(app: AppHandle, recording: RecordingReadyInf
     let result = dictate_transcribe(DictateTranscribeRequest {
         audio_path: recording.audio_path,
         context: transcription_context,
+        language,
         session_id: session_id.clone(),
         utterance_id: utterance_id.clone(),
     })
@@ -2204,6 +2252,7 @@ mod tests {
             DictationShortcutSetting::control_option_space()
         );
         assert_eq!(settings.style, DictationStyle::Standard);
+        assert_eq!(settings.language, None);
     }
 
     #[test]
@@ -2224,6 +2273,7 @@ mod tests {
         assert_eq!(settings.microphone.id.as_deref(), Some("usb"));
         assert_eq!(settings.microphone.name.as_deref(), Some("USB Mic"));
         assert_eq!(settings.style, DictationStyle::Standard);
+        assert_eq!(settings.language, None);
     }
 
     #[test]
@@ -2236,6 +2286,7 @@ mod tests {
         assert_eq!(settings.push_to_talk_shortcut.press_count, 1);
         assert_eq!(settings.toggle_shortcut.press_count, 1);
         assert_eq!(settings.style, DictationStyle::Standard);
+        assert_eq!(settings.language, None);
         assert!(settings
             .toggle_shortcut
             .same_trigger_as(&DictationShortcutSetting {
@@ -2259,6 +2310,26 @@ mod tests {
         .expect("style settings should deserialize");
 
         assert_eq!(settings.style, DictationStyle::CasualLowercase);
+    }
+
+    #[test]
+    fn deserializes_default_transcription_language() {
+        let settings: DictationSettings = serde_json::from_str(
+            r#"{"pushToTalkShortcut":{"keyCode":0,"code":"Fn","modifiers":{"command":false,"control":false,"option":false,"shift":false,"function":true},"label":"Fn","pressCount":1},"toggleShortcut":{"keyCode":49,"code":"Space","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt+Space","pressCount":1},"microphone":{"id":null,"name":null},"language":"ES"}"#,
+        )
+        .expect("language settings should deserialize");
+
+        assert_eq!(settings.language.as_deref(), Some("es"));
+    }
+
+    #[test]
+    fn ignores_invalid_default_transcription_language() {
+        assert_eq!(normalize_language(Some("english".to_string())), None);
+        assert_eq!(normalize_language(Some(" e ".to_string())), None);
+        assert_eq!(
+            normalize_language(Some(" en ".to_string())).as_deref(),
+            Some("en")
+        );
     }
 
     #[test]
@@ -2351,6 +2422,7 @@ mod tests {
             },
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
+            language: None,
         };
 
         assert!(validate_shortcut_update(
