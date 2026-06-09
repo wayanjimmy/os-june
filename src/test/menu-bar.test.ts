@@ -45,6 +45,38 @@ describe("buildAgentMenuBarState", () => {
     });
   });
 
+  it("keeps waiting sessions visible before recent idle sessions", () => {
+    const recentIdleSessions: HermesSessionInfo[] = Array.from(
+      { length: 6 },
+      (_, index) => ({
+        id: `idle-${index}`,
+        title: `Idle ${index}`,
+        last_active: `2026-06-04T13:0${index}:00Z`,
+      }),
+    );
+    const state = buildAgentMenuBarState({
+      sessions: [
+        ...recentIdleSessions,
+        {
+          id: "waiting-old",
+          title: "Waiting on approval",
+          last_active: "2026-06-04T12:00:00Z",
+        },
+      ],
+      workingSessionIds: new Set(),
+      waitingSessionIds: new Set(["waiting-old"]),
+      limit: 6,
+      now: new Date("2026-06-04T14:00:00Z"),
+    });
+
+    expect(state.needsUserCount).toBe(1);
+    expect(state.sessions).toHaveLength(6);
+    expect(state.sessions[0]).toMatchObject({
+      id: "waiting-old",
+      status: "waitingForUser",
+    });
+  });
+
   it("keeps the last status summary when no session exists yet", () => {
     const state = buildAgentMenuBarState({
       sessions: [],

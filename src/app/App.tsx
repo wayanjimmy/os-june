@@ -109,6 +109,7 @@ const SIDEBAR_MIN_WIDTH = 188;
 const SIDEBAR_MAX_WIDTH = 320;
 const SIDEBAR_COLLAPSE_WIDTH = 160;
 const CHECK_FOR_UPDATES_EVENT = "scribe://check-for-updates";
+const AGENT_MENU_BAR_SESSION_FETCH_LIMIT = 100;
 const AGENT_MENU_BAR_SESSION_LIMIT = 6;
 const AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS = [
   250, 500, 1000, 2000, 4000, 8000,
@@ -200,6 +201,7 @@ export function App() {
         workingSessionIds: agentMenuBarWorkingSessionIdsRef.current,
         waitingSessionIds: agentMenuBarWaitingSessionIdsRef.current,
         lastStatus: agentMenuBarLastStatusRef.current,
+        limit: AGENT_MENU_BAR_SESSION_LIMIT,
       }),
     );
   }, []);
@@ -335,7 +337,7 @@ export function App() {
     let retryTimeout: number | undefined;
 
     function loadAgentMenuBarSessions(attempt: number) {
-      listHermesSessions({ limit: AGENT_MENU_BAR_SESSION_LIMIT })
+      listHermesSessions({ limit: AGENT_MENU_BAR_SESSION_FETCH_LIMIT })
         .then((sessions) => {
           if (cancelled) return;
           agentMenuBarSessionsRef.current = sessions;

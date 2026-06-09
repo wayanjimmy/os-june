@@ -57,7 +57,13 @@ export function buildAgentMenuBarState({
   ]);
   const orderedSessions = [...sessions]
     .filter((session) => typeof session.id === "string" && session.id.trim())
-    .sort((a, b) => sessionTimestamp(b).localeCompare(sessionTimestamp(a)))
+    .sort((a, b) => {
+      const statusRankDelta =
+        statusPriority(b.id, workingSessionIds, waitingSessionIds) -
+        statusPriority(a.id, workingSessionIds, waitingSessionIds);
+      if (statusRankDelta !== 0) return statusRankDelta;
+      return sessionTimestamp(b).localeCompare(sessionTimestamp(a));
+    })
     .slice(0, limit)
     .map((session) => ({
       id: session.id,
@@ -87,6 +93,16 @@ export function buildAgentMenuBarState({
       : undefined,
     updatedAt: now.toISOString(),
   };
+}
+
+function statusPriority(
+  sessionId: string,
+  workingSessionIds: ReadonlySet<string>,
+  waitingSessionIds: ReadonlySet<string>,
+) {
+  if (waitingSessionIds.has(sessionId)) return 2;
+  if (workingSessionIds.has(sessionId)) return 1;
+  return 0;
 }
 
 export async function emitAgentMenuBarState(state: AgentMenuBarState) {
