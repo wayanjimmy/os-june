@@ -493,12 +493,56 @@ describe("AppSettings", () => {
         type: "shortcut_captured",
         payload: {
           shortcut: {
-            code: "KeyT",
-            label: "Ctrl+T",
+            code: "Fn",
+            label: "Fn",
+            modifiers: {
+              command: false,
+              control: false,
+              option: false,
+              shift: false,
+              function: true,
+            },
+            pressCount: 1,
+          },
+        },
+      }),
+    });
+
+    await waitFor(() =>
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith("push_to_talk", {
+        code: "Fn",
+        label: "Fn",
+        modifiers: {
+          command: false,
+          control: false,
+          option: false,
+          shift: false,
+          function: true,
+        },
+        pressCount: 1,
+      }),
+    );
+
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Change" }))[0],
+    );
+    await waitFor(() =>
+      expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+        type: "start_shortcut_capture",
+        pressCount: 1,
+      }),
+    );
+    mocks.eventHandler?.({
+      payload: JSON.stringify({
+        type: "shortcut_captured",
+        payload: {
+          shortcut: {
+            code: "Modifiers",
+            label: "Ctrl+Opt",
             modifiers: {
               command: false,
               control: true,
-              option: false,
+              option: true,
               shift: false,
               function: false,
             },
@@ -510,12 +554,12 @@ describe("AppSettings", () => {
 
     await waitFor(() =>
       expect(mocks.setDictationShortcut).toHaveBeenCalledWith("push_to_talk", {
-        code: "KeyT",
-        label: "Ctrl+T",
+        code: "Modifiers",
+        label: "Ctrl+Opt",
         modifiers: {
           command: false,
           control: true,
-          option: false,
+          option: true,
           shift: false,
           function: false,
         },

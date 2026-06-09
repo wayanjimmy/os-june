@@ -228,6 +228,29 @@ impl<'de> Deserialize<'de> for DictationShortcutSetting {
 }
 
 impl DictationShortcutSetting {
+    fn bare_fn() -> Self {
+        Self {
+            key_code: 0,
+            code: "Fn".to_string(),
+            modifiers: DictationShortcutModifiers {
+                function: true,
+                ..DictationShortcutModifiers::default()
+            },
+            label: "Fn".to_string(),
+            press_count: 1,
+        }
+    }
+
+    fn modifier_only(modifiers: DictationShortcutModifiers) -> Self {
+        Self {
+            key_code: 0,
+            code: "Modifiers".to_string(),
+            label: modifier_only_label(&modifiers),
+            modifiers,
+            press_count: 1,
+        }
+    }
+
     fn control_option_d() -> Self {
         Self {
             key_code: 0x02,
@@ -278,10 +301,16 @@ impl DictationShortcutSetting {
     }
 
     fn normalized_or_default(mut self, kind: DictationShortcutKind) -> Self {
+        if self.is_bare_fn() {
+            return DictationShortcutSetting::bare_fn();
+        }
+        if is_modifier_only_input(&self.code, &self.modifiers) {
+            return DictationShortcutSetting::modifier_only(self.modifiers);
+        }
         let Some(key_code) = key_code_for_code(&self.code) else {
             return default_shortcut_for_kind(kind);
         };
-        if !self.modifiers.has_any() || self.is_bare_fn() {
+        if !self.modifiers.has_any() {
             return default_shortcut_for_kind(kind);
         }
         self.key_code = key_code;
@@ -312,6 +341,19 @@ pub struct DictationShortcutModifiers {
 impl DictationShortcutModifiers {
     fn has_any(&self) -> bool {
         self.command || self.control || self.option || self.shift || self.function
+    }
+
+    fn count(&self) -> usize {
+        [
+            self.command,
+            self.control,
+            self.option,
+            self.shift,
+            self.function,
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
     }
 }
 
@@ -435,6 +477,18 @@ impl DictationShortcutInput {
 
         let press_count = 1;
 
+        if is_bare_fn_input(&self.code, &self.modifiers) {
+            return Ok(DictationShortcutSetting {
+                press_count,
+                label: "Fn".to_string(),
+                ..DictationShortcutSetting::bare_fn()
+            });
+        }
+
+        if is_modifier_only_input(&self.code, &self.modifiers) {
+            return Ok(DictationShortcutSetting::modifier_only(self.modifiers));
+        }
+
         let key_code = key_code_for_code(&self.code).ok_or_else(|| {
             AppError::new(
                 "dictation_shortcut_unsupported",
@@ -463,9 +517,29 @@ fn is_bare_fn_input(code: &str, modifiers: &DictationShortcutModifiers) -> bool 
     code.eq_ignore_ascii_case("Fn") && modifiers.function && no_standard_modifiers(modifiers)
 }
 
+fn is_modifier_only_input(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
+    code.eq_ignore_ascii_case("Modifiers")
+        && modifiers.has_any()
+        && (is_bare_fn_input("Fn", modifiers) || modifiers.count() >= 2)
+}
+
+fn modifier_only_label(modifiers: &DictationShortcutModifiers) -> String {
+    [
+        (modifiers.command, "Cmd"),
+        (modifiers.control, "Ctrl"),
+        (modifiers.option, "Opt"),
+        (modifiers.shift, "Shift"),
+        (modifiers.function, "Fn"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, label)| enabled.then_some(label))
+    .collect::<Vec<_>>()
+    .join("+")
+}
+
 fn legacy_shortcut_setting(id: &str) -> Option<DictationShortcutSetting> {
     match id {
-        "bare_fn" | "fn" => Some(DictationShortcutSetting::control_option_d()),
+        "bare_fn" | "fn" => Some(DictationShortcutSetting::bare_fn()),
         "fn_space" => Some(DictationShortcutSetting {
             key_code: 0x31,
             code: "Space".to_string(),
@@ -2305,7 +2379,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_new_shortcut_settings_and_migrates_bare_fn_push_to_talk() {
+    fn deserializes_new_shortcut_settings_and_preserves_bare_fn_push_to_talk() {
         let settings: DictationSettings = serde_json::from_str(
             r#"{"pushToTalkShortcut":{"keyCode":0,"code":"Fn","modifiers":{"command":false,"control":false,"option":false,"shift":false,"function":true},"label":"Fn","pressCount":1},"toggleShortcut":{"keyCode":49,"code":"Space","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt+Space","pressCount":1},"microphone":{"id":null,"name":null}}"#,
         )
@@ -2313,7 +2387,7 @@ mod tests {
 
         assert_eq!(
             settings.push_to_talk_shortcut,
-            DictationShortcutSetting::control_option_d()
+            DictationShortcutSetting::bare_fn()
         );
         assert_eq!(settings.push_to_talk_shortcut.press_count, 1);
         assert_eq!(settings.toggle_shortcut.press_count, 1);
@@ -2340,9 +2414,23 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_modifier_only_shortcuts() {
+        let settings: DictationSettings = serde_json::from_str(
+            r#"{"pushToTalkShortcut":{"keyCode":0,"code":"Modifiers","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt","pressCount":1},"toggleShortcut":{"keyCode":999,"code":"Digit1","modifiers":{"command":false,"control":true,"option":false,"shift":false,"function":false},"label":"Ctrl+1","pressCount":1},"microphone":{"id":null,"name":null}}"#,
+        )
+        .expect("modifier-only shortcuts should deserialize");
+
+        assert_eq!(settings.push_to_talk_shortcut.key_code, 0);
+        assert_eq!(settings.push_to_talk_shortcut.code, "Modifiers");
+        assert_eq!(settings.push_to_talk_shortcut.label, "Ctrl+Opt");
+        assert!(settings.push_to_talk_shortcut.modifiers.control);
+        assert!(settings.push_to_talk_shortcut.modifiers.option);
+    }
+
+    #[test]
     fn deserializes_unsupported_modifier_only_shortcuts_to_defaults() {
         let settings: DictationSettings = serde_json::from_str(
-            r#"{"pushToTalkShortcut":{"keyCode":59,"code":"ControlLeft","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt","pressCount":1},"toggleShortcut":{"keyCode":0,"code":"Fn","modifiers":{"command":false,"control":false,"option":false,"shift":false,"function":true},"label":"Fn","pressCount":1},"microphone":{"id":null,"name":null}}"#,
+            r#"{"pushToTalkShortcut":{"keyCode":59,"code":"ControlLeft","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt","pressCount":1},"toggleShortcut":{"keyCode":58,"code":"OptionLeft","modifiers":{"command":false,"control":false,"option":true,"shift":false,"function":false},"label":"Opt","pressCount":1},"microphone":{"id":null,"name":null}}"#,
         )
         .expect("settings should deserialize");
 
@@ -2387,8 +2475,8 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_input_rejects_bare_fn() {
-        let err = DictationShortcutInput {
+    fn shortcut_input_accepts_bare_fn() {
+        let shortcut = DictationShortcutInput {
             code: "Fn".to_string(),
             modifiers: DictationShortcutModifiers {
                 function: true,
@@ -2398,9 +2486,26 @@ mod tests {
             press_count: None,
         }
         .into_setting()
-        .expect_err("bare Fn should be rejected");
+        .expect("bare Fn should be accepted");
 
-        assert_eq!(err.code, "dictation_shortcut_unsupported");
+        assert_eq!(shortcut, DictationShortcutSetting::bare_fn());
+    }
+
+    #[test]
+    fn shortcut_input_normalizes_double_bare_fn_to_single_press() {
+        let shortcut = DictationShortcutInput {
+            code: "Fn".to_string(),
+            modifiers: DictationShortcutModifiers {
+                function: true,
+                ..DictationShortcutModifiers::default()
+            },
+            label: "Fn".to_string(),
+            press_count: Some(2),
+        }
+        .into_setting()
+        .expect("bare Fn should be accepted");
+
+        assert_eq!(shortcut, DictationShortcutSetting::bare_fn());
     }
 
     #[test]
@@ -2440,6 +2545,45 @@ mod tests {
         assert_eq!(shortcut.key_code, 0x12);
         assert_eq!(shortcut.code, "Digit1");
         assert!(shortcut.modifiers.control);
+    }
+
+    #[test]
+    fn shortcut_input_accepts_modifier_only_combo() {
+        let shortcut = DictationShortcutInput {
+            code: "Modifiers".to_string(),
+            modifiers: DictationShortcutModifiers {
+                control: true,
+                option: true,
+                ..DictationShortcutModifiers::default()
+            },
+            label: "Ctrl+Opt".to_string(),
+            press_count: Some(1),
+        }
+        .into_setting()
+        .expect("modifier-only combo should be accepted");
+
+        assert_eq!(shortcut.key_code, 0);
+        assert_eq!(shortcut.code, "Modifiers");
+        assert_eq!(shortcut.label, "Ctrl+Opt");
+        assert!(shortcut.modifiers.control);
+        assert!(shortcut.modifiers.option);
+    }
+
+    #[test]
+    fn shortcut_input_rejects_single_modifier_only_shortcut() {
+        let err = DictationShortcutInput {
+            code: "Modifiers".to_string(),
+            modifiers: DictationShortcutModifiers {
+                control: true,
+                ..DictationShortcutModifiers::default()
+            },
+            label: "Ctrl".to_string(),
+            press_count: Some(1),
+        }
+        .into_setting()
+        .expect_err("single modifier-only shortcut should fail");
+
+        assert_eq!(err.code, "dictation_shortcut_unsupported");
     }
 
     #[test]
