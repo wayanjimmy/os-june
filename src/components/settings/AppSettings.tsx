@@ -99,17 +99,18 @@ const EMPTY_MODIFIERS: DictationShortcutModifiers = {
 
 const DEFAULT_SETTINGS: DictationSettingsDto = {
   pushToTalkShortcut: {
-    code: "Fn",
-    label: "Fn",
+    code: "KeyD",
+    label: "Ctrl+Opt+D",
     pressCount: 1,
     modifiers: {
       ...EMPTY_MODIFIERS,
-      function: true,
+      control: true,
+      option: true,
     },
   },
   toggleShortcut: {
-    code: "Space",
-    label: "Ctrl+Opt+Space",
+    code: "KeyT",
+    label: "Ctrl+Opt+T",
     pressCount: 1,
     modifiers: {
       ...EMPTY_MODIFIERS,
@@ -324,7 +325,8 @@ export function AppSettings({
     }
     if (helperEvent.type === "fn_monitor_unavailable") {
       setStatus(
-        helperEvent.payload?.message ?? "Fn/Globe shortcut is unavailable.",
+        helperEvent.payload?.message ??
+          "Global shortcut monitoring is unavailable.",
       );
       return;
     }
