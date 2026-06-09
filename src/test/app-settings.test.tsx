@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   openPrivacySettings: vi.fn(),
   setDictationShortcut: vi.fn(),
   setDictationMicrophone: vi.fn(),
+  setDictationLanguage: vi.fn(),
   osAccountsLogin: vi.fn(),
   osAccountsCancelLogin: vi.fn(),
   osAccountsLogout: vi.fn(),
@@ -25,6 +26,10 @@ const mocks = vi.hoisted(() => ({
   toggleHermesBridgeSkill: vi.fn(),
   toggleHermesBridgeToolset: vi.fn(),
   updateHermesBridgeMessagingPlatform: vi.fn(),
+  listDictionaryEntries: vi.fn(),
+  createDictionaryEntry: vi.fn(),
+  updateDictionaryEntry: vi.fn(),
+  deleteDictionaryEntry: vi.fn(),
   listen: vi.fn(),
   eventHandler: undefined as ((event: { payload: string }) => void) | undefined,
 }));
@@ -38,6 +43,7 @@ vi.mock("../lib/tauri", () => ({
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationShortcut: mocks.setDictationShortcut,
   setDictationMicrophone: mocks.setDictationMicrophone,
+  setDictationLanguage: mocks.setDictationLanguage,
   osAccountsLogin: mocks.osAccountsLogin,
   osAccountsCancelLogin: mocks.osAccountsCancelLogin,
   osAccountsLogout: mocks.osAccountsLogout,
@@ -50,6 +56,10 @@ vi.mock("../lib/tauri", () => ({
   toggleHermesBridgeToolset: mocks.toggleHermesBridgeToolset,
   updateHermesBridgeMessagingPlatform:
     mocks.updateHermesBridgeMessagingPlatform,
+  listDictionaryEntries: mocks.listDictionaryEntries,
+  createDictionaryEntry: mocks.createDictionaryEntry,
+  updateDictionaryEntry: mocks.updateDictionaryEntry,
+  deleteDictionaryEntry: mocks.deleteDictionaryEntry,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -83,6 +93,7 @@ const baseSettings: DictationSettingsDto = {
   },
   microphone: {},
   style: "standard",
+  language: undefined,
 };
 
 const signedInAccount = {
@@ -102,6 +113,11 @@ describe("AppSettings", () => {
     vi.clearAllMocks();
     mocks.eventHandler = undefined;
     mocks.dictationSettings.mockResolvedValue({ settings: baseSettings });
+    mocks.setDictationLanguage.mockImplementation(async (language) => ({
+      ...baseSettings,
+      language,
+    }));
+    mocks.listDictionaryEntries.mockResolvedValue([]);
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
         transcriptionProvider: "venice",
@@ -319,6 +335,32 @@ describe("AppSettings", () => {
       screen.getByRole("switch", { name: "Capture system audio for notes" }),
     );
     expect(onSourceModeChange).toHaveBeenCalledWith("microphonePlusSystem");
+  });
+
+  it("saves the default transcription language", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Dictation" }));
+    const language = await screen.findByRole("combobox", {
+      name: "Default transcription language",
+    });
+
+    await user.selectOptions(language, "es");
+
+    expect(mocks.setDictationLanguage).toHaveBeenCalledWith("es");
+    await waitFor(() => expect(language).toHaveValue("es"));
   });
 
   it("lists system permissions with status and manage actions", async () => {
