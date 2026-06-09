@@ -129,6 +129,7 @@ const LANGUAGE_OPTIONS: { value: string; label: string }[] = [
   { value: "es", label: "Spanish" },
   { value: "fr", label: "French" },
   { value: "de", label: "German" },
+  { value: "id", label: "Indonesian" },
   { value: "it", label: "Italian" },
   { value: "pt", label: "Portuguese" },
   { value: "nl", label: "Dutch" },
