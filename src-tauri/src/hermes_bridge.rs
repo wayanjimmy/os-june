@@ -34,6 +34,23 @@ const HERMES_IMAGE_PREVIEW_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const SCRIBE_PROVIDER_PROXY_MAX_HEADER_BYTES: usize = 32 * 1024;
 const SCRIBE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 512 * 1024;
 
+/// Identity injected into every Hermes session via `SOUL.md`. Hermes loads
+/// this file from `HERMES_HOME` at prompt-build time; without it the runtime
+/// seeds its stock "Hermes Agent by Nous Research" persona.
+const JUNE_SOUL_MD: &str = r#"You are June, the private AI assistant on the user's desktop, made by Open Software. You run on the open-source Hermes agent framework, but your name and identity are June — when asked who or what you are, answer as June, not as Hermes or the underlying model.
+
+You are part of the June app, which handles dictation, meeting notes, and agent work on the user's Mac. As the agent, you hand off real work, run automations the user sets up, and use local memory so the user never has to repeat themselves.
+
+Privacy is your defining trait, by architecture rather than promise. When asked how you keep work private, answer confidently:
+
+- You run locally on the user's desktop. Files, sessions, memory, and agent state stay on the user's disk by default.
+- Prompts leave the device only for model inference, through private model routing: privacy-focused models with contract-enforced zero data retention by default. If the user opts into third-party models, identifying metadata is stripped first.
+- June's backend is open source and runs in a TEE with cryptographic attestation, so users can verify it rather than trust it. The service stores only account, login, and billing records.
+- Open Software never trains on the user's data.
+
+You are helpful, knowledgeable, and direct. Communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose. Be targeted and efficient in your exploration and investigations. Treat the user's files and prompts as sensitive by default: do the work, and keep it to yourself.
+"#;
+
 const ISOLATED_HERMES_ENV_VARS: &[&str] = &[
     "HERMES_HOME",
     "HERMES_CONFIG",
@@ -345,6 +362,7 @@ async fn start_hermes_bridge_inner(
     let provider_proxy_token = random_token();
     let provider_proxy = start_scribe_provider_proxy(provider_proxy_token.clone()).await?;
     sync_hermes_config(&hermes_home, provider_proxy.port, &provider_proxy_token)?;
+    sync_june_soul(&hermes_home)?;
 
     let mut cmd = Command::new(&command);
     cmd.args([
@@ -1378,6 +1396,14 @@ display:
         .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))
 }
 
+/// Writes the June persona to `SOUL.md` in the Scribe-managed Hermes home.
+/// Runs on every start so the app-owned identity wins over the default soul
+/// Hermes seeds on first run (and over any stale copy from earlier versions).
+fn sync_june_soul(hermes_home: &std::path::Path) -> Result<(), AppError> {
+    std::fs::write(hermes_home.join("SOUL.md"), JUNE_SOUL_MD)
+        .map_err(|error| AppError::new("hermes_bridge_soul_failed", error.to_string()))
+}
+
 struct FilesystemRootCandidate {
     id: String,
     label: String,
@@ -1897,5 +1923,22 @@ mod tests {
         assert!(!provider_proxy_authorized(&missing, "proxy-secret"));
         assert!(!provider_proxy_authorized(&basic, "proxy-secret"));
         assert!(!provider_proxy_authorized(&extra, "proxy-secret"));
+    }
+
+    #[test]
+    fn sync_june_soul_replaces_default_hermes_identity() {
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            home.path().join("SOUL.md"),
+            "You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
+        )
+        .expect("seed default soul");
+
+        sync_june_soul(home.path()).expect("sync soul");
+
+        let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
+        assert!(soul.contains("You are June"));
+        assert!(soul.contains("Open Software"));
+        assert!(!soul.contains("Nous Research"));
     }
 }
