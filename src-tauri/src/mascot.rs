@@ -11,6 +11,7 @@ const AGENT_OPEN_EVENT: &str = "scribe:agent:open";
 pub struct MascotLayoutRequest {
     expanded: bool,
     card_count: Option<u32>,
+    replying: Option<bool>,
 }
 
 pub fn setup(app: &mut tauri::App) {
@@ -41,7 +42,11 @@ pub fn mascot_set_layout(app: AppHandle, request: MascotLayoutRequest) -> Result
     let Some(window) = app.get_webview_window(MASCOT_WINDOW_LABEL) else {
         return Ok(());
     };
-    let (width, height) = mascot_window_size(request.expanded, request.card_count.unwrap_or(0));
+    let (width, height) = mascot_window_size(
+        request.expanded,
+        request.card_count.unwrap_or(0),
+        request.replying.unwrap_or(false),
+    );
     window
         .set_size(Size::Logical(LogicalSize::new(width, height)))
         .map_err(|error| error.to_string())?;
@@ -58,17 +63,18 @@ pub fn mascot_open_agent(app: AppHandle, session: Option<serde_json::Value>) -> 
         .map_err(|error| error.to_string())
 }
 
-fn mascot_window_size(expanded: bool, card_count: u32) -> (f64, f64) {
+fn mascot_window_size(expanded: bool, card_count: u32, replying: bool) -> (f64, f64) {
     if !expanded || card_count == 0 {
-        return (152.0, 152.0);
+        return (72.0, 72.0);
     }
 
-    let height = match card_count.min(3) {
-        0 | 1 => 188.0,
-        2 => 274.0,
-        _ => 360.0,
+    let base_height = match card_count.min(3) {
+        0 | 1 => 106.0,
+        2 => 158.0,
+        _ => 210.0,
     };
-    (620.0, height)
+    let reply_height = if replying { 36.0 } else { 0.0 };
+    (328.0, base_height + reply_height)
 }
 
 fn configure_mascot_window(app: &AppHandle) -> Result<(), String> {
@@ -83,7 +89,7 @@ fn configure_mascot_window(app: &AppHandle) -> Result<(), String> {
         .set_visible_on_all_workspaces(true)
         .map_err(|error| error.to_string())?;
     window
-        .set_focusable(false)
+        .set_focusable(true)
         .map_err(|error| error.to_string())?;
     window
         .set_skip_taskbar(true)

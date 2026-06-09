@@ -6,6 +6,7 @@ export const AGENT_SESSIONS_CHANGED_EVENT = "scribe:agent:sessions-changed";
 export const AGENT_NEW_SESSION_PENDING_KEY = "scribe:agent:new-session-pending";
 export const AGENT_SESSION_STATUS_EVENT = "scribe:agent:session-status";
 export const AGENT_OPEN_EVENT = "scribe:agent:open";
+export const AGENT_REPLY_EVENT = "scribe:agent:reply";
 
 export type AgentSessionStatusKind =
   | "received"
@@ -31,6 +32,12 @@ export type AgentSessionsChangedDetail = {
   selectedSessionId?: string;
   workingSessionIds: string[];
   waitingSessionIds?: string[];
+};
+
+export type AgentReplyDetail = {
+  requestId: string;
+  session?: HermesSessionInfo;
+  text: string;
 };
 
 export function dispatchAgentSessionStatus(detail: AgentSessionStatusDetail) {

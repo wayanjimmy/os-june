@@ -89,6 +89,7 @@ import {
   AGENT_SESSIONS_CHANGED_EVENT,
   dispatchAgentSessionsChanged,
   dispatchAgentSessionStatus,
+  type AgentReplyDetail,
   type AgentSessionsChangedDetail,
   type AgentSessionStatusKind,
 } from "../../lib/agent-events";
@@ -155,9 +156,13 @@ type HermesRuntimeSessionResponse = {
 
 type AgentWorkspaceProps = {
   initialSession?: HermesSessionInfo;
+  pendingReply?: AgentReplyDetail;
 };
 
-export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
+export function AgentWorkspace({
+  initialSession,
+  pendingReply,
+}: AgentWorkspaceProps = {}) {
   const initialSessionId = initialSession?.id;
   const [tasks, setTasks] = useState<AgentTaskDto[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
@@ -238,6 +243,7 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
   const gatewayRef = useRef<HermesGatewayClient | null>(null);
   const liveEventsRef = useRef<Record<string, LiveHermesEvent[]>>({});
   const hydratedTaskIdsRef = useRef<Set<string>>(new Set());
+  const handledMascotReplyIdsRef = useRef<Set<string>>(new Set());
   const newSessionModeRef = useRef(false);
   const sessionTitleOverridesRef = useRef<Record<string, string>>({});
   const titleSuggestionSessionIdsRef = useRef<Set<string>>(new Set());
@@ -300,6 +306,23 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
     },
     [],
   );
+
+  const clearSessionActivity = useCallback((sessionId: string) => {
+    const nextWorking = new Set(workingSessionIdsRef.current);
+    nextWorking.delete(sessionId);
+    workingSessionIdsRef.current = nextWorking;
+    setWorkingSessionIds(nextWorking);
+
+    const nextWaiting = new Set(waitingSessionIdsRef.current);
+    nextWaiting.delete(sessionId);
+    waitingSessionIdsRef.current = nextWaiting;
+    setWaitingSessionIds(nextWaiting);
+
+    return {
+      activeCount: nextWorking.size + nextWaiting.size,
+      needsUserCount: nextWaiting.size,
+    };
+  }, []);
 
   const selectedTask = useMemo(
     () => tasks.find((task) => task.id === selectedTaskId),
@@ -433,6 +456,13 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
   }, [initialSession, initialSessionId]);
 
   useEffect(() => {
+    if (!pendingReply?.text.trim()) return;
+    if (handledMascotReplyIdsRef.current.has(pendingReply.requestId)) return;
+    handledMascotReplyIdsRef.current.add(pendingReply.requestId);
+    void submitMascotReply(pendingReply);
+  }, [pendingReply]);
+
+  useEffect(() => {
     dispatchAgentSessionsChanged({
       sessions: hermesSessionItems,
       selectedSessionId: selectedHermesSessionId,
@@ -529,8 +559,25 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
         if (
           sessionHasAssistantAfterLatestUser([...messages, ...retainedPending])
         ) {
-          setSessionWorking(selectedHermesSessionId, false);
-          setSessionWaiting(selectedHermesSessionId, false);
+          const wasActive = sessionHasActiveWork(
+            selectedHermesSessionId,
+            workingSessionIdsRef.current,
+            waitingSessionIdsRef.current,
+            liveEventsRef.current,
+          );
+          const activityCounts = clearSessionActivity(selectedHermesSessionId);
+          if (wasActive) {
+            dispatchAgentSessionStatus({
+              sessionId: selectedHermesSessionId,
+              title:
+                hermesSessionItems.find(
+                  (session) => session.id === selectedHermesSessionId,
+                )?.title ?? "Agent session",
+              status: "completed",
+              summary: "June finished.",
+              ...activityCounts,
+            });
+          }
           liveEventsRef.current = {
             ...liveEventsRef.current,
             [selectedHermesSessionId]: [],
@@ -711,6 +758,37 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
     }
   }
 
+  async function submitMascotReply(reply: AgentReplyDetail) {
+    const message = reply.text.trim();
+    if (!message || submitting || importingFiles) return;
+    const targetSession = reply.session;
+    setActivePanel("chat");
+    setSelectedTaskId(undefined);
+    setDraft("");
+    setAttachments([]);
+    if (targetSession?.id) {
+      newSessionModeRef.current = false;
+      setNewSessionMode(false);
+      selectedHermesSessionIdRef.current = targetSession.id;
+      setSelectedHermesSessionId(targetSession.id);
+      setHermesSessionItems((current) =>
+        current.some((session) => session.id === targetSession.id)
+          ? current
+          : [targetSession, ...current],
+      );
+    }
+    setSubmitting(true);
+    try {
+      await submitHermesSession(message, targetSession);
+      setError(null);
+    } catch (err) {
+      setDraft(message);
+      setError(messageFromError(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   function handleComposerDragOver(event: DragEvent<HTMLFormElement>) {
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
@@ -791,10 +869,15 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
     }
   }
 
-  async function submitHermesSession(content: string) {
-    const targetSessionId = newSessionModeRef.current
-      ? undefined
-      : selectedHermesSessionId;
+  async function submitHermesSession(
+    content: string,
+    explicitSession?: HermesSessionInfo,
+  ) {
+    const targetSessionId = explicitSession?.id
+      ? explicitSession.id
+      : newSessionModeRef.current
+        ? undefined
+        : selectedHermesSessionId;
     const titlePromise = targetSessionId
       ? undefined
       : agentSessionTitleForPrompt(content);
@@ -809,7 +892,11 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
     const storedSessionId =
       targetSessionId ?? created?.stored_session_id ?? created?.session_id;
     if (!storedSessionId) throw new Error("Hermes did not create a session.");
-    const sessionDisplayTitle = sessionTitle ?? titleFromPrompt(content);
+    const sessionDisplayTitle =
+      explicitSession?.title?.trim() ||
+      explicitSession?.preview?.trim() ||
+      sessionTitle ||
+      titleFromPrompt(content);
     if (sessionTitle) {
       sessionTitleOverridesRef.current = {
         ...sessionTitleOverridesRef.current,
@@ -909,18 +996,24 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
         setSessionWaiting(storedSessionId, false);
         setSessionWorking(storedSessionId, true);
       }
+      const activityCounts =
+        status === "completed" || status === "failed" || status === "cancelled"
+          ? clearSessionActivity(storedSessionId)
+          : undefined;
       if (status) {
         dispatchAgentSessionStatus({
           sessionId: storedSessionId,
           title: sessionDisplayTitle,
           status,
           summary: agentStatusSummaryFromHermesEvent(event, status),
+          ...activityCounts,
         });
       }
       if (isTerminalHermesEvent(event.type)) {
         unlisten();
-        setSessionWorking(storedSessionId, false);
-        setSessionWaiting(storedSessionId, false);
+        if (!activityCounts) {
+          clearSessionActivity(storedSessionId);
+        }
         window.setTimeout(() => {
           void refreshHermesSession(storedSessionId);
         }, 300);
@@ -1067,8 +1160,24 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
       if (
         sessionHasAssistantAfterLatestUser([...messages, ...retainedPending])
       ) {
-        setSessionWorking(sessionId, false);
-        setSessionWaiting(sessionId, false);
+        const wasActive = sessionHasActiveWork(
+          sessionId,
+          workingSessionIdsRef.current,
+          waitingSessionIdsRef.current,
+          liveEventsRef.current,
+        );
+        const activityCounts = clearSessionActivity(sessionId);
+        if (wasActive) {
+          dispatchAgentSessionStatus({
+            sessionId,
+            title:
+              hermesSessionItems.find((session) => session.id === sessionId)
+                ?.title ?? "Agent session",
+            status: "completed",
+            summary: "June finished.",
+            ...activityCounts,
+          });
+        }
         liveEventsRef.current = { ...liveEventsRef.current, [sessionId]: [] };
         setLiveEvents(liveEventsRef.current);
       }
@@ -3884,6 +3993,19 @@ function sessionHasAssistantAfterLatestUser(messages: HermesSessionMessage[]) {
   if (latestAssistantIndex < 0) return false;
   if (latestUserIndex < 0) return true;
   return latestAssistantIndex > latestUserIndex;
+}
+
+function sessionHasActiveWork(
+  sessionId: string,
+  workingSessionIds: Set<string>,
+  waitingSessionIds: Set<string>,
+  liveEvents: Record<string, LiveHermesEvent[]>,
+) {
+  return (
+    workingSessionIds.has(sessionId) ||
+    waitingSessionIds.has(sessionId) ||
+    (liveEvents[sessionId]?.length ?? 0) > 0
+  );
 }
 
 function isTerminalHermesEvent(type: string) {

@@ -1,9 +1,11 @@
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import mascotUrl from "./assets/june-pangolin.svg";
 import {
   AGENT_OPEN_EVENT,
+  AGENT_REPLY_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
   AGENT_SESSION_STATUS_EVENT,
+  type AgentReplyDetail,
   type AgentSessionStatusDetail,
   type AgentSessionStatusKind,
   type AgentSessionsChangedDetail,
@@ -40,7 +42,8 @@ type MascotEntry = {
 
 const EXPANDED_KEY = "scribe:mascot:expanded";
 const MAX_VISIBLE_CARDS = 3;
-const TERMINAL_STATUS_TTL_MS = 10 * 60 * 1000;
+const COMPLETED_STATUS_TTL_MS = 12 * 1000;
+const FAILED_STATUS_TTL_MS = 8 * 1000;
 
 const mascot = document.querySelector<HTMLElement>("#mascot");
 const stack = document.querySelector<HTMLElement>("#mascot-stack");
@@ -59,9 +62,11 @@ const state = {
   waitingSessionIds: new Set<string>(),
   statusBySessionId: new Map<string, StatusRecord>(),
   pendingStatuses: [] as StatusRecord[],
+  replyingEntryId: undefined as string | undefined,
 };
 
 let lastLayoutKey = "";
+let pruneTimer: number | undefined;
 
 function applySessionsChanged(detail?: AgentSessionsChangedDetail) {
   if (!detail) return;
@@ -69,6 +74,25 @@ function applySessionsChanged(detail?: AgentSessionsChangedDetail) {
   state.selectedSessionId = detail.selectedSessionId;
   state.workingSessionIds = new Set(detail.workingSessionIds ?? []);
   state.waitingSessionIds = new Set(detail.waitingSessionIds ?? []);
+  const activeSessionIds = new Set([
+    ...state.workingSessionIds,
+    ...state.waitingSessionIds,
+  ]);
+  const knownSessionIds = new Set(state.sessions.map((session) => session.id));
+  for (const [sessionId, record] of state.statusBySessionId) {
+    if (
+      knownSessionIds.has(sessionId) &&
+      isActiveStatus(record.status) &&
+      !activeSessionIds.has(sessionId)
+    ) {
+      state.statusBySessionId.delete(sessionId);
+    }
+  }
+  if (!activeSessionIds.size) {
+    state.pendingStatuses = state.pendingStatuses.filter(
+      (pending) => !isActiveStatus(pending.status),
+    );
+  }
   state.pendingStatuses = state.pendingStatuses.filter(
     (pending) =>
       !state.sessions.some((session) => sameSubject(session, pending)),
@@ -80,11 +104,41 @@ function applyStatus(detail?: AgentSessionStatusDetail) {
   if (!detail) return;
   const record: StatusRecord = { ...detail, receivedAt: Date.now() };
   if (detail.sessionId) {
+    if (detail.status === "completed" || detail.status === "cancelled") {
+      state.workingSessionIds.delete(detail.sessionId);
+      state.waitingSessionIds.delete(detail.sessionId);
+      state.statusBySessionId.set(detail.sessionId, terminalRecord(record));
+      const replacedPending = replacePendingWithTerminalStatus(record);
+      const hasKnownSession = state.sessions.some(
+        (session) => session.id === detail.sessionId,
+      );
+      if (!hasKnownSession && !replacedPending) {
+        state.pendingStatuses = [
+          terminalRecord(record),
+          ...state.pendingStatuses,
+        ].slice(0, MAX_VISIBLE_CARDS);
+      }
+      if (state.replyingEntryId === detail.sessionId) {
+        state.replyingEntryId = undefined;
+      }
+      render();
+      return;
+    }
     state.statusBySessionId.set(detail.sessionId, record);
     state.pendingStatuses = state.pendingStatuses.filter(
       (pending) => !sameStatusSubject(pending, record),
     );
   } else {
+    if (detail.status === "completed" || detail.status === "cancelled") {
+      if (!replacePendingWithTerminalStatus(record)) {
+        state.pendingStatuses = [
+          terminalRecord(record),
+          ...state.pendingStatuses,
+        ].slice(0, MAX_VISIBLE_CARDS);
+      }
+      render();
+      return;
+    }
     const key = statusSubject(record);
     state.pendingStatuses = [
       record,
@@ -114,16 +168,23 @@ function applyVisibility(enabled: boolean) {
 function render() {
   if (!mascot || !stack || !toggle) return;
 
+  pruneOldStatuses();
   const realEntries = buildEntries(false);
   const entries = state.expanded ? buildEntries(true) : realEntries;
-  const expanded = state.enabled && state.expanded && entries.length > 0;
+  const hasEntries = realEntries.length > 0;
+  const expanded = state.enabled && state.expanded && realEntries.length > 0;
+  const active = realEntries.some((entry) => isActiveStatus(entry.status));
 
   mascot.dataset.expanded = expanded ? "true" : "false";
+  mascot.dataset.active = active ? "true" : "false";
+  mascot.dataset.hasEntries = hasEntries ? "true" : "false";
   stack.replaceChildren();
   if (expanded) {
     for (const entry of entries) stack.appendChild(renderCard(entry));
   }
   stack.setAttribute("aria-hidden", expanded ? "false" : "true");
+  toggle.hidden = !hasEntries;
+  toggle.setAttribute("aria-hidden", hasEntries ? "false" : "true");
   toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
   toggle.setAttribute(
     "aria-label",
@@ -131,6 +192,7 @@ function render() {
   );
 
   void syncWindowLayout(expanded, expanded ? entries.length : 0);
+  scheduleStatusPrune();
 }
 
 function renderCard(entry: MascotEntry) {
@@ -163,26 +225,75 @@ function renderCard(entry: MascotEntry) {
   const actions = document.createElement("div");
   actions.className = "mascot-card-actions";
 
-  if (entry.status === "waitingForUser") {
-    const reply = document.createElement("button");
-    reply.type = "button";
-    reply.className = "mascot-reply";
-    reply.textContent = "Reply";
-    reply.addEventListener("click", () => {
-      void openAgent(entry.session);
-    });
-    actions.appendChild(reply);
-  }
+  const reply = document.createElement("button");
+  reply.type = "button";
+  reply.className = "mascot-reply";
+  reply.textContent = "Reply";
+  reply.addEventListener("click", (event) => {
+    event.stopPropagation();
+    state.replyingEntryId = entry.id;
+    render();
+    window.setTimeout(() => {
+      document.querySelector<HTMLInputElement>(".mascot-reply-input")?.focus();
+    }, 0);
+  });
+  actions.appendChild(reply);
   if (actions.childElementCount > 0) card.appendChild(actions);
+
+  if (state.replyingEntryId === entry.id) {
+    card.appendChild(renderReplyForm(entry));
+  }
 
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "mascot-dismiss";
   dismiss.setAttribute("aria-label", "Collapse June mascot");
-  dismiss.addEventListener("click", () => setExpanded(false));
+  dismiss.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setExpanded(false);
+  });
   card.appendChild(dismiss);
 
   return card;
+}
+
+function renderReplyForm(entry: MascotEntry) {
+  const form = document.createElement("form");
+  form.className = "mascot-reply-form";
+
+  const input = document.createElement("input");
+  input.className = "mascot-reply-input";
+  input.type = "text";
+  input.placeholder = "Reply to June";
+  input.autocomplete = "off";
+  input.spellcheck = true;
+  input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      state.replyingEntryId = undefined;
+      render();
+    }
+  });
+
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "mascot-reply-send";
+  submit.textContent = "Send";
+
+  form.append(input, submit);
+  form.addEventListener("click", (event) => event.stopPropagation());
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    state.replyingEntryId = undefined;
+    render();
+    void sendReply(entry, text);
+  });
+
+  return form;
 }
 
 function buildEntries(includeIdle: boolean) {
@@ -195,18 +306,16 @@ function buildEntries(includeIdle: boolean) {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const record = state.statusBySessionId.get(id);
-    if (
-      record &&
-      isTerminalStatus(record.status) &&
-      now - record.receivedAt > TERMINAL_STATUS_TTL_MS
-    ) {
+    if (record && isExpiredTerminalRecord(record, now)) {
       state.statusBySessionId.delete(id);
     }
-    entries.push(entryFromSession(session, state.statusBySessionId.get(id)));
+    const entry = entryFromSession(session, state.statusBySessionId.get(id));
+    if (shouldRenderEntry(entry)) entries.push(entry);
   }
 
   for (const record of state.pendingStatuses) {
-    entries.push(entryFromPending(record));
+    const entry = entryFromPending(record);
+    if (shouldRenderEntry(entry)) entries.push(entry);
   }
 
   const sorted = entries.sort(compareEntries).slice(0, MAX_VISIBLE_CARDS);
@@ -253,9 +362,12 @@ function sessionStatus(
   session: HermesSessionInfo,
   record?: StatusRecord,
 ): MascotSessionStatus {
+  if (record && isTerminalStatus(record.status) && !isExpiredTerminalRecord(record)) {
+    return record.status;
+  }
   if (state.waitingSessionIds.has(session.id)) return "waitingForUser";
   if (state.workingSessionIds.has(session.id)) return "running";
-  if (record && Date.now() - record.receivedAt <= TERMINAL_STATUS_TTL_MS) {
+  if (record && isActiveStatus(record.status)) {
     return record.status;
   }
   return "idle";
@@ -334,7 +446,7 @@ function statusRank(status: MascotSessionStatus) {
   return 4;
 }
 
-function isActiveStatus(status: AgentSessionStatusKind) {
+function isActiveStatus(status: MascotSessionStatus) {
   return (
     status === "received" ||
     status === "starting" ||
@@ -343,27 +455,107 @@ function isActiveStatus(status: AgentSessionStatusKind) {
   );
 }
 
-function isTerminalStatus(status: AgentSessionStatusKind) {
-  return (
-    status === "completed" || status === "failed" || status === "cancelled"
-  );
-}
-
 function pruneOldStatuses() {
   const now = Date.now();
   state.pendingStatuses = state.pendingStatuses.filter(
     (record) =>
-      !isTerminalStatus(record.status) ||
-      now - record.receivedAt <= TERMINAL_STATUS_TTL_MS,
+      isActiveStatus(record.status) ||
+      (isTerminalStatus(record.status) && !isExpiredTerminalRecord(record, now)),
   );
   for (const [id, record] of state.statusBySessionId) {
-    if (
-      isTerminalStatus(record.status) &&
-      now - record.receivedAt > TERMINAL_STATUS_TTL_MS
-    ) {
+    if (isExpiredTerminalRecord(record, now)) {
       state.statusBySessionId.delete(id);
     }
   }
+}
+
+function replacePendingWithTerminalStatus(record: StatusRecord) {
+  let replaced = false;
+  state.pendingStatuses = state.pendingStatuses.map((item) => {
+    if (!sameStatusSubject(item, record)) return item;
+    replaced = true;
+    return terminalRecord(record, item);
+  });
+  if (replaced) return true;
+  if (record.activeCount === 0) {
+    const activePending = state.pendingStatuses.filter((item) =>
+      isActiveStatus(item.status),
+    );
+    state.pendingStatuses = [
+      ...activePending.map((item) => terminalRecord(record, item)),
+      ...state.pendingStatuses.filter((item) => !isActiveStatus(item.status)),
+    ].slice(0, MAX_VISIBLE_CARDS);
+    return activePending.length > 0;
+  }
+  const activePending = state.pendingStatuses.filter((item) =>
+    isActiveStatus(item.status),
+  );
+  if (activePending.length === 1) {
+    state.pendingStatuses = state.pendingStatuses.map((item) =>
+      item === activePending[0] ? terminalRecord(record, item) : item,
+    );
+    return true;
+  }
+  return false;
+}
+
+function terminalRecord(record: StatusRecord, previous?: StatusRecord) {
+  return {
+    ...record,
+    prompt: previous?.prompt ?? record.prompt,
+    title: previous?.title ?? record.title,
+    summary: record.summary?.trim() || statusLabel(record.status),
+    receivedAt: record.receivedAt,
+  };
+}
+
+function scheduleStatusPrune() {
+  if (pruneTimer !== undefined) {
+    window.clearTimeout(pruneTimer);
+    pruneTimer = undefined;
+  }
+  const now = Date.now();
+  const expirations = [
+    ...state.pendingStatuses,
+    ...Array.from(state.statusBySessionId.values()),
+  ]
+    .map((record) => terminalExpiration(record))
+    .filter((expiration): expiration is number => expiration !== undefined);
+  if (!expirations.length) return;
+  const delay = Math.max(0, Math.min(...expirations) - now) + 25;
+  pruneTimer = window.setTimeout(() => {
+    pruneTimer = undefined;
+    pruneOldStatuses();
+    render();
+  }, delay);
+}
+
+function terminalExpiration(record: StatusRecord) {
+  const ttl = terminalStatusTtl(record.status);
+  return ttl === undefined ? undefined : record.receivedAt + ttl;
+}
+
+function isExpiredTerminalRecord(record: StatusRecord, now = Date.now()) {
+  const expiration = terminalExpiration(record);
+  return expiration !== undefined && now > expiration;
+}
+
+function terminalStatusTtl(status: MascotSessionStatus) {
+  if (status === "completed" || status === "cancelled") {
+    return COMPLETED_STATUS_TTL_MS;
+  }
+  if (status === "failed") return FAILED_STATUS_TTL_MS;
+  return undefined;
+}
+
+function shouldRenderEntry(entry: MascotEntry) {
+  return isActiveStatus(entry.status) || isTerminalStatus(entry.status);
+}
+
+function isTerminalStatus(status: MascotSessionStatus) {
+  return (
+    status === "completed" || status === "cancelled" || status === "failed"
+  );
 }
 
 function sameSubject(session: HermesSessionInfo, record: StatusRecord) {
@@ -383,18 +575,22 @@ function statusSubject(record: StatusRecord) {
 }
 
 async function syncWindowLayout(expanded: boolean, cardCount: number) {
-  const key = `${state.enabled}:${expanded}:${cardCount}`;
+  const replying = Boolean(state.replyingEntryId);
+  const key = `${state.enabled}:${expanded}:${cardCount}:${replying}`;
   if (key === lastLayoutKey) return;
   lastLayoutKey = key;
   if (!state.enabled) {
     await mascotHide().catch(() => {});
     return;
   }
-  await mascotSetLayout({ expanded, cardCount }).catch(() => {});
+  await mascotSetLayout({ expanded, cardCount, replying }).catch(() => {});
   await mascotShow().catch(() => {});
 }
 
 function setExpanded(expanded: boolean) {
+  if (!expanded) {
+    state.replyingEntryId = undefined;
+  }
   state.expanded = expanded;
   localStorage.setItem(EXPANDED_KEY, expanded ? "true" : "false");
   render();
@@ -410,7 +606,37 @@ async function openAgent(session?: HermesSessionInfo) {
   });
 }
 
-toggle?.addEventListener("click", () => setExpanded(!state.expanded));
+async function sendReply(entry: MascotEntry, text: string) {
+  await openAgent(entry.session);
+  const detail: AgentReplyDetail = {
+    requestId: `mascot:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    session: entry.session,
+    text,
+  };
+  await emit(AGENT_REPLY_EVENT, detail).catch(() => {
+    window.dispatchEvent(
+      new CustomEvent<AgentReplyDetail>(AGENT_REPLY_EVENT, { detail }),
+    );
+  });
+}
+
+function toggleExpanded() {
+  const renderedExpanded = mascot?.dataset.expanded === "true";
+  setExpanded(!renderedExpanded);
+}
+
+toggle?.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  toggleExpanded();
+});
+
+toggle?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  toggleExpanded();
+});
+
 avatar?.addEventListener("click", () => {
   const [entry] = buildEntries(false);
   void openAgent(entry?.session);

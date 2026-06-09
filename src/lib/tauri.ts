@@ -663,6 +663,7 @@ export async function mascotHide() {
 export async function mascotSetLayout(input: {
   expanded: boolean;
   cardCount?: number;
+  replying?: boolean;
 }) {
   return invoke<void>("mascot_set_layout", { request: input });
 }

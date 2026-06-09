@@ -62,8 +62,10 @@ import {
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import {
   AGENT_OPEN_EVENT,
+  AGENT_REPLY_EVENT,
   AGENT_SESSION_STATUS_EVENT,
   dispatchAgentSessionStatus,
+  type AgentReplyDetail,
   type AgentSessionStatusDetail,
 } from "../lib/agent-events";
 import { notifyAgentSessionStatus } from "../lib/agent-notifications";
@@ -132,6 +134,12 @@ export function App() {
   const [activeView, setActiveView] = useState<SidebarView>("notes");
   const [activeAgentSession, setActiveAgentSession] =
     useState<HermesSessionInfo>();
+  const [pendingAgentReply, setPendingAgentReply] =
+    useState<AgentReplyDetail>();
+  const agentMenuBarSessionsRef = useRef<HermesSessionInfo[]>([]);
+  const agentMenuBarWorkingSessionIdsRef = useRef<Set<string>>(new Set());
+  const agentMenuBarWaitingSessionIdsRef = useRef<Set<string>>(new Set());
+  const agentMenuBarLastStatusRef = useRef<AgentSessionStatusDetail>();
   // Where the back affordance in settings returns to — captured when settings
   // is opened so "back" lands the user where they were, not on Notes.
   const [settingsReturnView, setSettingsReturnView] =
@@ -313,6 +321,35 @@ export function App() {
       aborted = true;
       unlisten?.();
       window.removeEventListener(AGENT_OPEN_EVENT, handleOpenEvent);
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleReply(detail?: AgentReplyDetail) {
+      if (!detail?.text.trim()) return;
+      setActiveAgentSession(detail.session);
+      setPendingAgentReply(detail);
+      setActiveView("agent");
+    }
+
+    function handleReplyEvent(event: Event) {
+      handleReply((event as CustomEvent<AgentReplyDetail>).detail);
+    }
+
+    let aborted = false;
+    let unlisten: (() => void) | undefined;
+    window.addEventListener(AGENT_REPLY_EVENT, handleReplyEvent);
+    void listen<AgentReplyDetail>(AGENT_REPLY_EVENT, (event) => {
+      handleReply(event.payload);
+    }).then((cleanup) => {
+      if (aborted) cleanup();
+      else unlisten = cleanup;
+    });
+
+    return () => {
+      aborted = true;
+      unlisten?.();
+      window.removeEventListener(AGENT_REPLY_EVENT, handleReplyEvent);
     };
   }, []);
 
@@ -1064,7 +1101,10 @@ export function App() {
                 }}
               />
             ) : activeView === "agent" ? (
-              <AgentWorkspace initialSession={activeAgentSession} />
+              <AgentWorkspace
+                initialSession={activeAgentSession}
+                pendingReply={pendingAgentReply}
+              />
             ) : activeView === "notes" || activeView === "all-notes" ? (
               <NotesList
                 notes={state.notes}
