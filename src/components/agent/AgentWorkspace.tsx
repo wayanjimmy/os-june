@@ -87,7 +87,9 @@ import {
   AGENT_NEW_SESSION_EVENT,
   AGENT_NEW_SESSION_PENDING_KEY,
   AGENT_SESSIONS_CHANGED_EVENT,
+  dispatchAgentSessionsChanged,
   dispatchAgentSessionStatus,
+  type AgentSessionsChangedDetail,
   type AgentSessionStatusKind,
 } from "../../lib/agent-events";
 import {
@@ -120,12 +122,7 @@ export {
   AGENT_SESSIONS_CHANGED_EVENT,
 };
 
-export type AgentSessionsChangedDetail = {
-  sessions: HermesSessionInfo[];
-  selectedSessionId?: string;
-  workingSessionIds: string[];
-  waitingSessionIds?: string[];
-};
+export type { AgentSessionsChangedDetail };
 
 export type AgentNewSessionDetail = {
   prompt?: string;
@@ -436,19 +433,12 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
   }, [initialSession, initialSessionId]);
 
   useEffect(() => {
-    window.dispatchEvent(
-      new CustomEvent<AgentSessionsChangedDetail>(
-        AGENT_SESSIONS_CHANGED_EVENT,
-        {
-          detail: {
-            sessions: hermesSessionItems,
-            selectedSessionId: selectedHermesSessionId,
-            workingSessionIds: Array.from(workingSessionIds),
-            waitingSessionIds: Array.from(waitingSessionIds),
-          },
-        },
-      ),
-    );
+    dispatchAgentSessionsChanged({
+      sessions: hermesSessionItems,
+      selectedSessionId: selectedHermesSessionId,
+      workingSessionIds: Array.from(workingSessionIds),
+      waitingSessionIds: Array.from(waitingSessionIds),
+    });
   }, [
     hermesSessionItems,
     selectedHermesSessionId,
@@ -1461,8 +1451,7 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
           }
           onRename={
             !newSessionMode && selectedHermesSessionId
-              ? (title) =>
-                  renameHermesSession(selectedHermesSessionId, title)
+              ? (title) => renameHermesSession(selectedHermesSessionId, title)
               : undefined
           }
           onDelete={
@@ -1614,9 +1603,7 @@ export function AgentWorkspace({ initialSession }: AgentWorkspaceProps = {}) {
           >
             <div
               className="agent-composer-box"
-              data-dirty={
-                draft.trim() || attachments.length ? "true" : "false"
-              }
+              data-dirty={draft.trim() || attachments.length ? "true" : "false"}
               data-multiline={composerMultiline ? "true" : "false"}
             >
               {attachments.length ? (
@@ -2077,7 +2064,10 @@ function AgentSessionBar({
               <IconDotGrid1x3Horizontal size={16} />
             </button>
             {menuOpen ? (
-              <div className="sidebar-identity-menu agent-session-menu" role="menu">
+              <div
+                className="sidebar-identity-menu agent-session-menu"
+                role="menu"
+              >
                 {onRename ? (
                   <button
                     type="button"

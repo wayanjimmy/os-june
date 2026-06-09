@@ -45,6 +45,8 @@ const mocks = vi.hoisted(() => ({
   osAccountsCancelLogin: vi.fn(),
   osAccountsLogout: vi.fn(),
   osAccountsTopUp: vi.fn(),
+  mascotShow: vi.fn(),
+  mascotHide: vi.fn(),
   playRecordingSound: vi.fn(),
   preloadRecordingSounds: vi.fn(),
 }));
@@ -90,6 +92,8 @@ vi.mock("../lib/tauri", () => ({
   osAccountsCancelLogin: mocks.osAccountsCancelLogin,
   osAccountsLogout: mocks.osAccountsLogout,
   osAccountsTopUp: mocks.osAccountsTopUp,
+  mascotShow: mocks.mascotShow,
+  mascotHide: mocks.mascotHide,
 }));
 
 const now = "2026-05-19T10:00:00Z";
@@ -200,12 +204,14 @@ describe("meeting start transcription event", () => {
     const pendingListeners: Array<
       (cleanup: (typeof cleanups)[number]) => void
     > = [];
-    mocks.listen.mockImplementation((event: string, listener: TauriListener) => {
-      mocks.listeners.set(event, listener);
-      return new Promise((resolve) => {
-        pendingListeners.push(resolve);
-      });
-    });
+    mocks.listen.mockImplementation(
+      (event: string, listener: TauriListener) => {
+        mocks.listeners.set(event, listener);
+        return new Promise((resolve) => {
+          pendingListeners.push(resolve);
+        });
+      },
+    );
 
     const { unmount } = render(<App />);
 

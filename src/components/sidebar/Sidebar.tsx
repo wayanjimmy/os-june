@@ -20,6 +20,7 @@ import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
+  emitAgentSessionsChanged,
 } from "../../lib/agent-events";
 import {
   deleteHermesSession,
@@ -173,6 +174,13 @@ export function Sidebar({
             setAgentSessions((current) =>
               current.length > 0 ? current : sessions,
             );
+            if (sessions.length > 0) {
+              emitAgentSessionsChanged({
+                sessions,
+                workingSessionIds: [],
+                waitingSessionIds: [],
+              });
+            }
           }
         })
         .catch(() => {
@@ -311,108 +319,110 @@ export function Sidebar({
         />
       ) : (
         <>
-      <label className="sidebar-search">
-        <IconMagnifyingGlass size={15} />
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.currentTarget.value)}
-          placeholder="Search"
-        />
-      </label>
+          <label className="sidebar-search">
+            <IconMagnifyingGlass size={15} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.currentTarget.value)}
+              placeholder="Search"
+            />
+          </label>
 
-      <nav className="sidebar-nav" aria-label="Primary">
-        <button
-          type="button"
-          className="sidebar-nav-item"
-          onClick={() => {
-            markAgentNewSessionPending();
-            onNewAgentSession();
-            dispatchAgentEvent(AGENT_NEW_SESSION_EVENT);
-          }}
-        >
-          <span className="sidebar-nav-icon">
-            <IconPlusMedium size={15} />
-          </span>
-          <span className="sidebar-nav-label">New Session</span>
-        </button>
-        <button
-          type="button"
-          className="sidebar-nav-item"
-          data-active={activeView === "meetings" || activeView === "notes"}
-          aria-current={
-            activeView === "meetings" || activeView === "notes"
-              ? "page"
-              : undefined
-          }
-          onClick={() => {
-            onChangeView("notes");
-          }}
-        >
-          <span className="sidebar-nav-icon">
-            <IconNoteText size={15} />
-          </span>
-          <span className="sidebar-nav-label">Notes</span>
-        </button>
-        <button
-          type="button"
-          className="sidebar-nav-item"
-          data-active={activeView === "dictation"}
-          aria-current={activeView === "dictation" ? "page" : undefined}
-          onClick={() => onChangeView("dictation")}
-        >
-          <span className="sidebar-nav-icon">
-            <IconMicrophone size={16} />
-          </span>
-          <span className="sidebar-nav-label">Dictation</span>
-        </button>
-      </nav>
+          <nav className="sidebar-nav" aria-label="Primary">
+            <button
+              type="button"
+              className="sidebar-nav-item"
+              onClick={() => {
+                markAgentNewSessionPending();
+                onNewAgentSession();
+                dispatchAgentEvent(AGENT_NEW_SESSION_EVENT);
+              }}
+            >
+              <span className="sidebar-nav-icon">
+                <IconPlusMedium size={15} />
+              </span>
+              <span className="sidebar-nav-label">New Session</span>
+            </button>
+            <button
+              type="button"
+              className="sidebar-nav-item"
+              data-active={activeView === "meetings" || activeView === "notes"}
+              aria-current={
+                activeView === "meetings" || activeView === "notes"
+                  ? "page"
+                  : undefined
+              }
+              onClick={() => {
+                onChangeView("notes");
+              }}
+            >
+              <span className="sidebar-nav-icon">
+                <IconNoteText size={15} />
+              </span>
+              <span className="sidebar-nav-label">Notes</span>
+            </button>
+            <button
+              type="button"
+              className="sidebar-nav-item"
+              data-active={activeView === "dictation"}
+              aria-current={activeView === "dictation" ? "page" : undefined}
+              onClick={() => onChangeView("dictation")}
+            >
+              <span className="sidebar-nav-icon">
+                <IconMicrophone size={16} />
+              </span>
+              <span className="sidebar-nav-label">Dictation</span>
+            </button>
+          </nav>
 
-      <section
-        className="sidebar-section sidebar-agent-section"
-        aria-label="Agent sessions"
-        data-active={activeView === "agent"}
-      >
-        <div className="section-title section-title-with-action">
-          <button
-            type="button"
-            className="section-title-label section-title-open"
-            onClick={() => onChangeView("agent")}
+          <section
+            className="sidebar-section sidebar-agent-section"
+            aria-label="Agent sessions"
+            data-active={activeView === "agent"}
           >
-            Agent
-          </button>
-        </div>
-        <div className="notes-nav-wrap">
-          <div className="notes-nav">
-            {filteredAgentSessions.length > 0 ? (
-              filteredAgentSessions.map((session) => (
-                <AgentSessionRow
-                  key={session.id}
-                  session={session}
-                  selected={
-                    activeView === "agent" &&
-                    selectedAgentSessionId === session.id
-                  }
-                  working={workingAgentSessionIds.has(session.id)}
-                  waiting={waitingAgentSessionIds.has(session.id)}
-                  deleting={deletingAgentSessionIds.has(session.id)}
-                  onSelect={() => {
-                    setSelectedAgentSessionId(session.id);
-                    onSelectAgentSession(session);
-                  }}
-                  onDelete={() => {
-                    setAgentSessionDeleteError(null);
-                    setAgentSessionToDelete(session);
-                  }}
-                />
-              ))
-            ) : (
-              <div className="sidebar-empty">
-                {agentSessions.length === 0 ? "No sessions yet" : "No matches"}
+            <div className="section-title section-title-with-action">
+              <button
+                type="button"
+                className="section-title-label section-title-open"
+                onClick={() => onChangeView("agent")}
+              >
+                Agent
+              </button>
+            </div>
+            <div className="notes-nav-wrap">
+              <div className="notes-nav">
+                {filteredAgentSessions.length > 0 ? (
+                  filteredAgentSessions.map((session) => (
+                    <AgentSessionRow
+                      key={session.id}
+                      session={session}
+                      selected={
+                        activeView === "agent" &&
+                        selectedAgentSessionId === session.id
+                      }
+                      working={workingAgentSessionIds.has(session.id)}
+                      waiting={waitingAgentSessionIds.has(session.id)}
+                      deleting={deletingAgentSessionIds.has(session.id)}
+                      onSelect={() => {
+                        setSelectedAgentSessionId(session.id);
+                        onSelectAgentSession(session);
+                      }}
+                      onDelete={() => {
+                        setAgentSessionDeleteError(null);
+                        setAgentSessionToDelete(session);
+                      }}
+                    />
+                  ))
+                ) : (
+                  <div className="sidebar-empty">
+                    {agentSessions.length === 0
+                      ? "No sessions yet"
+                      : "No matches"}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        </div>
-      </section>
+            </div>
+          </section>
         </>
       )}
 

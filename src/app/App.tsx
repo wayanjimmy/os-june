@@ -61,6 +61,7 @@ import {
 } from "../lib/recording-sounds";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import {
+  AGENT_OPEN_EVENT,
   AGENT_SESSION_STATUS_EVENT,
   dispatchAgentSessionStatus,
   type AgentSessionStatusDetail,
@@ -285,6 +286,35 @@ export function App() {
       unlisten?.();
     };
   }, [runUpdateCheck]);
+
+  useEffect(() => {
+    function openAgentWorkspace(session?: HermesSessionInfo) {
+      setActiveAgentSession(session);
+      setActiveView("agent");
+    }
+
+    function handleOpenEvent(event: Event) {
+      const detail = (event as CustomEvent<{ session?: HermesSessionInfo }>)
+        .detail;
+      openAgentWorkspace(detail?.session);
+    }
+
+    let aborted = false;
+    let unlisten: (() => void) | undefined;
+    window.addEventListener(AGENT_OPEN_EVENT, handleOpenEvent);
+    void listen<{ session?: HermesSessionInfo }>(AGENT_OPEN_EVENT, (event) => {
+      openAgentWorkspace(event.payload?.session);
+    }).then((cleanup) => {
+      if (aborted) cleanup();
+      else unlisten = cleanup;
+    });
+
+    return () => {
+      aborted = true;
+      unlisten?.();
+      window.removeEventListener(AGENT_OPEN_EVENT, handleOpenEvent);
+    };
+  }, []);
 
   useEffect(() => {
     const handleAgentStatus = (event: Event) => {
