@@ -1817,10 +1817,16 @@ fn agent_session_prompt_from_dictation(text: &str) -> Option<String> {
     }
     let after_first = skip_word_separators(after_first);
     let (second, after_second) = take_ascii_word(after_first)?;
-    if !second.eq_ignore_ascii_case("june") {
+    if !is_agent_session_wake_name(second) {
         return None;
     }
     Some(skip_word_separators(after_second).trim().to_string())
+}
+
+fn is_agent_session_wake_name(word: &str) -> bool {
+    ["june", "jun", "joon"]
+        .iter()
+        .any(|variant| word.eq_ignore_ascii_case(variant))
 }
 
 fn take_ascii_word(value: &str) -> Option<(&str, &str)> {
@@ -2768,6 +2774,14 @@ mod tests {
     fn hey_june_detection_requires_first_two_words() {
         assert_eq!(
             agent_session_prompt_from_dictation("Hey June open settings").as_deref(),
+            Some("open settings")
+        );
+        assert_eq!(
+            agent_session_prompt_from_dictation("Hey Jun open settings").as_deref(),
+            Some("open settings")
+        );
+        assert_eq!(
+            agent_session_prompt_from_dictation("Hey Joon open settings").as_deref(),
             Some("open settings")
         );
         assert_eq!(
