@@ -1268,6 +1268,19 @@ input:focus-visible,
   white-space: pre-wrap;
 }
 
+.agent-approval-explanation {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  border-left: 2px solid
+    color-mix(in oklch, var(--warm-strong) 52%, var(--border));
+  padding: var(--sp-1) 0 var(--sp-1) var(--sp-3);
+}
+
+.agent-approval-explanation p {
+  margin: 0;
+}
+
 /* Buttons come from the .btn system (secondary fills, ghost deny) — this
  * block only lays them out and adds the deny accent. */
 .agent-approval-actions {
@@ -1279,6 +1292,10 @@ input:focus-visible,
 
 .agent-approval-actions button:disabled {
   opacity: 0.55;
+}
+
+.agent-approval-explain[aria-expanded="true"] {
+  color: var(--warm-strong);
 }
 
 .agent-approval-deny {

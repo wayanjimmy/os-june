@@ -1,5 +1,6 @@
 import {
   CheckIcon,
+  CircleHelpIcon,
   CircleStopIcon,
   DownloadIcon,
   FileIcon,
@@ -48,6 +49,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -4086,6 +4088,8 @@ function ApprovalPart({
   const disabled = Boolean(submitting) || part.status !== "pending";
   const activeChoice = part.choice ?? submitting;
   const resolved = part.status !== "pending" || activeChoice !== undefined;
+  const [explainOpen, setExplainOpen] = useState(false);
+  const explanationId = useId();
   return (
     <article className="agent-approval-card" data-status={part.status}>
       <span className="agent-tool-icon">
@@ -4103,6 +4107,19 @@ function ApprovalPart({
         </div>
         <p>{part.description}</p>
         {part.command ? <pre>{part.command}</pre> : null}
+        {!resolved && explainOpen ? (
+          <div className="agent-approval-explanation" id={explanationId}>
+            <p>
+              June is paused because this request needs your explicit permission
+              before it can continue.
+            </p>
+            <p>
+              Approve once allows only this request. This session allows
+              matching requests until the session ends. Always allows matching
+              requests in future sessions. Deny blocks the request.
+            </p>
+          </div>
+        ) : null}
         {resolved ? (
           <p className="agent-approval-result" data-choice={activeChoice}>
             {activeChoice === "deny" ? (
@@ -4119,6 +4136,17 @@ function ApprovalPart({
           // System buttons (.btn) — quiet soft-fill choices, ghost deny. The
           // repeated per-button icons read as noise, so labels stand alone.
           <div className="agent-approval-actions">
+            <button
+              type="button"
+              className="btn btn-secondary agent-approval-explain"
+              aria-expanded={explainOpen}
+              aria-controls={explanationId}
+              disabled={disabled}
+              onClick={() => setExplainOpen((value) => !value)}
+            >
+              <CircleHelpIcon size={14} />
+              {explainOpen ? "Hide explanation" : "Explain first"}
+            </button>
             <button
               type="button"
               className="btn btn-secondary"
