@@ -11,6 +11,7 @@ import {
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import { AccountGate } from "../components/account/AccountGate";
+import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
@@ -89,6 +90,10 @@ import type {
   RecordingSourceReadinessDto,
 } from "../lib/tauri";
 import { useAccountStatus } from "../lib/account-status";
+import {
+  isOnboardingComplete,
+  markOnboardingComplete,
+} from "../lib/onboarding";
 import { shouldBlockOnSignIn } from "../lib/account-gate";
 import {
   checkScribeUpdate,
@@ -193,7 +198,15 @@ export function App() {
   } = useAccountStatus();
   const startOnFreshNoteRef = useRef(false);
   const signInRequired = shouldBlockOnSignIn(account);
-  const appBlocked = accountLoading || signInRequired;
+  const [onboardingDone, setOnboardingDone] = useState(() =>
+    isOnboardingComplete(),
+  );
+  const onboardingRequired =
+    !accountLoading && !signInRequired && !onboardingDone;
+  // Onboarding counts as blocked so bootstrap, update checks, and the eager
+  // permission probes hold off until the wizard finishes — the wizard owns
+  // the permission prompts while it's on screen.
+  const appBlocked = accountLoading || signInRequired || onboardingRequired;
   const publishAgentMenuBarState = useCallback(() => {
     void emitAgentMenuBarState(
       buildAgentMenuBarState({
@@ -1078,6 +1091,26 @@ export function App() {
           account={account}
           loading={accountLoading}
           onAccountChanged={handleAccountChanged}
+        />
+      </main>
+    );
+  }
+
+  if (onboardingRequired) {
+    return (
+      <main className="account-gate-shell">
+        <div
+          className="titlebar-drag"
+          aria-hidden
+          data-tauri-drag-region
+          onPointerDown={handleTitlebarPointerDown}
+        />
+        <OnboardingFlow
+          account={account}
+          onComplete={() => {
+            markOnboardingComplete();
+            setOnboardingDone(true);
+          }}
         />
       </main>
     );

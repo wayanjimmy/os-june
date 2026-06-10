@@ -25,6 +25,7 @@ import {
   setDictationShortcut,
   setVeniceModel,
 } from "../../lib/tauri";
+import { LANGUAGE_OPTIONS, languageLabel } from "../../lib/dictation-languages";
 import type {
   AccountStatus,
   DictationHelperEvent,
@@ -129,31 +130,6 @@ const DEFAULT_SETTINGS: DictationSettingsDto = {
   style: "standard",
   language: undefined,
 };
-
-const LANGUAGE_OPTIONS: { value: string; label: string }[] = [
-  { value: "", label: "Auto-detect" },
-  { value: "en", label: "English" },
-  { value: "ar", label: "Arabic" },
-  { value: "zh", label: "Chinese" },
-  { value: "nl", label: "Dutch" },
-  { value: "fr", label: "French" },
-  { value: "de", label: "German" },
-  { value: "hi", label: "Hindi" },
-  { value: "id", label: "Indonesian" },
-  { value: "it", label: "Italian" },
-  { value: "ja", label: "Japanese" },
-  { value: "ko", label: "Korean" },
-  { value: "no", label: "Norwegian" },
-  { value: "pl", label: "Polish" },
-  { value: "pt", label: "Portuguese" },
-  { value: "ru", label: "Russian" },
-  { value: "es", label: "Spanish" },
-  { value: "sv", label: "Swedish" },
-  { value: "th", label: "Thai" },
-  { value: "tr", label: "Turkish" },
-  { value: "uk", label: "Ukrainian" },
-  { value: "vi", label: "Vietnamese" },
-];
 
 const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   transcriptionProvider: "venice",
@@ -1573,12 +1549,6 @@ function shortcutForKind(
   return kind === "toggle"
     ? settings.toggleShortcut
     : settings.pushToTalkShortcut;
-}
-
-function languageLabel(value: string) {
-  return (
-    LANGUAGE_OPTIONS.find((option) => option.value === value)?.label ?? value
-  );
 }
 
 function selectPopoverPlacement(
