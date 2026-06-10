@@ -29,9 +29,11 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const DEFAULT_LOOPBACK_PORT: u16 = 8765;
 // Scopes Scribe needs. profile:read for /me, billing:read for /billing/balance,
+// billing:write so the app can mint the free-trial Stripe Checkout session
+// itself (POST /billing/subscription) instead of detouring through the portal,
 // credits:spend so Scribe API can authorize-and-charge against the user's
 // wallet for transcription / generation / dictation work.
-const OAUTH_SCOPES: &str = "profile:read billing:read credits:spend";
+const OAUTH_SCOPES: &str = "profile:read billing:read billing:write credits:spend";
 // Scribe's OS Accounts token store. Keep this app-scoped so Scribe does not
 // touch credentials written by other Open Software apps on startup.
 const KEYCHAIN_SERVICE: &str = "co.opensoftware.scribe.accounts";
@@ -45,6 +47,9 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const ERR_TOKEN_EXPIRED: i64 = 3001;
+// ApiError::conflict — POST /billing/subscription returns this when a
+// non-canceled subscription already exists for the user.
+const ERR_CONFLICT: i64 = 4001;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static REFRESH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
@@ -79,6 +84,11 @@ struct MeWire {
 struct BalanceWire {
     credits: i64,
     usd_millis: i64,
+}
+
+#[derive(Deserialize)]
+struct SubscribeWire {
+    url: String,
 }
 
 #[derive(Deserialize)]
@@ -403,6 +413,68 @@ pub fn os_accounts_open_portal() -> Result<(), AppError> {
         ));
     }
     open_in_browser(url)
+}
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase", tag = "outcome")]
+pub enum TrialCheckout {
+    /// Stripe Checkout is open in the system browser; the caller should poll
+    /// the subscription status until it flips to trialing/active.
+    CheckoutOpened,
+    /// The accounts API reported a live subscription already exists — the
+    /// caller should refresh the account snapshot instead of waiting.
+    AlreadySubscribed,
+}
+
+/// One-click free trial: mint the subscription Stripe Checkout session
+/// directly from the app (the user's own token authorizes it) and open it in
+/// the system browser — no detour through the portal's billing page. Any
+/// failure other than "already subscribed" surfaces as an error so the UI can
+/// fall back to the portal flow.
+#[tauri::command]
+pub async fn os_accounts_start_trial_checkout() -> Result<TrialCheckout, AppError> {
+    let cfg = Config::load();
+    if !cfg.configured() {
+        return Err(AppError::new(
+            "os_accounts_unconfigured",
+            "OS Accounts is not configured for this build.",
+        ));
+    }
+    let url = format!("{}/billing/subscription", cfg.api_url.trim_end_matches('/'));
+    let mut access = access_token().await?;
+    for attempt in 0..2 {
+        let resp: Envelope<SubscribeWire> = http_client()
+            .post(&url)
+            .bearer_auth(&access)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(net_error)?
+            .json()
+            .await
+            .map_err(net_error)?;
+        if resp.success {
+            let session = resp
+                .data
+                .ok_or_else(|| AppError::new("empty_response", "OS Accounts returned no data."))?;
+            open_in_browser(&session.url)?;
+            return Ok(TrialCheckout::CheckoutOpened);
+        }
+        match resp.error_code {
+            Some(ERR_CONFLICT) => return Ok(TrialCheckout::AlreadySubscribed),
+            // 3001 doubles as "token expired" and "missing scope". Refresh
+            // once; a token from a pre-billing:write sign-in still fails the
+            // retry, and the error below sends the UI down the portal path.
+            Some(ERR_TOKEN_EXPIRED) if attempt == 0 => {
+                access = refresh_locked(&cfg).await?;
+            }
+            _ => break,
+        }
+    }
+    Err(AppError::new(
+        "trial_checkout_unavailable",
+        "Could not start the free trial checkout.",
+    ))
 }
 
 /// Register the deep-link handler at app setup. Drains any in-flight
