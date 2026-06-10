@@ -14,12 +14,22 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { IconArrowUp } from "central-icons/IconArrowUp";
+import { IconCameraSparkle } from "central-icons/IconCameraSparkle";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconConsoleSimple } from "central-icons/IconConsoleSimple";
+import { IconDeepSearch } from "central-icons/IconDeepSearch";
 import { IconLayersTwo } from "central-icons/IconLayersTwo";
 import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal";
+import { IconFiles } from "central-icons/IconFiles";
+import { IconFileSparkle } from "central-icons/IconFileSparkle";
+import { IconFileText } from "central-icons/IconFileText";
+import { IconFolderSparkle } from "central-icons/IconFolderSparkle";
+import { IconHeartBeat } from "central-icons/IconHeartBeat";
+import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconPencil } from "central-icons/IconPencil";
+import { IconPencilLine } from "central-icons/IconPencilLine";
+import { IconPieChart1 } from "central-icons/IconPieChart1";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconShieldAi } from "central-icons/IconShieldAi";
 import { IconTrashCan } from "central-icons/IconTrashCan";
@@ -150,6 +160,112 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
 }
 
 type AgentPanel = "chat" | "skills" | "messaging";
+
+type AgentShortcut = {
+  key: string;
+  icon: ReactNode;
+  title: string;
+  description: string;
+  prompt: string;
+  /**
+   * "run" submits the prompt immediately; "prefill" drops it into the
+   * composer for the user to finish (selecting the <placeholder> if there is
+   * one); "attach" prefills and opens the file picker.
+   */
+  action: "run" | "prefill" | "attach";
+};
+
+const AGENT_SHORTCUTS: AgentShortcut[] = [
+  {
+    key: "tidy-downloads",
+    icon: <IconFolderSparkle size={18} />,
+    title: "Tidy my Downloads",
+    description: "Sort the clutter into folders and flag what's safe to toss.",
+    prompt:
+      "Tidy up my Downloads folder: group the files into subfolders by type, then list anything older than six months that looks safe to delete. Don't delete anything without checking with me first.",
+    action: "run",
+  },
+  {
+    key: "disk-space",
+    icon: <IconPieChart1 size={18} />,
+    title: "Free up disk space",
+    description: "Find what's eating your storage and what can go.",
+    prompt:
+      "Work out what's taking up the most disk space in my home folder, summarize the biggest culprits, and suggest what's safe to clean up. Don't delete anything without checking with me first.",
+    action: "run",
+  },
+  {
+    key: "rename-screenshots",
+    icon: <IconCameraSparkle size={18} />,
+    title: "Rename my screenshots",
+    description: "Turn screenshot gibberish into names that mean something.",
+    prompt:
+      "Look through the screenshots on my Desktop and in my Downloads folder, open each one, and rename it to a short descriptive name based on what it shows. Keep the file extensions and don't overwrite anything.",
+    action: "run",
+  },
+  {
+    key: "find-duplicates",
+    icon: <IconFiles size={18} />,
+    title: "Find duplicate files",
+    description: "Spot copies wasting space across your folders.",
+    prompt:
+      "Scan my Downloads, Documents, and Desktop folders for duplicate files, group the copies together, and tell me which ones look safe to remove. Don't delete anything without checking with me first.",
+    action: "run",
+  },
+  {
+    key: "health-check",
+    icon: <IconHeartBeat size={18} />,
+    title: "Check my Mac's health",
+    description: "Disk, memory, login items — what needs attention.",
+    prompt:
+      "Give my Mac a quick health check: free disk space, memory pressure, login items, and anything else worth flagging. Summarize what looks fine and what needs attention.",
+    action: "run",
+  },
+  {
+    key: "find-file",
+    icon: <IconMagnifyingGlass size={18} />,
+    title: "Find a file",
+    description: "Describe what you remember; June tracks it down.",
+    prompt: "Find <a file I half-remember> on my Mac and tell me where it is.",
+    action: "prefill",
+  },
+  {
+    key: "research",
+    icon: <IconDeepSearch size={18} />,
+    title: "Research a topic",
+    description: "Get a short, sourced write-up on anything.",
+    prompt:
+      "Research <topic> and write a short summary of what you find, with sources.",
+    action: "prefill",
+  },
+  {
+    key: "draft-document",
+    icon: <IconPencilLine size={18} />,
+    title: "Draft a document",
+    description: "Start a write-up and save it to your Documents.",
+    prompt:
+      "Draft a <kind of document> about <topic>, then save it as a Markdown file in my Documents folder.",
+    action: "prefill",
+  },
+  {
+    key: "summarize-file",
+    icon: <IconFileSparkle size={18} />,
+    title: "Summarize a file",
+    description: "Pick a document and get the key points out of it.",
+    prompt:
+      "Summarize the key points of the attached file and pull out any action items.",
+    action: "attach",
+  },
+  {
+    key: "extract-text",
+    icon: <IconFileText size={18} />,
+    title: "Extract text from a file",
+    description: "Pull clean text out of a PDF, image, or scan.",
+    prompt:
+      "Extract all the text from the attached file and clean it up into tidy Markdown.",
+    action: "attach",
+  },
+];
 
 export {
   AGENT_DELETE_SESSION_EVENT,
@@ -1362,6 +1478,30 @@ export function AgentWorkspace({
     }
   }
 
+  function runShortcut(shortcut: AgentShortcut) {
+    if (shortcut.action === "run") {
+      void startNewTask(shortcut.prompt);
+      return;
+    }
+    setDraft(shortcut.prompt);
+    if (shortcut.action === "attach") {
+      void pickAttachments();
+      return;
+    }
+    // Focus after React has flushed the draft into the textarea, selecting
+    // the <placeholder> so typing replaces it in place.
+    requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      const start = shortcut.prompt.indexOf("<");
+      const end = shortcut.prompt.indexOf(">");
+      if (start >= 0 && end > start) {
+        el.setSelectionRange(start, end + 1);
+      }
+    });
+  }
+
   async function cancelTask(taskId: string) {
     try {
       upsertTask(await cancelAgentTask(taskId));
@@ -1801,9 +1941,34 @@ export function AgentWorkspace({
               description={
                 bridgeStarting
                   ? "Getting the agent ready…"
-                  : "Ask the agent to complete a desktop task in the box below. It runs privately on your machine."
+                  : "Pick a shortcut, or describe any desktop task in the box below. It runs privately on your machine."
               }
               label="Start an agent session"
+              footer={
+                <div className="agent-shortcut-grid">
+                  {AGENT_SHORTCUTS.map((shortcut) => (
+                    <button
+                      key={shortcut.key}
+                      type="button"
+                      className="agent-shortcut"
+                      disabled={submitting}
+                      onClick={() => runShortcut(shortcut)}
+                    >
+                      <span className="agent-shortcut-icon" aria-hidden>
+                        {shortcut.icon}
+                      </span>
+                      <span className="agent-shortcut-text">
+                        <span className="agent-shortcut-title">
+                          {shortcut.title}
+                        </span>
+                        <span className="agent-shortcut-description">
+                          {shortcut.description}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              }
             />
           </div>
         )}
