@@ -8,6 +8,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
   AGENT_NEW_SESSION_PENDING_KEY,
   AGENT_SESSIONS_CHANGED_EVENT,
@@ -286,6 +287,31 @@ describe("AgentWorkspace", () => {
       "session-2",
     );
     expect(screen.queryByText("Newer session")).toBeNull();
+  });
+
+  it("forgets the persisted session when it is deleted", async () => {
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        window.localStorage.getItem("scribe:agent:last-open-session"),
+      ).toBe("session-1"),
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_DELETE_SESSION_EVENT, {
+          detail: { sessionId: "session-1" },
+        }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(
+        window.localStorage.getItem("scribe:agent:last-open-session"),
+      ).toBeNull(),
+    );
   });
 
   it("keeps the blank composer after a New Session event during refresh", async () => {

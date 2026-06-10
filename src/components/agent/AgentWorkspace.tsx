@@ -552,6 +552,8 @@ export function AgentWorkspace({
       sessionGatewayUnlistenRef.current.get(sessionId)?.();
       liveEventsRef.current = omitRecordKey(liveEventsRef.current, sessionId);
       setLiveEvents(liveEventsRef.current);
+      // A deleted session must not be the restore target on the next mount.
+      forgetLastOpenSessionId(sessionId);
     },
     [clearSessionActivity],
   );
@@ -5151,7 +5153,13 @@ const AGENT_LAST_OPEN_SESSION_KEY = "scribe:agent:last-open-session";
 
 // How long a second startNewTask call with the same prompt counts as an echo
 // of the first (marker + window event double-delivery) rather than a new ask.
-const AUTO_SUBMIT_ECHO_WINDOW_MS = 5_000;
+// The echo lands a setTimeout(0) after the mount — milliseconds — so 1s is
+// already generous. It must stay time-bounded rather than clear when the
+// submission settles: a fast settle would otherwise reopen the window before
+// the echo arrives. User retries are unaffected either way — a failed
+// auto-submit restores the draft and re-sends go through submit(), which
+// never routes through this guard.
+const AUTO_SUBMIT_ECHO_WINDOW_MS = 1_000;
 
 function readLastOpenSessionId(): string | undefined {
   try {
@@ -5160,6 +5168,18 @@ function readLastOpenSessionId(): string | undefined {
     );
   } catch {
     return undefined;
+  }
+}
+
+/** Drops the stored id only when it points at the given session, so deleting
+ * a background session doesn't forget the one actually open. */
+function forgetLastOpenSessionId(sessionId: string) {
+  try {
+    if (readLastOpenSessionId() === sessionId) {
+      window.localStorage.removeItem(AGENT_LAST_OPEN_SESSION_KEY);
+    }
+  } catch {
+    // Storage can be unavailable in restricted webviews; restore is best-effort.
   }
 }
 
