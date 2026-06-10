@@ -29,12 +29,14 @@ type AgentSessionsListProps = {
   onRemoveFromProject: (sessionId: string, folderId: string) => void;
 };
 
+const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
+
 export function AgentSessionsList({
   sessions,
   folders,
   sessionFolderIds,
-  workingSessionIds = new Set(),
-  waitingSessionIds = new Set(),
+  workingSessionIds = EMPTY_SESSION_IDS,
+  waitingSessionIds = EMPTY_SESSION_IDS,
   onSelectSession,
   onNewSession,
   onOpenMoveDialog,
@@ -269,7 +271,7 @@ function AgentSessionListRow({
         </button>
         {status ? (
           <span
-            className="folder-note-time agent-session-list-status"
+            className="agent-session-list-status"
             data-status={status}
             role="status"
             aria-label={statusLabel}

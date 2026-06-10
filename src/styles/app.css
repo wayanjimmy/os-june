@@ -7898,11 +7898,16 @@ input:focus-visible,
 }
 
 .agent-session-list-status {
+  position: relative;
+  z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
   color: var(--warm-strong);
+  font-size: var(--fs-sm);
   font-weight: 600;
+  white-space: nowrap;
+  transition: opacity var(--t-fast) var(--ease-out);
 }
 
 .agent-session-list-status[data-status="waitingForUser"] {

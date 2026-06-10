@@ -56,6 +56,12 @@ describe("AgentSessionsList", () => {
     expect(screen.getByRole("status", { name: "Working" })).toHaveTextContent(
       "Working",
     );
+    expect(screen.getByRole("status", { name: "Needs you" })).not.toHaveClass(
+      "folder-note-time",
+    );
+    expect(screen.getByRole("status", { name: "Working" })).not.toHaveClass(
+      "folder-note-time",
+    );
 
     const list = screen.getByRole("list");
     expect(
