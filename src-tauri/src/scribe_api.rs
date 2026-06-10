@@ -536,6 +536,12 @@ pub fn configured() -> bool {
     !scribe_api_url().is_empty()
 }
 
+/// Public URL of the attestation walkthrough the backend serves from inside
+/// its confidential VM — same origin every metered request already goes to.
+pub fn verify_url() -> String {
+    format!("{}/verify", scribe_api_url())
+}
+
 fn extract_chat_completion_text(value: &serde_json::Value) -> Option<String> {
     value
         .get("choices")?

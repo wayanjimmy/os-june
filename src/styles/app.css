@@ -6009,6 +6009,8 @@ input:focus-visible,
   color: var(--foreground);
   font-size: var(--fs-md);
   font-weight: 500;
+  /* Anchors styled as buttons keep the UA underline otherwise. */
+  text-decoration: none;
   cursor: pointer;
   transition:
     background-color var(--t-fast) var(--ease-out),
