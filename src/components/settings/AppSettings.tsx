@@ -1769,8 +1769,13 @@ function shortcutsMatch(
   first: DictationShortcutSetting,
   second: DictationShortcutSetting,
 ) {
+  const keyCodesMatch =
+    first.keyCode === undefined ||
+    second.keyCode === undefined ||
+    first.keyCode === second.keyCode;
+
   return (
-    first.keyCode === second.keyCode &&
+    keyCodesMatch &&
     first.code === second.code &&
     first.label === second.label &&
     first.pressCount === second.pressCount &&
