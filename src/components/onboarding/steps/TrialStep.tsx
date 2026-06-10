@@ -38,9 +38,15 @@ export function TrialStep({
     },
   });
 
+  // Read through a ref so the once-only skip effect below never calls a
+  // stale closure of the parent's goNext.
+  const onContinueRef = useRef(onContinue);
   useEffect(() => {
-    if (initiallySubscribed) onContinue();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    onContinueRef.current = onContinue;
+  });
+
+  useEffect(() => {
+    if (initiallySubscribed) onContinueRef.current();
   }, [initiallySubscribed]);
 
   if (initiallySubscribed) return null;

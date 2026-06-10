@@ -66,6 +66,17 @@ export function useTrialCheckout({
   const [notice, setNotice] = useState<string>();
   const activatedRef = useRef(false);
 
+  // Callers pass inline closures for these, so depending on them directly
+  // would tear down and re-arm the listener/poll effects on every parent
+  // render (resetting the poll countdown each time). Forward them through
+  // refs instead and keep the effects keyed on real state.
+  const onRefreshRef = useRef(onRefresh);
+  const onActivatedRef = useRef(onActivated);
+  useEffect(() => {
+    onRefreshRef.current = onRefresh;
+    onActivatedRef.current = onActivated;
+  });
+
   const subscribed = isSubscriptionActive(account);
 
   // The post-checkout deep link (Stripe → portal /return → osscribe://)
@@ -78,12 +89,12 @@ export function useTrialCheckout({
         setNotice("Checkout canceled — ready when you are.");
         return;
       }
-      void onRefresh();
+      void onRefreshRef.current();
     });
     return () => {
       void unlisten.then((dispose) => dispose());
     };
-  }, [onRefresh]);
+  }, []);
 
   // Activation watcher. Covers every path to a live subscription — direct
   // checkout, portal fallback, even a second device — because it keys off
@@ -97,16 +108,16 @@ export function useTrialCheckout({
       void focusMainWindow().catch(() => undefined);
     }
     setPhase("idle");
-    onActivated();
-  }, [subscribed, phase, onActivated]);
+    onActivatedRef.current();
+  }, [subscribed, phase]);
 
   useEffect(() => {
     if (phase !== "waiting") return;
     const interval = window.setInterval(() => {
-      void onRefresh();
+      void onRefreshRef.current();
     }, WAITING_POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [phase, onRefresh]);
+  }, [phase]);
 
   const start = useCallback(async () => {
     setError(undefined);
@@ -117,7 +128,7 @@ export function useTrialCheckout({
       if (result.outcome === "alreadySubscribed") {
         // Stale snapshot (e.g. subscribed on another machine); the refreshed
         // status trips the activation watcher above.
-        await onRefresh();
+        await onRefreshRef.current();
         setPhase("idle");
         return;
       }
@@ -134,11 +145,11 @@ export function useTrialCheckout({
         setPhase("idle");
       }
     }
-  }, [onRefresh]);
+  }, []);
 
   const checkNow = useCallback(async () => {
-    await onRefresh();
-  }, [onRefresh]);
+    await onRefreshRef.current();
+  }, []);
 
   return { phase, usedPortalFallback, error, notice, start, checkNow };
 }
