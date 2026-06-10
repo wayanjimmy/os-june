@@ -20,10 +20,12 @@ import {
   type AgentNewSessionDetail,
   type AgentSessionsChangedDetail,
 } from "../components/agent/AgentWorkspace";
+import { AgentSessionsList } from "../components/agent/AgentSessionsList";
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
 import { FoldersWorkspace } from "../components/folders/FoldersWorkspace";
 import { RoutinesView } from "../components/routines/RoutinesView";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
+import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import { NotesList } from "../components/notes-list/NotesList";
 import { PermissionBanner } from "../components/permissions/PermissionBanner";
@@ -36,6 +38,7 @@ import { BreadcrumbBar } from "../components/ui/BreadcrumbBar";
 import { Dialog } from "../components/ui/Dialog";
 import {
   assignNoteToFolder,
+  assignSessionToFolder,
   bootstrapApp,
   checkRecordingSourceReadiness,
   createFolder,
@@ -47,11 +50,13 @@ import {
   getRecordingStatus,
   getNote,
   listNotes,
+  listSessionFolders,
   openPrivacySettings,
   osAccountsLogout,
   osAccountsTopUp,
   pauseRecording,
   removeNoteFromFolder,
+  removeSessionFromFolder,
   recoverRecording,
   renameFolder,
   resumeRecording,
@@ -75,6 +80,7 @@ import {
   type AgentSessionStatusDetail,
 } from "../lib/agent-events";
 import { notifyAgentSessionStatus } from "../lib/agent-notifications";
+import { messageFromError } from "../lib/errors";
 import { parseDictationHelperEvent } from "../lib/dictation-events";
 import { listHermesSessions, titleFromPrompt } from "../lib/hermes-adapter";
 import {
@@ -153,6 +159,27 @@ export function App() {
     useState<HermesSessionInfo>();
   const [pendingAgentReply, setPendingAgentReply] =
     useState<AgentReplyDetail>();
+  // Reactive copy of the known agent sessions for the "view all" list and
+  // project (folder) surfaces; the menu-bar refs below stay the source for
+  // native menu state.
+  const [agentSessions, setAgentSessions] = useState<HermesSessionInfo[]>([]);
+  // sessionId -> project (folder) ids. Sessions live in Hermes, so their
+  // project assignments are tracked separately from the notes state.
+  const [sessionFolders, setSessionFolders] = useState<
+    Record<string, string[]>
+  >({});
+  const [moveDialogSessionId, setMoveDialogSessionId] = useState<string | null>(
+    null,
+  );
+  // The project an open agent session was drilled into from — drives the
+  // breadcrumb above the agent workspace, mirroring notes-from-folder.
+  const [agentOriginFolderId, setAgentOriginFolderId] = useState<string>();
+  // Set when "New session" is started from a project: the next brand-new
+  // session AgentWorkspace selects gets filed into that project.
+  const pendingSessionProjectRef = useRef<{
+    folderId: string;
+    knownSessionIds: Set<string>;
+  } | null>(null);
   const agentMenuBarSessionsRef = useRef<HermesSessionInfo[]>([]);
   const agentMenuBarWorkingSessionIdsRef = useRef<Set<string>>(new Set());
   const agentMenuBarWaitingSessionIdsRef = useRef<Set<string>>(new Set());
@@ -224,6 +251,9 @@ export function App() {
   const selectedNoteId = selectedNote?.id;
   const originFolder = originFolderId
     ? state.folders.find((folder) => folder.id === originFolderId)
+    : undefined;
+  const agentOriginFolder = agentOriginFolderId
+    ? state.folders.find((folder) => folder.id === agentOriginFolderId)
     : undefined;
   const recoveriesByNote = useMemo(() => {
     const map = new Map<string, (typeof state.activeRecoveries)[number]>();
@@ -332,6 +362,7 @@ export function App() {
 
   useEffect(() => {
     function openAgentWorkspace(session?: HermesSessionInfo) {
+      setAgentOriginFolderId(undefined);
       setActiveAgentSession(session);
       setActiveView("agent");
     }
@@ -362,6 +393,7 @@ export function App() {
   useEffect(() => {
     function handleReply(detail?: AgentReplyDetail) {
       if (!detail?.text.trim()) return;
+      setAgentOriginFolderId(undefined);
       setActiveAgentSession(detail.session);
       setPendingAgentReply(detail);
       setActiveView("agent");
@@ -414,6 +446,7 @@ export function App() {
         .then((sessions) => {
           if (cancelled) return;
           agentMenuBarSessionsRef.current = sessions;
+          setAgentSessions(sessions);
           publishAgentMenuBarState();
         })
         .catch(() => {
@@ -437,11 +470,55 @@ export function App() {
     };
   }, [appBlocked, bootstrapped, publishAgentMenuBarState]);
 
+  // Project assignments for agent sessions, loaded once storage is up.
+  useEffect(() => {
+    if (appBlocked || !bootstrapped) return;
+    let cancelled = false;
+    void listSessionFolders()
+      .then((assignments) => {
+        if (cancelled) return;
+        const next: Record<string, string[]> = {};
+        for (const assignment of assignments) {
+          (next[assignment.sessionId] ??= []).push(assignment.folderId);
+        }
+        setSessionFolders(next);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(messageFromError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appBlocked, bootstrapped]);
+
   useEffect(() => {
     function handleSessionsChanged(event: Event) {
       const detail = (event as CustomEvent<AgentSessionsChangedDetail>).detail;
       if (!detail) return;
       agentMenuBarSessionsRef.current = detail.sessions;
+      setAgentSessions(detail.sessions);
+      // "New session" started from a project: file the first brand-new
+      // session that gets selected; switching to a known session instead
+      // abandons the intent.
+      const pendingProject = pendingSessionProjectRef.current;
+      if (pendingProject && detail.selectedSessionId) {
+        pendingSessionProjectRef.current = null;
+        const sessionId = detail.selectedSessionId;
+        if (!pendingProject.knownSessionIds.has(sessionId)) {
+          void assignSessionToFolder(sessionId, pendingProject.folderId)
+            .then(() =>
+              setSessionFolders((prev) => ({
+                ...prev,
+                [sessionId]: [pendingProject.folderId],
+              })),
+            )
+            .catch(() => {});
+        } else {
+          // User switched to an existing session — abandon the pending
+          // project intent so the workspace doesn't show misleading crumbs.
+          setAgentOriginFolderId(undefined);
+        }
+      }
       agentMenuBarWorkingSessionIdsRef.current = new Set(
         detail.workingSessionIds,
       );
@@ -470,6 +547,9 @@ export function App() {
       if (!sessionId) return;
       agentMenuBarSessionsRef.current = agentMenuBarSessionsRef.current.filter(
         (session) => session.id !== sessionId,
+      );
+      setAgentSessions((current) =>
+        current.filter((session) => session.id !== sessionId),
       );
       agentMenuBarWorkingSessionIdsRef.current.delete(sessionId);
       agentMenuBarWaitingSessionIdsRef.current.delete(sessionId);
@@ -524,6 +604,8 @@ export function App() {
     }
 
     void installMenuBarListener<void>(AGENT_MENU_BAR_NEW_SESSION_EVENT, () => {
+      pendingSessionProjectRef.current = null;
+      setAgentOriginFolderId(undefined);
       markAgentNewSessionPending();
       setActiveAgentSession(undefined);
       setActiveView("agent");
@@ -537,6 +619,7 @@ export function App() {
     void installMenuBarListener<string>(
       AGENT_MENU_BAR_OPEN_SESSION_EVENT,
       (sessionId) => {
+        setAgentOriginFolderId(undefined);
         if (!sessionId) {
           setActiveView("agent");
           return;
@@ -952,10 +1035,18 @@ export function App() {
 
   async function handleDeleteFolder(folderId: string) {
     try {
-      // Deleting a folder strips its association from any notes but
-      // never deletes the notes themselves — they stay in your library.
+      // Deleting a project strips its association from any notes and agent
+      // sessions but never deletes them — they stay in your library.
       await deleteFolder(folderId, false);
       dispatch({ type: "folderDeleted", folderId });
+      setSessionFolders((prev) => {
+        const next: Record<string, string[]> = {};
+        for (const [sessionId, folderIds] of Object.entries(prev)) {
+          const remaining = folderIds.filter((id) => id !== folderId);
+          if (remaining.length > 0) next[sessionId] = remaining;
+        }
+        return next;
+      });
     } catch (err) {
       setError(messageFromError(err));
       throw err;
@@ -998,6 +1089,100 @@ export function App() {
     }
   }
 
+  // Single-project semantics for agent sessions, mirroring notes: a session
+  // belongs to at most one project, so any existing assignment is stripped
+  // before adding the target.
+  async function handleSetSessionFolder(
+    sessionId: string,
+    folderId: string,
+    options?: { rethrow?: boolean },
+  ) {
+    const current = sessionFolders[sessionId] ?? [];
+    if (current.length === 1 && current[0] === folderId) return;
+    try {
+      for (const existing of current) {
+        if (existing === folderId) continue;
+        await removeSessionFromFolder(sessionId, existing);
+      }
+      if (!current.includes(folderId)) {
+        await assignSessionToFolder(sessionId, folderId);
+      }
+      setSessionFolders((prev) => ({ ...prev, [sessionId]: [folderId] }));
+    } catch (err) {
+      setError(messageFromError(err));
+      if (options?.rethrow) throw err;
+    }
+  }
+
+  async function handleRemoveSessionFromFolder(
+    sessionId: string,
+    folderId: string,
+  ) {
+    try {
+      await removeSessionFromFolder(sessionId, folderId);
+      setSessionFolders((prev) => {
+        const next = { ...prev };
+        const remaining = (next[sessionId] ?? []).filter(
+          (id) => id !== folderId,
+        );
+        if (remaining.length > 0) next[sessionId] = remaining;
+        else delete next[sessionId];
+        return next;
+      });
+    } catch (err) {
+      setError(messageFromError(err));
+    }
+  }
+
+  // Mirrors the sidebar's "New session" button so the agent sessions list
+  // can start a fresh chat with the same pending-session handshake.
+  function handleNewAgentSession() {
+    pendingSessionProjectRef.current = null;
+    setAgentOriginFolderId(undefined);
+    markAgentNewSessionPending();
+    setActiveAgentSession(undefined);
+    setActiveView("agent");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent<AgentNewSessionDetail>(AGENT_NEW_SESSION_EVENT),
+      );
+    }, 0);
+  }
+
+  // "New session" from inside a project: same fresh-chat handshake, but the
+  // session gets filed into the project once Hermes hands back its id.
+  function handleNewAgentSessionInProject(folderId: string) {
+    pendingSessionProjectRef.current = {
+      folderId,
+      knownSessionIds: new Set(agentSessions.map((session) => session.id)),
+    };
+    setAgentOriginFolderId(folderId);
+    markAgentNewSessionPending();
+    setActiveAgentSession(undefined);
+    setActiveView("agent");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent<AgentNewSessionDetail>(AGENT_NEW_SESSION_EVENT),
+      );
+    }, 0);
+  }
+
+  // Leaves the agent workspace for the project it was entered from.
+  function handleReturnToAgentOriginFolder() {
+    if (!agentOriginFolderId) return;
+    setActiveView("folders");
+    dispatch({ type: "folderSelected", folderId: agentOriginFolderId });
+    setActiveAgentSession(undefined);
+    setAgentOriginFolderId(undefined);
+  }
+
+  // Back target for sessions opened outside a project: the Agents view-all.
+  function handleReturnToAgentsList() {
+    setActiveView("agent-sessions");
+    setActiveAgentSession(undefined);
+    setAgentOriginFolderId(undefined);
+  }
+
   async function handleSelectNote(noteId: string) {
     try {
       const note = await getNote(noteId);
@@ -1027,7 +1212,7 @@ export function App() {
 
   async function handleDeleteNote(noteId: string) {
     if (state.recordingStatus) {
-      setError("Stop the current recording before deleting a note.");
+      setError("Stop the current recording before deleting a meeting.");
       return;
     }
     try {
@@ -1289,8 +1474,10 @@ export function App() {
             setSettingsReturnView(activeView);
           }
           setActiveView(view);
+          setAgentOriginFolderId(undefined);
           if (view !== "agent") {
             setActiveAgentSession(undefined);
+            pendingSessionProjectRef.current = null;
           }
           if (view === "folders") {
             setFolderReturnTarget(undefined);
@@ -1311,10 +1498,13 @@ export function App() {
           void handleRemoveNoteFromFolder(noteId, folderId)
         }
         onNewAgentSession={() => {
+          pendingSessionProjectRef.current = null;
+          setAgentOriginFolderId(undefined);
           setActiveAgentSession(undefined);
           setActiveView("agent");
         }}
         onSelectAgentSession={(session) => {
+          setAgentOriginFolderId(undefined);
           setActiveAgentSession(session);
           setActiveView("agent");
         }}
@@ -1403,9 +1593,64 @@ export function App() {
                 }}
               />
             ) : activeView === "agent" ? (
+              // The origin crumbs render inside the workspace's own sticky
+              // session bar, so they persist while the chat scrolls beneath.
               <AgentWorkspace
                 initialSession={activeAgentSession}
                 pendingReply={pendingAgentReply}
+                origin={
+                  agentOriginFolder
+                    ? {
+                        backLabel: `Back to ${agentOriginFolder.name}`,
+                        onBack: handleReturnToAgentOriginFolder,
+                        crumbs: [
+                          {
+                            label: "Projects",
+                            onClick: () => {
+                              setActiveView("folders");
+                              dispatch({
+                                type: "folderSelected",
+                                folderId: undefined,
+                              });
+                              setActiveAgentSession(undefined);
+                              setAgentOriginFolderId(undefined);
+                            },
+                          },
+                          {
+                            label: agentOriginFolder.name,
+                            onClick: handleReturnToAgentOriginFolder,
+                          },
+                        ],
+                      }
+                    : {
+                        backLabel: "Back to agents",
+                        onBack: handleReturnToAgentsList,
+                        crumbs: [
+                          {
+                            label: "Agents",
+                            onClick: handleReturnToAgentsList,
+                          },
+                        ],
+                      }
+                }
+              />
+            ) : activeView === "agent-sessions" ? (
+              <AgentSessionsList
+                sessions={agentSessions}
+                folders={state.folders}
+                sessionFolderIds={sessionFolders}
+                onSelectSession={(session) => {
+                  setAgentOriginFolderId(undefined);
+                  setActiveAgentSession(session);
+                  setActiveView("agent");
+                }}
+                onNewSession={handleNewAgentSession}
+                onOpenMoveDialog={(sessionId) =>
+                  setMoveDialogSessionId(sessionId)
+                }
+                onRemoveFromProject={(sessionId, folderId) =>
+                  void handleRemoveSessionFromFolder(sessionId, folderId)
+                }
               />
             ) : activeView === "notes" || activeView === "all-notes" ? (
               <NotesList
@@ -1422,6 +1667,8 @@ export function App() {
               <FoldersWorkspace
                 folders={state.folders}
                 notes={state.notes}
+                sessions={agentSessions}
+                sessionFolderIds={sessionFolders}
                 selectedFolderId={state.selectedFolderId}
                 folderBackTarget={
                   folderReturnTarget
@@ -1459,6 +1706,27 @@ export function App() {
                 }
                 onOpenMoveDialog={(noteId) => setMoveDialogNoteId(noteId)}
                 onDeleteNote={(noteId) => void handleDeleteNote(noteId)}
+                onCreateSession={(folderId) =>
+                  handleNewAgentSessionInProject(folderId)
+                }
+                onSelectSession={(session) => {
+                  // Remember the project so the agent view can breadcrumb
+                  // back to it.
+                  setAgentOriginFolderId(state.selectedFolderId);
+                  setActiveAgentSession(session);
+                  setActiveView("agent");
+                }}
+                onAssignSessionToFolder={(sessionId, folderId) =>
+                  handleSetSessionFolder(sessionId, folderId, {
+                    rethrow: true,
+                  })
+                }
+                onRemoveSessionFromFolder={(sessionId, folderId) =>
+                  void handleRemoveSessionFromFolder(sessionId, folderId)
+                }
+                onOpenSessionMoveDialog={(sessionId) =>
+                  setMoveDialogSessionId(sessionId)
+                }
               />
             ) : selectedNote ? (
               <div className="note-shell">
@@ -1485,25 +1753,25 @@ export function App() {
                           setOriginFolderId(undefined);
                         },
                       },
-                      { label: selectedNote.title.trim() || "New note" },
+                      { label: selectedNote.title.trim() || "New meeting" },
                     ]}
                   />
                 ) : originAllNotes ? (
                   <BreadcrumbBar
-                    backLabel="Back to Notes"
+                    backLabel="Back to meetings"
                     onBack={() => {
                       setActiveView("all-notes");
                       setOriginAllNotes(false);
                     }}
                     items={[
                       {
-                        label: "Notes",
+                        label: "Meetings",
                         onClick: () => {
                           setActiveView("all-notes");
                           setOriginAllNotes(false);
                         },
                       },
-                      { label: selectedNote.title.trim() || "New note" },
+                      { label: selectedNote.title.trim() || "New meeting" },
                     ]}
                   />
                 ) : null}
@@ -1576,7 +1844,7 @@ export function App() {
                     dispatch({ type: "folderSelected", folderId });
                     setFolderReturnTarget({
                       noteId: selectedNote.id,
-                      label: selectedNote.title.trim() || "New note",
+                      label: selectedNote.title.trim() || "New meeting",
                     });
                     setOriginFolderId(undefined);
                   }}
@@ -1607,6 +1875,22 @@ export function App() {
         folders={state.folders}
         onSetFolder={(noteId, folderId) =>
           handleSetNoteFolder(noteId, folderId)
+        }
+      />
+      <MoveSessionToProjectDialog
+        open={moveDialogSessionId !== null}
+        onClose={() => setMoveDialogSessionId(null)}
+        session={
+          moveDialogSessionId
+            ? (agentSessions.find((s) => s.id === moveDialogSessionId) ?? null)
+            : null
+        }
+        currentFolderIds={
+          moveDialogSessionId ? (sessionFolders[moveDialogSessionId] ?? []) : []
+        }
+        folders={state.folders}
+        onSetFolder={(sessionId, folderId) =>
+          handleSetSessionFolder(sessionId, folderId)
         }
       />
       <UpdateDialog
@@ -2068,13 +2352,6 @@ function withFakeRecovery(payload: BootstrapResponse): {
     },
     fakeNote,
   };
-}
-
-function messageFromError(err: unknown) {
-  if (err && typeof err === "object" && "message" in err) {
-    return String((err as { message: unknown }).message);
-  }
-  return String(err);
 }
 
 function isAppErrorCode(err: unknown, code: string) {

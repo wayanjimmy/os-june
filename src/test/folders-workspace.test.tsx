@@ -50,22 +50,29 @@ function baseProps() {
   return {
     folders,
     notes,
+    sessions: [],
+    sessionFolderIds: {},
     selectedFolderId: undefined as string | undefined,
     onSelectFolder: vi.fn(),
     onCreateFolder: vi.fn(),
     onRenameFolder: vi.fn(),
     onDeleteFolder: vi.fn(),
     onCreateNote: vi.fn(),
+    onCreateSession: vi.fn(),
     onSelectNote: vi.fn(),
     onAssignNoteToFolder: vi.fn(async () => undefined),
     onRemoveNoteFromFolder: vi.fn(),
     onOpenMoveDialog: vi.fn(),
     onDeleteNote: vi.fn(),
+    onSelectSession: vi.fn(),
+    onAssignSessionToFolder: vi.fn(async () => undefined),
+    onRemoveSessionFromFolder: vi.fn(),
+    onOpenSessionMoveDialog: vi.fn(),
   };
 }
 
 describe("Sidebar primary navigation", () => {
-  it("shows Notes instead of Folders in primary navigation", async () => {
+  it("shows Notes and Projects in primary navigation", async () => {
     const user = userEvent.setup();
     const onChangeView = vi.fn();
     render(
@@ -83,8 +90,13 @@ describe("Sidebar primary navigation", () => {
     );
 
     expect(screen.queryByRole("button", { name: /Folders/ })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Notes" }));
+    await user.click(screen.getByRole("button", { name: "Meetings" }));
     expect(onChangeView).toHaveBeenCalledWith("notes");
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    expect(onChangeView).toHaveBeenCalledWith("folders");
+    // Hover-revealed view-all next to the Agent section title.
+    await user.click(screen.getByRole("button", { name: "View all" }));
+    expect(onChangeView).toHaveBeenCalledWith("agent-sessions");
   });
 
   it("renders settings as a sidebar footer action", async () => {
@@ -189,14 +201,15 @@ describe("Sidebar primary navigation", () => {
 });
 
 describe("FoldersWorkspace — list view", () => {
-  it("renders folder cards with descriptions or note counts and no All notes", () => {
+  it("renders folder cards without a virtual all-notes folder", () => {
     render(<FoldersWorkspace {...baseProps()} />);
 
     expect(
-      screen.getByRole("heading", { name: "Folders" }),
+      screen.getByRole("heading", { name: "Projects" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("All notes")).toBeNull();
-    expect(screen.getByRole("button", { name: /Notes/ })).toBeInTheDocument();
+    // No virtual "Notes" card — the side nav already lists all notes.
+    expect(screen.queryByRole("button", { name: /^Notes/ })).toBeNull();
     expect(screen.queryByText("Roadmap")).toBeNull();
     expect(screen.getByText("Ideas")).toBeInTheDocument();
     expect(screen.getByText("Work")).toBeInTheDocument();
@@ -208,21 +221,8 @@ describe("FoldersWorkspace — list view", () => {
     ).toBeInTheDocument();
     const ideasCard = screen.getByText("Ideas").closest("article");
     expect(
-      within(ideasCard as HTMLElement).getByText(/0 notes/),
+      within(ideasCard as HTMLElement).getByText(/0 meetings/),
     ).toBeInTheDocument();
-  });
-
-  it("opens the notes folder before showing saved notes", async () => {
-    const user = userEvent.setup();
-    const props = baseProps();
-    render(<FoldersWorkspace {...props} />);
-
-    await user.click(screen.getByRole("button", { name: /Notes/ }));
-
-    expect(screen.getByRole("heading", { name: "Notes" })).toBeInTheDocument();
-    expect(screen.getByText("Roadmap")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Roadmap/ }));
-    expect(props.onSelectNote).toHaveBeenCalledWith("note-1");
   });
 
   it("opens the create dialog and submits name + description", async () => {
@@ -230,14 +230,14 @@ describe("FoldersWorkspace — list view", () => {
     const props = baseProps();
     render(<FoldersWorkspace {...props} />);
 
-    await user.click(screen.getByRole("button", { name: /New folder/ }));
+    await user.click(screen.getByRole("button", { name: /New project/ }));
     expect(
-      screen.getByRole("dialog", { name: /Create folder/ }),
+      screen.getByRole("dialog", { name: /Create project/ }),
     ).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Name"), "Personal");
     await user.type(screen.getByLabelText("Description"), "Side projects");
-    await user.click(screen.getByRole("button", { name: /Create folder/ }));
+    await user.click(screen.getByRole("button", { name: /Create project/ }));
 
     expect(props.onCreateFolder).toHaveBeenCalledWith(
       "Personal",
@@ -318,7 +318,7 @@ describe("FoldersWorkspace — list view", () => {
 
     await user.click(screen.getByRole("button", { name: /Actions for Ideas/ }));
     await user.click(screen.getByRole("menuitem", { name: "Delete" }));
-    await user.click(screen.getByRole("button", { name: "Delete folder" }));
+    await user.click(screen.getByRole("button", { name: "Delete project" }));
 
     expect(
       screen.getByRole("dialog", { name: /Delete "Ideas"/ }),
@@ -343,7 +343,7 @@ describe("FoldersWorkspace — list view", () => {
 
     await user.click(screen.getByRole("button", { name: /Actions for Ideas/ }));
     await user.click(screen.getByRole("menuitem", { name: "Delete" }));
-    await user.click(screen.getByRole("button", { name: "Delete folder" }));
+    await user.click(screen.getByRole("button", { name: "Delete project" }));
 
     expect(
       screen.getByRole("dialog", { name: /Delete "Ideas"/ }),
@@ -357,7 +357,7 @@ describe("FoldersWorkspace — detail view", () => {
 
     // Folder name shows as the editable title.
     expect(
-      screen.getByRole("button", { name: /Rename folder/ }),
+      screen.getByRole("button", { name: /Rename project/ }),
     ).toHaveTextContent("Work");
     expect(screen.getByText("Client projects in flight")).toBeInTheDocument();
     expect(screen.getByText("Roadmap")).toBeInTheDocument();
@@ -367,7 +367,7 @@ describe("FoldersWorkspace — detail view", () => {
     const user = userEvent.setup();
     render(<FoldersWorkspace {...baseProps()} selectedFolderId="folder-1" />);
 
-    await user.click(screen.getByRole("button", { name: /Rename folder/ }));
+    await user.click(screen.getByRole("button", { name: /Rename project/ }));
     // The serif title is replaced by an input that auto-selects its value.
     expect(document.activeElement).toBeInstanceOf(HTMLInputElement);
     expect((document.activeElement as HTMLInputElement).value).toBe("Ideas");
@@ -378,7 +378,7 @@ describe("FoldersWorkspace — detail view", () => {
     const props = baseProps();
     render(<FoldersWorkspace {...props} selectedFolderId="folder-1" />);
 
-    await user.click(screen.getByRole("button", { name: /back to folders/i }));
+    await user.click(screen.getByRole("button", { name: /back to projects/i }));
     expect(props.onSelectFolder).toHaveBeenCalledWith(undefined);
   });
 
@@ -405,8 +405,22 @@ describe("FoldersWorkspace — detail view", () => {
 
     // The empty surface is visual-only — no helper text — just the
     // primary action and "Add existing note" when other notes exist.
-    await user.click(screen.getByRole("button", { name: /^New note$/ }));
+    await user.click(screen.getByRole("button", { name: /^New meeting$/ }));
     expect(props.onCreateNote).toHaveBeenCalledWith("folder-1");
+  });
+
+  it("starts a project session from the header add menu", async () => {
+    const user = userEvent.setup();
+    const props = baseProps();
+    render(<FoldersWorkspace {...props} selectedFolderId="folder-2" />);
+
+    await user.click(screen.getByRole("button", { name: "Add to project" }));
+    await user.click(screen.getByRole("menuitem", { name: "New session" }));
+    expect(props.onCreateSession).toHaveBeenCalledWith("folder-2");
+
+    await user.click(screen.getByRole("button", { name: "Add to project" }));
+    await user.click(screen.getByRole("menuitem", { name: "New meeting" }));
+    expect(props.onCreateNote).toHaveBeenCalledWith("folder-2");
   });
 
   it("removes a note from the folder via its row overflow menu", async () => {
@@ -418,7 +432,7 @@ describe("FoldersWorkspace — detail view", () => {
       screen.getByRole("button", { name: /Actions for Roadmap/ }),
     );
     await user.click(
-      screen.getByRole("menuitem", { name: /Remove from folder/ }),
+      screen.getByRole("menuitem", { name: /Remove from project/ }),
     );
     expect(props.onRemoveNoteFromFolder).toHaveBeenCalledWith(
       "note-1",

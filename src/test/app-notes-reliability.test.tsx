@@ -72,6 +72,9 @@ vi.mock("../lib/tauri", () => ({
   deleteFolder: mocks.deleteFolder,
   renameFolder: mocks.renameFolder,
   assignNoteToFolder: mocks.assignNoteToFolder,
+  listSessionFolders: vi.fn(async () => []),
+  assignSessionToFolder: vi.fn(async () => undefined),
+  removeSessionFromFolder: vi.fn(async () => undefined),
   removeNoteFromFolder: mocks.removeNoteFromFolder,
   listNotes: mocks.listNotes,
   getNote: mocks.getNote,
@@ -228,7 +231,7 @@ describe("notes recording reliability", () => {
 
     // Browse to another note while the recording keeps running on note-1.
     await userEvent.click(
-      screen.getByRole("button", { name: "Notes", current: "page" }),
+      screen.getByRole("button", { name: "Meetings", current: "page" }),
     );
     await userEvent.click(
       screen.getByRole("button", { name: /Second note Preview/ }),

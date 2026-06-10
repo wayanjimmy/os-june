@@ -71,6 +71,9 @@ vi.mock("../lib/tauri", () => ({
   deleteFolder: mocks.deleteFolder,
   renameFolder: mocks.renameFolder,
   assignNoteToFolder: mocks.assignNoteToFolder,
+  listSessionFolders: vi.fn(async () => []),
+  assignSessionToFolder: vi.fn(async () => undefined),
+  removeSessionFromFolder: vi.fn(async () => undefined),
   removeNoteFromFolder: mocks.removeNoteFromFolder,
   listNotes: mocks.listNotes,
   getNote: mocks.getNote,
@@ -217,7 +220,7 @@ describe("meeting start transcription event", () => {
     });
 
     await waitFor(() => expect(mocks.startRecording).toHaveBeenCalledOnce());
-    expect(screen.getByLabelText("Note title")).toHaveValue("First note");
+    expect(screen.getByLabelText("Meeting title")).toHaveValue("First note");
 
     await act(async () => {
       await mocks.listeners.get("meeting-hud-action")?.({
@@ -226,7 +229,7 @@ describe("meeting start transcription event", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByLabelText("Note title")).toHaveValue("First note"),
+      expect(screen.getByLabelText("Meeting title")).toHaveValue("First note"),
     );
   });
 
