@@ -67,6 +67,20 @@ fn manual_notes_for_generation_uses_new_tail_after_manual_preface() {
     );
 }
 
+#[test]
+fn manual_notes_for_generation_uses_preface_when_generated_note_was_appended_below_it() {
+    let note = note(|note| {
+        note.generated_content = Some("Generated note body".to_string());
+        note.edited_content =
+            Some("Manual notes from recording\n\nGenerated note body".to_string());
+    });
+
+    assert_eq!(
+        manual_notes_for_generation(&note).as_deref(),
+        Some("Manual notes from recording")
+    );
+}
+
 #[tokio::test]
 async fn generation_rejects_empty_transcript() {
     let err = os_scribe_lib::scribe_api::generate_note_from_transcript(

@@ -236,11 +236,14 @@ pub fn manual_notes_for_generation(note: &NoteDto) -> Option<String> {
         };
     }
     edited.find(generated).and_then(|index| {
-        let rest = edited[index + generated.len()..].trim();
-        if rest.is_empty() {
-            None
+        let before = edited[..index].trim();
+        let after = edited[index + generated.len()..].trim();
+        if !after.is_empty() {
+            Some(after.to_string())
+        } else if !before.is_empty() {
+            Some(before.to_string())
         } else {
-            Some(rest.to_string())
+            None
         }
     })
 }
