@@ -91,6 +91,43 @@ describe("meeting detection HUD", () => {
     vi.useRealTimers();
   });
 
+  it("dismisses the prompt and stays quiet until the meeting clears", async () => {
+    vi.useFakeTimers();
+    await loadHud();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+
+    document.querySelector<HTMLButtonElement>("#hud-meeting-dismiss")?.click();
+    await Promise.resolve();
+
+    expect(hudElement().dataset.state).toBe("exiting");
+    await vi.advanceTimersByTimeAsync(220);
+    expect(mocks.hide).toHaveBeenCalledOnce();
+
+    // Detection heartbeats keep arriving while the same meeting is live; the
+    // dismissed prompt must not come back for any of them.
+    mocks.show.mockClear();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+    expect(mocks.show).not.toHaveBeenCalled();
+
+    // The next meeting prompts again.
+    await emit("meeting-detection-event", { type: "meeting_cleared" });
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+    expect(hudElement().dataset.state).toBe("meeting");
+    expect(mocks.show).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a dismiss click outside the meeting prompt state", async () => {
+    await loadHud();
+    hudElement().dataset.state = "listening";
+    mocks.hide.mockClear();
+
+    document.querySelector<HTMLButtonElement>("#hud-meeting-dismiss")?.click();
+    await Promise.resolve();
+
+    expect(hudElement().dataset.state).toBe("listening");
+    expect(mocks.hide).not.toHaveBeenCalled();
+  });
+
   it("clears the prompt when microphone usage stops", async () => {
     await loadHud();
     await emit("meeting-detection-event", { type: "meeting_detected" });
@@ -318,6 +355,7 @@ function hudMarkup() {
       <span id="hud-agent-label" class="hud-agent-label" aria-hidden="true"></span>
       <span id="hud-meeting-label" class="hud-meeting-label">Meeting detected</span>
       <button id="hud-meeting-start" class="hud-meeting-start" type="button">Start transcription</button>
+      <button id="hud-meeting-dismiss" class="hud-meeting-dismiss" type="button" aria-label="Dismiss meeting prompt"></button>
       <button id="hud-stop" class="hud-stop" type="button" aria-label="Stop dictation">
         <span class="hud-stop-glyph" aria-hidden="true"></span>
       </button>

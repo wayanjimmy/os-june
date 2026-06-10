@@ -40,6 +40,9 @@ const agentLabel = document.querySelector<HTMLElement>("#hud-agent-label");
 const stopButton = document.querySelector<HTMLButtonElement>("#hud-stop");
 const meetingStartButton =
   document.querySelector<HTMLButtonElement>("#hud-meeting-start");
+const meetingDismissButton = document.querySelector<HTMLButtonElement>(
+  "#hud-meeting-dismiss",
+);
 const statusText = document.querySelector<HTMLElement>("#hud-status");
 
 let hideTimer: number | undefined;
@@ -607,6 +610,19 @@ meetingStartButton?.addEventListener("click", async (event) => {
   void hideHud().finally(() => {
     meetingStartButton.disabled = false;
   });
+});
+
+meetingDismissButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (hud?.dataset.state !== "meeting") return;
+
+  // Same semantics as letting the prompt time out: stay quiet for the rest
+  // of this meeting (detection heartbeats keep arriving while the call is
+  // live) and prompt again once it clears.
+  meetingPromptSuppressed = true;
+  clearMeetingPromptTimer();
+  void hideHud();
 });
 
 void listen("dictation-event", async (event) => {
