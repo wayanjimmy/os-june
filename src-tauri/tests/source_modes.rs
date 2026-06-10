@@ -157,3 +157,130 @@ async fn upserts_source_turn_transcripts_for_retry() {
     assert_eq!(transcripts[0].text, "Recovered transcript");
     assert_eq!(transcripts[0].status, "succeeded");
 }
+
+#[tokio::test]
+async fn note_source_transcripts_are_ordered_by_session_then_turn() {
+    let repos = test_repositories().await;
+    let note = repos.create_note(None).await.expect("note should exist");
+
+    repos
+        .create_recording_session(
+            &note.id,
+            "session-1",
+            RecordingSourceMode::MicrophonePlusSystem,
+            "/tmp/session-1-mic.partial.wav",
+            "/tmp/session-1-mic.wav",
+            None,
+        )
+        .await
+        .expect("first session should be created");
+    repos
+        .create_recording_session(
+            &note.id,
+            "session-2",
+            RecordingSourceMode::MicrophonePlusSystem,
+            "/tmp/session-2-mic.partial.wav",
+            "/tmp/session-2-mic.wav",
+            None,
+        )
+        .await
+        .expect("second session should be created");
+    sqlx::query("UPDATE recording_sessions SET started_at = ? WHERE id = ?")
+        .bind("2026-05-20T10:00:00.000Z")
+        .bind("session-1")
+        .execute(&repos.pool)
+        .await
+        .expect("first session timestamp");
+    sqlx::query("UPDATE recording_sessions SET started_at = ? WHERE id = ?")
+        .bind("2026-05-20T10:05:00.000Z")
+        .bind("session-2")
+        .execute(&repos.pool)
+        .await
+        .expect("second session timestamp");
+
+    let first_artifact = repos
+        .create_pending_source_artifact(
+            &note.id,
+            "session-1",
+            "microphone",
+            "/tmp/session-1-mic.partial.wav",
+            "/tmp/session-1-mic.wav",
+        )
+        .await
+        .expect("first artifact should be created");
+    let second_artifact = repos
+        .create_pending_source_artifact(
+            &note.id,
+            "session-2",
+            "microphone",
+            "/tmp/session-2-mic.partial.wav",
+            "/tmp/session-2-mic.wav",
+        )
+        .await
+        .expect("second artifact should be created");
+
+    repos
+        .upsert_successful_source_turn_transcript(
+            &note.id,
+            "session-1",
+            &first_artifact.id,
+            RecordingSourceMode::MicrophonePlusSystem,
+            "microphone",
+            "First recording, first turn",
+            Some("en".to_string()),
+            "test",
+            0,
+            1_000,
+            0,
+        )
+        .await
+        .expect("first turn should be stored");
+    repos
+        .upsert_successful_source_turn_transcript(
+            &note.id,
+            "session-1",
+            &first_artifact.id,
+            RecordingSourceMode::MicrophonePlusSystem,
+            "microphone",
+            "First recording, second turn",
+            Some("en".to_string()),
+            "test",
+            2_000,
+            3_000,
+            1,
+        )
+        .await
+        .expect("second turn should be stored");
+    repos
+        .upsert_successful_source_turn_transcript(
+            &note.id,
+            "session-2",
+            &second_artifact.id,
+            RecordingSourceMode::MicrophonePlusSystem,
+            "microphone",
+            "Second recording, first turn",
+            Some("en".to_string()),
+            "test",
+            0,
+            1_000,
+            0,
+        )
+        .await
+        .expect("third turn should be stored");
+
+    let note = repos.get_note(&note.id).await.expect("note should load");
+    let texts = note
+        .source_transcripts
+        .iter()
+        .map(|transcript| transcript.text.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        texts,
+        vec![
+            "First recording, first turn",
+            "First recording, second turn",
+            "Second recording, first turn",
+        ]
+    );
+}

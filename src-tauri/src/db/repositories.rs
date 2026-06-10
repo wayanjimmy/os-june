@@ -1604,12 +1604,18 @@ impl Repositories {
 
     async fn source_transcripts(&self, note_id: &str) -> Result<Vec<TranscriptDto>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, text, source_mode, source, start_ms, end_ms, turn_index, language, status, last_error
-             FROM transcripts
-             WHERE note_id = ?
-               AND recording_session_id IS NOT NULL
-               AND turn_index IS NOT NULL
-             ORDER BY COALESCE(turn_index, 999999), COALESCE(start_ms, 999999999), created_at ASC",
+            "SELECT t.id, t.text, t.source_mode, t.source, t.start_ms, t.end_ms, t.turn_index, t.language, t.status, t.last_error
+             FROM transcripts t
+             LEFT JOIN recording_sessions rs ON rs.id = t.recording_session_id
+             WHERE t.note_id = ?
+               AND t.recording_session_id IS NOT NULL
+               AND t.turn_index IS NOT NULL
+             ORDER BY COALESCE(rs.started_at, t.created_at) ASC,
+                      COALESCE(rs.rowid, 9223372036854775807) ASC,
+                      COALESCE(t.turn_index, 999999),
+                      COALESCE(t.start_ms, 999999999),
+                      t.created_at ASC,
+                      t.rowid ASC",
         )
         .bind(note_id)
         .fetch_all(&self.pool)
