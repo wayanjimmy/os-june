@@ -3053,7 +3053,15 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
 
 function isReplaceableAgentSessionTitle(title: unknown) {
   const normalized = safeText(title).trim().toLowerCase();
-  return !normalized || normalized === "untitled session";
+  return (
+    !normalized ||
+    normalized === "untitled session" ||
+    normalized.endsWith("...") ||
+    normalized.length > 52 ||
+    /^(?:i\s|i'm\s|i want|i need|please\s|can you\s|could you\s|would you\s|help me\s|who are you|what can you|what are you|what do you|summarize\s|set up\s|test$)/.test(
+      normalized,
+    )
+  );
 }
 
 function PanelTabs({

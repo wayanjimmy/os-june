@@ -294,6 +294,33 @@ describe("AgentWorkspace", () => {
     expect(screen.queryByText("Newer session")).toBeNull();
   });
 
+  it("renames prompt-like existing session titles after messages load", async () => {
+    const rawTitle = "I want you to keep this running inside my CLI";
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-raw",
+        title: rawTitle,
+        preview: rawTitle,
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "message-1",
+        role: "user",
+        content: rawTitle,
+        timestamp: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.suggestAgentSessionTitle.mockResolvedValue({
+      title: "CLI Run Tracking",
+    });
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("CLI Run Tracking")).toBeInTheDocument();
+  });
+
   it("forgets the persisted session when it is deleted", async () => {
     render(<AgentWorkspace />);
 
