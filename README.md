@@ -16,7 +16,7 @@ Together these bind the running image to a public commit: you can confirm the at
 
 Every deployment also serves its own walkthrough of this chain at [`/verify`](https://scribe-api.opensoftware.co/verify) — served from inside the TEE, it reports the exact commit and image the running server was built from, with step-by-step instructions for checking each link.
 
-Audio still leaves the TEE when forwarded to OpenAI or Venice for transcription, under those providers' own privacy policies. This chain verifies the **code** running in the confidential VM, not what upstream providers do with audio. End-to-end private STT is a separate workstream.
+By default, audio leaves the TEE only to Venice private models (zero data retention, no training). If you select an anonymized model not run by Venice, audio is forwarded to that provider with identifying metadata stripped, under that provider's own privacy policy. This chain verifies the **code** running in the confidential VM, not what upstream providers do with audio. End-to-end private STT is a separate workstream.
 
 ## Development
 
