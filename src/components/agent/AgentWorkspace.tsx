@@ -788,7 +788,9 @@ export function AgentWorkspace({
   // it routes through this ref to always run the latest render's recovery
   // closure (see recoverFromGatewayClose).
   const gatewayCloseHandlerRef = useRef((_fullMode: boolean) => {});
-  const gatewayRecoveringRef = useRef(false);
+  // Per-mode: both gateways can drop together (network reconnect), and one
+  // mode's in-flight recovery must not swallow the other's only onClose.
+  const gatewayRecoveringRef = useRef<Set<boolean>>(new Set());
   // One live gateway subscription per Hermes session. A follow-up send while
   // the previous turn is still streaming must replace the old handler, not
   // stack a second one — otherwise every event lands twice in liveEvents.
@@ -2025,14 +2027,14 @@ export function AgentWorkspace({
   // their true state from persisted messages. Only the dropped mode's
   // gateway is rebuilt — sessions of that mode are the ones it served.
   async function recoverFromGatewayClose(fullMode: boolean) {
-    if (gatewayRecoveringRef.current) return;
+    if (gatewayRecoveringRef.current.has(fullMode)) return;
     const activeSessionIds = new Set(
       [...workingSessionIdsRef.current, ...waitingSessionIdsRef.current].filter(
         (sessionId) => sessionUnrestricted(sessionId) === fullMode,
       ),
     );
     if (!activeSessionIds.size) return;
-    gatewayRecoveringRef.current = true;
+    gatewayRecoveringRef.current.add(fullMode);
     try {
       const gateway = await ensureHermesGateway(fullMode);
       await Promise.all(
@@ -2057,7 +2059,7 @@ export function AgentWorkspace({
     } catch {
       // Reconnect failed — fall back to the persisted-message poll.
     } finally {
-      gatewayRecoveringRef.current = false;
+      gatewayRecoveringRef.current.delete(fullMode);
     }
     for (const sessionId of activeSessionIds) {
       void refreshHermesSession(sessionId);
@@ -2105,8 +2107,9 @@ export function AgentWorkspace({
     );
     let rows: Array<{ id?: string; session_key?: string; status?: string }> =
       [];
-    try {
-      for (const mode of modes) {
+    const reachableModes = new Set<boolean>();
+    for (const mode of modes) {
+      try {
         const gateway = await ensureHermesGateway(mode);
         const response = await gateway.request<{
           sessions?: Array<{
@@ -2118,11 +2121,13 @@ export function AgentWorkspace({
         rows = rows.concat(
           Array.isArray(response?.sessions) ? response.sessions : [],
         );
+        reachableModes.add(mode);
+      } catch {
+        // Can't reach this runtime — keep ITS sessions' current state rather
+        // than guess, while the reachable mode still reconciles below.
       }
-    } catch {
-      // Can't reach a runtime — keep the current state rather than guess.
-      return;
     }
+    if (reachableModes.size === 0) return;
     const live = new Set<string>();
     for (const row of rows) {
       // "idle" means the runtime session exists but isn't processing a turn.
@@ -2131,6 +2136,9 @@ export function AgentWorkspace({
       if (row.id) live.add(String(row.id));
     }
     for (const sessionId of working) {
+      // Sessions of an unreachable mode were not in any answer we got;
+      // counting them as misses would mark live work dead.
+      if (!reachableModes.has(sessionUnrestricted(sessionId))) continue;
       const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
       if (
         live.has(sessionId) ||
