@@ -1404,6 +1404,14 @@ button.agent-safety-badge:hover {
   margin: 0;
 }
 
+/* Spinner + label sit flush without this — the glyph needs a gap from the
+ * "Working out…" text and a shared baseline. */
+.agent-approval-explanation-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 /* Buttons come from the .btn system (secondary fills, ghost deny) — this
  * block only lays them out and adds the deny accent. */
 .agent-approval-actions {
