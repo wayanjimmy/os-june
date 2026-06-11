@@ -657,6 +657,10 @@ export function AgentWorkspace({
   const [hermesSessionItems, setHermesSessionItems] = useState<
     HermesSessionInfo[]
   >(() => (initialSession ? [initialSession] : []));
+  // False until the first listHermesSessions fetch lands. Until then the
+  // items above only hold the mount seed (the clicked session, or nothing),
+  // and broadcasting that would wipe the sidebar's already-loaded list.
+  const [hermesSessionsHydrated, setHermesSessionsHydrated] = useState(false);
   // Mounting without an explicit target restores the last open conversation,
   // so app restarts and dev reloads land the user back in the session they
   // were working in instead of bouncing them to the newest one.
@@ -1053,6 +1057,7 @@ export function AgentWorkspace({
     setHermesSessionsLoading(true);
     try {
       const sessions = applySessionTitleOverrides(await listHermesSessions());
+      setHermesSessionsHydrated(true);
       const pendingMessages = pendingHermesMessagesRef.current;
       const selectedSessionId = selectedHermesSessionIdRef.current;
       const workingSessions = workingSessionIdsRef.current;
@@ -1199,6 +1204,11 @@ export function AgentWorkspace({
   }, [pendingReply]);
 
   useEffect(() => {
+    // The sidebar and App replace their session lists wholesale with this
+    // payload, so an unhydrated broadcast (mount seed only) would collapse
+    // the list they already fetched themselves and flicker it back once the
+    // real fetch lands.
+    if (!hermesSessionsHydrated) return;
     dispatchAgentSessionsChanged({
       sessions: hermesSessionItems,
       selectedSessionId: selectedHermesSessionId,
@@ -1206,6 +1216,7 @@ export function AgentWorkspace({
       waitingSessionIds: Array.from(waitingSessionIds),
     });
   }, [
+    hermesSessionsHydrated,
     hermesSessionItems,
     selectedHermesSessionId,
     waitingSessionIds,

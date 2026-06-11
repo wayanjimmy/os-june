@@ -1508,6 +1508,57 @@ describe("AgentWorkspace", () => {
     );
   });
 
+  it("holds session broadcasts until the first fetch lands", async () => {
+    const sessionDetails: AgentSessionsChangedDetail[] = [];
+    const onSessionsChanged = (event: Event) =>
+      sessionDetails.push(
+        (event as CustomEvent<AgentSessionsChangedDetail>).detail,
+      );
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, onSessionsChanged);
+
+    // First click after app launch: the workspace mounts seeded with only the
+    // clicked session while listHermesSessions is still in flight. The sidebar
+    // replaces its list wholesale with each broadcast, so a pre-fetch
+    // broadcast would collapse it to one row and flicker it back.
+    let resolveSessions: (sessions: (typeof existingSession)[]) => void = () =>
+      undefined;
+    mocks.listHermesSessions.mockImplementation(
+      () =>
+        new Promise<(typeof existingSession)[]>((resolve) => {
+          resolveSessions = resolve;
+        }),
+    );
+    const clickedSession = {
+      id: "session-2",
+      title: "Clicked session",
+      preview: "Clicked preview",
+      last_active: "2026-06-05T12:00:00Z",
+    };
+
+    try {
+      render(<AgentWorkspace initialSession={clickedSession} />);
+
+      await waitFor(() => expect(mocks.listHermesSessions).toHaveBeenCalled());
+      expect(sessionDetails).toEqual([]);
+
+      await act(async () => {
+        resolveSessions([clickedSession, existingSession]);
+      });
+
+      await waitFor(() => expect(sessionDetails.length).toBeGreaterThan(0));
+      expect(sessionDetails[0].sessions.map((session) => session.id)).toEqual([
+        "session-2",
+        "session-1",
+      ]);
+      expect(sessionDetails[0].selectedSessionId).toBe("session-2");
+    } finally {
+      window.removeEventListener(
+        AGENT_SESSIONS_CHANGED_EVENT,
+        onSessionsChanged,
+      );
+    }
+  });
+
   it("scrubs working state when deleting the selected session from the session bar", async () => {
     const user = userEvent.setup();
     const sessionDetails: AgentSessionsChangedDetail[] = [];
