@@ -63,6 +63,10 @@ const mocks = vi.hoisted(() => ({
   listHermesSessions: vi.fn(),
   gatewayRequest: vi.fn(),
   gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
+  gatewayInstances: [] as Array<{
+    connect: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
+  }>,
   eventHandlers: new Map<
     string,
     (event: { payload?: { paths?: string[] } }) => void
@@ -127,6 +131,11 @@ vi.mock("../lib/hermes-gateway", async (importOriginal) => ({
   // Real HermesGatewayError / isSessionBusyError — only the client is faked.
   ...(await importOriginal<typeof import("../lib/hermes-gateway")>()),
   HermesGatewayClient: class {
+    constructor() {
+      mocks.gatewayInstances.push(
+        this as unknown as (typeof mocks.gatewayInstances)[number],
+      );
+    }
     connect = vi.fn();
     close = vi.fn();
     onEvent = vi.fn((handler: (event: Record<string, unknown>) => void) => {
@@ -161,6 +170,7 @@ describe("AgentWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.gatewayEventHandlers.clear();
+    mocks.gatewayInstances.length = 0;
     window.sessionStorage.clear();
     window.localStorage.clear();
     mocks.listAgentTasks.mockResolvedValue({ items: [existingTask] });
@@ -192,10 +202,18 @@ describe("AgentWorkspace", () => {
       running: true,
       connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
     });
-    mocks.startHermesBridge.mockResolvedValue({
-      running: true,
-      connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
-    });
+    // Mirrors the backend: starting a mode yields a status that contains
+    // that mode's connection (alongside any other live mode).
+    mocks.startHermesBridge.mockImplementation(
+      async (_cwd?: string, fullMode?: boolean) => {
+        const connection = {
+          port: 61234,
+          wsUrl: "ws://127.0.0.1:61234",
+          fullMode: Boolean(fullMode),
+        };
+        return { running: true, connection, connections: [connection] };
+      },
+    );
     mocks.listHermesSessions.mockResolvedValue([existingSession]);
     mocks.listHermesSessionMessages.mockResolvedValue([]);
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({ roots: [] });
@@ -1928,8 +1946,8 @@ describe("AgentWorkspace", () => {
   });
 
   it("keeps the badge off a sandboxed session even while the runtime is unsandboxed", async () => {
-    // Another session's opt-in left the runtime in full mode; this session
-    // never opted in, and its sends re-apply the jail — no badge.
+    // Another session's opt-in has the unrestricted runtime up; this session
+    // never opted in, and its sends route to the sandboxed process — no badge.
     mocks.hermesBridgeStatus.mockResolvedValue({
       running: true,
       connection: {
@@ -1963,7 +1981,8 @@ describe("AgentWorkspace", () => {
     await user.type(screen.getByPlaceholderText("Send a message"), "hello");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    // The send restarts the runtime back into the jail before submitting.
+    // The send brings up the sandboxed process for this session — the
+    // unrestricted one (and its in-flight work) is left alone.
     await waitFor(() =>
       expect(mocks.startHermesBridge).toHaveBeenCalledWith(undefined, false),
     );
@@ -1997,6 +2016,70 @@ describe("AgentWorkspace", () => {
     await waitFor(() =>
       expect(mocks.startHermesBridge).toHaveBeenCalledWith(undefined, true),
     );
+  });
+
+  it("serves both modes concurrently — neither runtime is torn down", async () => {
+    const user = userEvent.setup();
+    // session-1 opted into Unrestricted; both runtime processes are up.
+    window.localStorage.setItem(
+      "june.agent.unrestrictedSessions",
+      JSON.stringify({ "session-1": true }),
+    );
+    const sandboxedConnection = {
+      port: 61234,
+      wsUrl: "ws://127.0.0.1:61234",
+      fullMode: false,
+    };
+    const unrestrictedConnection = {
+      port: 61235,
+      wsUrl: "ws://127.0.0.1:61235",
+      fullMode: true,
+    };
+    mocks.hermesBridgeStatus.mockResolvedValue({
+      running: true,
+      connection: sandboxedConnection,
+      connections: [sandboxedConnection, unrestrictedConnection],
+    });
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    // Follow-up to the unrestricted session rides its own gateway.
+    await user.type(screen.getByPlaceholderText("Send a message"), "continue");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith(
+        "prompt.submit",
+        expect.objectContaining({ text: "continue" }),
+      ),
+    );
+
+    // A fresh sandboxed session starts alongside it on the other gateway.
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_NEW_SESSION_EVENT, {
+          detail: { prompt: "new sandboxed work" },
+        }),
+      );
+    });
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith(
+        "prompt.submit",
+        expect.objectContaining({ text: "new sandboxed work" }),
+      ),
+    );
+
+    // Both processes were already up: no start call, one socket per mode,
+    // and crucially nothing closed the other mode's gateway mid-flight.
+    expect(mocks.startHermesBridge).not.toHaveBeenCalled();
+    const connectedUrls = mocks.gatewayInstances.flatMap((instance) =>
+      instance.connect.mock.calls.map((call) => call[0]),
+    );
+    expect(connectedUrls).toContain("ws://127.0.0.1:61235");
+    expect(connectedUrls).toContain("ws://127.0.0.1:61234");
+    for (const instance of mocks.gatewayInstances) {
+      expect(instance.close).not.toHaveBeenCalled();
+    }
   });
 
   it("explains a busy rejection and removes the ghost bubble", async () => {
