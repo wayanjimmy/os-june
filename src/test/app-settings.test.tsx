@@ -35,7 +35,7 @@ const mocks = vi.hoisted(() => ({
   createDictionaryEntry: vi.fn(),
   updateDictionaryEntry: vi.fn(),
   deleteDictionaryEntry: vi.fn(),
-  scribeVerifyUrl: vi.fn(),
+  scribeOpenVerifyPage: vi.fn(),
   listen: vi.fn(),
   eventHandler: undefined as ((event: { payload: string }) => void) | undefined,
 }));
@@ -69,7 +69,7 @@ vi.mock("../lib/tauri", () => ({
   createDictionaryEntry: mocks.createDictionaryEntry,
   updateDictionaryEntry: mocks.updateDictionaryEntry,
   deleteDictionaryEntry: mocks.deleteDictionaryEntry,
-  scribeVerifyUrl: mocks.scribeVerifyUrl,
+  scribeOpenVerifyPage: mocks.scribeOpenVerifyPage,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -132,9 +132,7 @@ describe("AppSettings", () => {
       language,
     }));
     mocks.listDictionaryEntries.mockResolvedValue([]);
-    mocks.scribeVerifyUrl.mockResolvedValue(
-      "https://scribe-api.example.test/verify",
-    );
+    mocks.scribeOpenVerifyPage.mockResolvedValue(undefined);
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
         transcriptionProvider: "venice",
@@ -1218,7 +1216,9 @@ describe("AppSettings", () => {
     expect(screen.getByText(APP_COMMIT_HASH)).toBeInTheDocument();
   });
 
-  it("links to the server attestation page from About", async () => {
+  it("opens the server attestation page from About through Rust", async () => {
+    // Not an anchor: the webview drops target="_blank" navigations, so the
+    // button must invoke the scribe_open_verify_page command instead.
     render(
       <AppSettings
         account={signedInAccount}
@@ -1234,12 +1234,10 @@ describe("AppSettings", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("tab", { name: "About" }));
-    const link = await screen.findByRole("link", { name: "Verify server" });
-    expect(link).toHaveAttribute(
-      "href",
-      "https://scribe-api.example.test/verify",
+    await user.click(
+      await screen.findByRole("button", { name: "Verify server" }),
     );
-    expect(link).toHaveAttribute("target", "_blank");
+    expect(mocks.scribeOpenVerifyPage).toHaveBeenCalledOnce();
   });
 
   it("shows agent workspace and memory files inside Agent settings", async () => {

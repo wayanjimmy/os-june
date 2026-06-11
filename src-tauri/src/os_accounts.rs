@@ -1122,7 +1122,7 @@ fn random_b64url(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(&buf)
 }
 
-fn open_in_browser(url: &str) -> Result<(), AppError> {
+pub(crate) fn open_in_browser(url: &str) -> Result<(), AppError> {
     let mut child = std::process::Command::new("open")
         .arg(url)
         .spawn()

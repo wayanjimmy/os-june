@@ -691,13 +691,17 @@ input:focus-visible,
   display: inline-flex;
 }
 
-a.agent-safety-badge {
+button.agent-safety-badge {
+  border: none;
+  /* font-family only: the font shorthand would out-specificity the base
+   * class's font-size and grow the badge text. */
+  font-family: inherit;
   text-decoration: none;
   cursor: pointer;
   transition: background-color var(--t-fast) var(--ease-out);
 }
 
-a.agent-safety-badge:hover {
+button.agent-safety-badge:hover {
   background: color-mix(in oklch, var(--brand) 24%, transparent);
 }
 
@@ -10481,6 +10485,18 @@ a.agent-safety-badge:hover {
 
 .onboarding-footnote a {
   color: var(--foreground);
+}
+
+/* Footnote links that act through Rust (the webview drops target="_blank"
+ * anchors) render as buttons but must read as links. */
+.onboarding-footnote-link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--foreground);
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 /* Sign-in / trial "finish it in the browser" wait state: spinner + label,

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   setDictationLanguage: vi.fn(),
   setDictationShortcut: vi.fn(),
   osAccountsLogin: vi.fn(),
+  scribeOpenVerifyPage: vi.fn(),
   osAccountsCancelLogin: vi.fn(),
   osAccountsStartTrialCheckout: vi.fn(),
   osAccountsOpenPortal: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock("../lib/tauri", () => ({
   setDictationLanguage: mocks.setDictationLanguage,
   setDictationShortcut: mocks.setDictationShortcut,
   osAccountsLogin: mocks.osAccountsLogin,
+  scribeOpenVerifyPage: mocks.scribeOpenVerifyPage,
   osAccountsCancelLogin: mocks.osAccountsCancelLogin,
   osAccountsStartTrialCheckout: mocks.osAccountsStartTrialCheckout,
   osAccountsOpenPortal: mocks.osAccountsOpenPortal,
@@ -451,6 +453,26 @@ describe("OnboardingFlow", () => {
     await screen.findByRole("heading", { name: "Start your free trial" });
     await screen.findByText(/Sign-in canceled/);
     expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
+  });
+
+  it("opens the scribe-api verify page from the privacy step", async () => {
+    // The footnote is a Rust-routed button, not an anchor: the webview drops
+    // target="_blank" navigations, so it invokes scribe_open_verify_page.
+    mocks.scribeOpenVerifyPage.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    await renderFlow();
+    await user.click(
+      screen.getByRole("button", { name: "Let's get you set up" }),
+    );
+    await screen.findByRole("heading", {
+      name: "Private by architecture, not by promise",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Verify it yourself" }),
+    );
+
+    expect(mocks.scribeOpenVerifyPage).toHaveBeenCalledOnce();
   });
 
   it("resumes a half-finished run at the saved step", async () => {

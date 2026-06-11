@@ -112,7 +112,7 @@ pub fn run() {
             commands::get_microphone_permission_state,
             commands::check_recording_source_readiness,
             commands::open_privacy_settings,
-            commands::scribe_verify_url,
+            commands::scribe_open_verify_page,
             commands::start_recording,
             commands::pause_recording,
             commands::resume_recording,

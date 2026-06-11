@@ -606,8 +606,11 @@ export async function bootstrapApp() {
   return invoke<BootstrapResponse>("bootstrap_app");
 }
 
-export async function scribeVerifyUrl() {
-  return invoke<string>("scribe_verify_url");
+/** Opens the scribe-api /verify page (attestation, routing, retention) in
+ * the default browser. Routed through Rust because the webview drops
+ * target="_blank" anchors. */
+export async function scribeOpenVerifyPage() {
+  return invoke<void>("scribe_open_verify_page");
 }
 
 export async function createNote(folderId?: string) {

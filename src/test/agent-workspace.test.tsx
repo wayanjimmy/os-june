@@ -48,7 +48,7 @@ const mocks = vi.hoisted(() => ({
   listAgentTasks: vi.fn(),
   downloadHermesBridgeFile: vi.fn(),
   osAccountsTopUp: vi.fn(),
-  scribeVerifyUrl: vi.fn(),
+  scribeOpenVerifyPage: vi.fn(),
   providerModelSettings: vi.fn(),
   retryAgentTask: vi.fn(),
   saveAgentAssistantMessage: vi.fn(),
@@ -104,7 +104,7 @@ vi.mock("../lib/tauri", () => ({
   osAccountsTopUp: mocks.osAccountsTopUp,
   providerModelSettings: mocks.providerModelSettings,
   retryAgentTask: mocks.retryAgentTask,
-  scribeVerifyUrl: mocks.scribeVerifyUrl,
+  scribeOpenVerifyPage: mocks.scribeOpenVerifyPage,
   saveAgentAssistantMessage: mocks.saveAgentAssistantMessage,
   saveAgentHermesSession: mocks.saveAgentHermesSession,
   sendAgentMessage: mocks.sendAgentMessage,
@@ -207,7 +207,7 @@ describe("AgentWorkspace", () => {
     mocks.getAgentTask.mockResolvedValue(existingTask);
     // Empty by default so badge tests assert the plain (unlinked) badge; the
     // verify-link test overrides this with a real URL.
-    mocks.scribeVerifyUrl.mockResolvedValue("");
+    mocks.scribeOpenVerifyPage.mockResolvedValue(undefined);
     mocks.hermesBridgeStatus.mockResolvedValue({
       running: true,
       connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
@@ -353,8 +353,12 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace initialSession={existingSession} />);
 
     expect(await screen.findByText("Anonymous mode")).toBeInTheDocument();
+    // The badge always links to the verify page now, so its accessible name
+    // carries the click-through suffix after the mode description.
     expect(
-      screen.getByLabelText(`Anonymous mode - ${ANONYMOUS_MODEL_DESCRIPTION}`),
+      screen.getByLabelText(
+        new RegExp(`^Anonymous mode - ${ANONYMOUS_MODEL_DESCRIPTION}`),
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText("Private mode")).not.toBeInTheDocument();
   });
@@ -402,20 +406,18 @@ describe("AgentWorkspace", () => {
     );
   });
 
-  it("links the privacy badge to the server verification page", async () => {
-    mocks.scribeVerifyUrl.mockResolvedValue(
-      "https://scribe-api.example.test/verify",
-    );
+  it("opens the server verification page from the privacy badge", async () => {
+    // A button through Rust, not an anchor: the webview drops
+    // target="_blank" navigations.
+    mocks.scribeOpenVerifyPage.mockResolvedValue(undefined);
+    const user = userEvent.setup();
 
     render(<AgentWorkspace initialSession={existingSession} />);
 
-    const badge = await screen.findByRole("link", { name: /Private mode/ });
-    expect(badge).toHaveAttribute(
-      "href",
-      "https://scribe-api.example.test/verify",
-    );
-    expect(badge).toHaveAttribute("target", "_blank");
+    const badge = await screen.findByRole("button", { name: /Private mode/ });
     expect(badge).toHaveAccessibleName(/how to verify it yourself/i);
+    await user.click(badge);
+    expect(mocks.scribeOpenVerifyPage).toHaveBeenCalledOnce();
   });
 
   it("refreshes the model privacy label when generation model settings change", async () => {

@@ -546,9 +546,13 @@ pub async fn check_recording_source_readiness(
         .map_err(|error| AppError::new("readiness_check_failed", error.to_string()))
 }
 
+/// Opens the scribe-api `/verify` page (enclave attestation, routing,
+/// retention) in the default browser. Must route through Rust: the webview
+/// installs no new-window handler, so `target="_blank"` anchors are silently
+/// dropped — same reason the accounts portal links go through a command.
 #[tauri::command]
-pub fn scribe_verify_url() -> String {
-    crate::scribe_api::verify_url()
+pub fn scribe_open_verify_page() -> Result<(), AppError> {
+    crate::os_accounts::open_in_browser(&crate::scribe_api::verify_url())
 }
 
 #[tauri::command]

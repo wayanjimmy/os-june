@@ -22,7 +22,7 @@ import {
   listVeniceModels,
   localAudioFileSrc,
   providerModelSettings,
-  scribeVerifyUrl,
+  scribeOpenVerifyPage,
   setDictationLanguage,
   setDictationMicrophone,
   setDictationShortcut,
@@ -260,7 +260,6 @@ export function AppSettings({
   const [micTestSampleSrc, setMicTestSampleSrc] = useState<string>();
   const [micTestError, setMicTestError] = useState<string>();
   const [micTestPlaying, setMicTestPlaying] = useState(false);
-  const [verifyUrl, setVerifyUrl] = useState<string>();
   const controlled = controlledTab !== undefined && onTabChange !== undefined;
   const activeTab = controlled ? controlledTab : internalTab;
   const setActiveTab = (tab: SettingsTab) => {
@@ -294,18 +293,6 @@ export function AppSettings({
       void resetMicTestState(true);
     }
   }, [activeTab]);
-
-  useEffect(() => {
-    let cancelled = false;
-    scribeVerifyUrl()
-      .then((url) => {
-        if (!cancelled && url) setVerifyUrl(url);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1166,30 +1153,29 @@ export function AppSettings({
                   </div>
                 </div>
 
-                {verifyUrl ? (
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">
-                        Server verification
-                      </h3>
-                      <p className="settings-row-description">
-                        June&apos;s server runs in a confidential VM. See
-                        exactly what code is running and how to verify it
-                        yourself.
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <a
-                        className="btn btn-secondary"
-                        href={verifyUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Verify server
-                      </a>
-                    </div>
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <h3 className="settings-row-title">
+                      Server verification
+                    </h3>
+                    <p className="settings-row-description">
+                      June&apos;s server runs in a confidential VM. See
+                      exactly what code is running and how to verify it
+                      yourself.
+                    </p>
                   </div>
-                ) : null}
+                  <div className="settings-row-control">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() =>
+                        void scribeOpenVerifyPage().catch(() => undefined)
+                      }
+                    >
+                      Verify server
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </section>

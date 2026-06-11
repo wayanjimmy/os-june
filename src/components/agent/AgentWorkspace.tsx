@@ -90,7 +90,7 @@ import {
   osAccountsTopUp,
   providerModelSettings,
   retryAgentTask,
-  scribeVerifyUrl,
+  scribeOpenVerifyPage,
   sendAgentMessage,
   startHermesBridge,
   suggestAgentSessionTitle,
@@ -832,7 +832,6 @@ export function AgentWorkspace({
     useState<ModelPrivacyBadge>();
   // Attestation walkthrough URL served by the backend (same page as Settings
   // → About → Verify server); the privacy badge links to it when known.
-  const [verifyUrl, setVerifyUrl] = useState<string>();
   const [capabilityQuery, setCapabilityQuery] = useState("");
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
@@ -1280,20 +1279,6 @@ export function AgentWorkspace({
         PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
         handleProviderModelSettingsChanged,
       );
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    scribeVerifyUrl()
-      .then((url) => {
-        if (!cancelled && url) setVerifyUrl(url);
-      })
-      // Without a configured backend there is nothing to verify; the badge
-      // stays a plain tooltip.
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
     };
   }, []);
 
@@ -3413,7 +3398,6 @@ export function AgentWorkspace({
             <h2>{selectedTask.title}</h2>
             <SafetyBadge
               privacyBadge={generationPrivacyBadge}
-              verifyUrl={verifyUrl}
             />
           </div>
         </div>
@@ -3502,7 +3486,6 @@ export function AgentWorkspace({
             setArtifactPanel((open) => (open ? null : { view: "list" }))
           }
           privacyBadge={generationPrivacyBadge}
-          verifyUrl={verifyUrl}
           // The badge describes the selected session, not the live runtime:
           // every send re-enforces the session's recorded mode, so a
           // sandboxed session stays sandboxed even while an Unrestricted
@@ -3634,10 +3617,8 @@ export function AgentWorkspace({
 // Settings → About.
 function SafetyBadge({
   privacyBadge,
-  verifyUrl,
 }: {
   privacyBadge?: ModelPrivacyBadge;
-  verifyUrl?: string;
 }) {
   if (!privacyBadge) return null;
   const icon =
@@ -3651,34 +3632,21 @@ function SafetyBadge({
   const label = (
     <span className="agent-safety-badge-label">{privacyBadge.label}</span>
   );
-  if (!verifyUrl) {
-    return (
-      <HoverTip
-        tip={privacyBadge.description}
-        className="agent-safety-badge"
-        data-mode={privacyBadge.mode}
-        tabIndex={0}
-        aria-label={`${privacyBadge.label} - ${privacyBadge.description}`}
-      >
-        {icon}
-        {label}
-      </HoverTip>
-    );
-  }
   const description = `${privacyBadge.description} Click to see exactly what code June's server runs and how to verify it yourself.`;
+  // A button through Rust, not an anchor: the webview installs no new-window
+  // handler, so target="_blank" navigations are silently dropped.
   return (
     <HoverTip tip={description} className="agent-safety-badge-wrap">
-      <a
+      <button
+        type="button"
         className="agent-safety-badge"
         data-mode={privacyBadge.mode}
-        href={verifyUrl}
-        target="_blank"
-        rel="noreferrer"
+        onClick={() => void scribeOpenVerifyPage().catch(() => undefined)}
         aria-label={`${privacyBadge.label} - ${description}`}
       >
         {icon}
         {label}
-      </a>
+      </button>
     </HoverTip>
   );
 }
@@ -3711,7 +3679,6 @@ function UnrestrictedBadge() {
 function AgentSessionBar({
   origin,
   privacyBadge,
-  verifyUrl,
   fullMode,
   title,
   artifactCount = 0,
@@ -3722,7 +3689,6 @@ function AgentSessionBar({
 }: {
   origin?: AgentWorkspaceOrigin;
   privacyBadge?: ModelPrivacyBadge;
-  verifyUrl?: string;
   fullMode?: boolean;
   title?: string;
   artifactCount?: number;
@@ -3846,7 +3812,7 @@ function AgentSessionBar({
             <span aria-hidden>{artifactCount}</span>
           </button>
         ) : null}
-        <SafetyBadge privacyBadge={privacyBadge} verifyUrl={verifyUrl} />
+        <SafetyBadge privacyBadge={privacyBadge} />
         {hasMenu ? (
           <div className="agent-session-menu-wrap" ref={menuWrapRef}>
             <button
