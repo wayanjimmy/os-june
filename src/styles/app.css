@@ -7205,6 +7205,33 @@ input:focus-visible,
   background: color-mix(in oklch, var(--muted) 80%, transparent);
 }
 
+/* A text model that can't use tools can't power June's agent: shown so the
+ * lineup stays explainable, but visibly inert and unselectable. */
+.model-picker-option[data-no-tools="true"] {
+  cursor: default;
+}
+
+.model-picker-option[data-no-tools="true"]:hover {
+  background: transparent;
+}
+
+.model-picker-option[data-no-tools="true"] .model-picker-name,
+.model-picker-option[data-no-tools="true"] .model-picker-logo,
+.model-picker-option[data-no-tools="true"] .model-meta-items {
+  opacity: 0.45;
+}
+
+.model-picker-no-tools {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--muted-foreground) 14%, transparent);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
 .model-picker-logo {
   grid-area: logo;
   display: inline-grid;
