@@ -66,6 +66,12 @@ pub struct IssueReportsConfig {
     /// Label slug attached to every report Issue.
     #[serde(default = "default_issue_report_label")]
     pub os_platform_label: String,
+    /// Reward asset symbol for the zero-reward Issue (e.g. "POINTS").
+    /// Issues are bounties under the hood, and creation fails when neither
+    /// the Project nor the Org has a default reward asset — naming one here
+    /// sidesteps that. Empty omits the field and relies on the defaults.
+    #[serde(default)]
+    pub os_platform_reward_asset: String,
 }
 
 fn default_issue_report_label() -> String {
@@ -81,6 +87,7 @@ impl Default for IssueReportsConfig {
             os_platform_org: String::new(),
             os_platform_project: String::new(),
             os_platform_label: default_issue_report_label(),
+            os_platform_reward_asset: String::new(),
         }
     }
 }
@@ -109,6 +116,7 @@ impl Debug for IssueReportsConfig {
             .field("os_platform_org", &self.os_platform_org)
             .field("os_platform_project", &self.os_platform_project)
             .field("os_platform_label", &self.os_platform_label)
+            .field("os_platform_reward_asset", &self.os_platform_reward_asset)
             .finish()
     }
 }

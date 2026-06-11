@@ -19,6 +19,7 @@ pub struct OsPlatformIssueReportSink {
     org: String,
     project: String,
     label: String,
+    reward_asset: String,
 }
 
 /// fellow's `ApiResponse` envelope — same shape as ours.
@@ -59,6 +60,7 @@ impl OsPlatformIssueReportSink {
             org: org.to_string(),
             project: project.to_string(),
             label: config.os_platform_label.trim().to_string(),
+            reward_asset: config.os_platform_reward_asset.trim().to_string(),
         })
     }
 
@@ -113,7 +115,7 @@ impl OsPlatformIssueReportSink {
         report: &IssueReport,
         file_ids: &[String],
     ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "title": issue_title(&report.description),
             "body_markdown": issue_body(report),
             "reward_amount_units": "0",
@@ -121,6 +123,9 @@ impl OsPlatformIssueReportSink {
             "status": "todo",
             "file_ids": file_ids,
         });
+        if !self.reward_asset.is_empty() {
+            body["asset_symbol"] = serde_json::Value::String(self.reward_asset.clone());
+        }
         self.http
             .post(format!(
                 "{}/v1/orgs/{}/projects/{}/bounties",
@@ -549,6 +554,7 @@ mod os_platform_tests {
             os_platform_api_key: "osk_test".to_string(),
             os_platform_org: "open-software".to_string(),
             os_platform_project: "june".to_string(),
+            os_platform_reward_asset: "POINTS".to_string(),
             ..Default::default()
         }
     }
@@ -614,6 +620,7 @@ mod os_platform_tests {
             .and(body_partial_json(serde_json::json!({
                 "title": "June report: The recorder freezes",
                 "reward_amount_units": "0",
+                "asset_symbol": "POINTS",
                 "type": "bug",
                 "status": "todo",
                 "file_ids": ["fil_1"],

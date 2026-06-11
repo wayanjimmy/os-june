@@ -26,6 +26,9 @@ os_platform_api_key = ""
 os_platform_org = ""
 os_platform_project = ""
 os_platform_label = "bug"
+# Reward asset for the zero-reward Issue (required when the target Org has
+# no default reward asset configured).
+os_platform_reward_asset = ""
 webhook_url = ""
 
 [os_accounts]
