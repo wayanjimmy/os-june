@@ -3,8 +3,10 @@ import {
   isScheduledRunPreamble,
   isScheduledRunSession,
   listHermesSessions,
+  listScheduledRunSessions,
   normalizeHermesSessionMessagesResponse,
   normalizeHermesSessionsResponse,
+  scheduledRunJobId,
   sessionTimestamp,
   stripScheduledRunPreamble,
   titleFromPrompt,
@@ -70,6 +72,17 @@ describe("scheduled-run helpers", () => {
     });
     expect(sessions[0]?.title).toBe("Post the Weekly Metrics Digest");
   });
+
+  it("extracts the routine job id from a cron run session id", () => {
+    // The scheduler mints run ids as cron_<job id>_<YYYYMMDD_HHMMSS>.
+    expect(scheduledRunJobId("cron_a1b2c3d4e5f6_20260611_093045")).toBe(
+      "a1b2c3d4e5f6",
+    );
+    // A job id containing underscores keeps the trailing timestamp out.
+    expect(scheduledRunJobId("cron_my_job_20260611_093045")).toBe("my_job");
+    expect(scheduledRunJobId("ordinary-session-id")).toBeUndefined();
+    expect(scheduledRunJobId("cron_missing_timestamp")).toBeUndefined();
+  });
 });
 
 const mocks = vi.hoisted(() => ({
@@ -98,6 +111,29 @@ describe("Hermes adapter", () => {
     expect(mocks.hermesBridgeSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ minMessages: 0 }),
     );
+  });
+
+  it("lists only cron-sourced sessions as scheduled runs", async () => {
+    mocks.hermesBridgeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "cron_a1b2c3d4e5f6_20260611_090000",
+          source: "cron",
+          preview: "Standup digest ready.",
+          last_active: "2026-06-11T09:00:30Z",
+        },
+        {
+          id: "ordinary-session",
+          title: "Plan the offsite",
+          last_active: "2026-06-11T10:00:00Z",
+        },
+      ],
+    });
+
+    const runs = await listScheduledRunSessions();
+    expect(runs.map((run) => run.id)).toEqual([
+      "cron_a1b2c3d4e5f6_20260611_090000",
+    ]);
   });
 
   it("normalizes raw gateway session lists and sorts by recent activity", () => {

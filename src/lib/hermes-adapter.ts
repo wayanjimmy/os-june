@@ -59,6 +59,26 @@ export function isScheduledRunSession(session: HermesSessionInfo) {
   return session.source === SCHEDULED_RUN_SOURCE;
 }
 
+/** The cron scheduler mints run session ids as
+ * `cron_<job id>_<YYYYMMDD_HHMMSS>` — the embedded job id is the only link
+ * from a run back to its routine. Returns undefined for any other id shape. */
+export function scheduledRunJobId(sessionId: string) {
+  return /^cron_(.+)_\d{8}_\d{6}$/.exec(sessionId)?.[1];
+}
+
+/** Hermes's session list has no source filter, so runs are found by fetching
+ * a recent window and filtering client-side. 200 covers weeks of mixed
+ * activity; runs older than the window age out of the history view. */
+const SCHEDULED_RUN_FETCH_LIMIT = 200;
+
+/** Recent scheduled-routine runs, newest first. */
+export async function listScheduledRunSessions() {
+  const sessions = await listHermesSessions({
+    limit: SCHEDULED_RUN_FETCH_LIMIT,
+  });
+  return sessions.filter(isScheduledRunSession);
+}
+
 /** A scheduled run's first message is the routine prompt wrapped in a machine
  * delivery preamble the cron runner injects: `[IMPORTANT: You are running as a
  * scheduled cron job. … nothing more.]`. Recognized by that exact opener so a
