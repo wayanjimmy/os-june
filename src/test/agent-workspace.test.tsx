@@ -396,6 +396,13 @@ describe("AgentWorkspace", () => {
     expect(submitted.text).toContain(
       "The recorder crashes after long meetings",
     );
+    // The transcript shows the user's words only — the investigation
+    // framing is plumbing between June and the runtime, never UI.
+    expect(
+      await screen.findByText(/The recorder crashes after long meetings/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/in-app reporting flow/)).toBeNull();
+    expect(screen.queryByText(/---USER REPORT---/)).toBeNull();
     // The report waits for June's diagnosis; nothing is filed yet.
     expect(mocks.submitIssueReport).not.toHaveBeenCalled();
 
@@ -961,7 +968,9 @@ describe("AgentWorkspace", () => {
       }
     });
 
-    expect(await screen.findByText(/Reading one more file/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Reading one more file/),
+    ).toBeInTheDocument();
     expect(screen.getByText("Thinking").closest("details")).toHaveAttribute(
       "open",
     );

@@ -145,6 +145,10 @@ import {
   type ProviderModelSettingsChangedDetail,
 } from "../../lib/model-privacy";
 import { messageFromError } from "../../lib/errors";
+import {
+  displayedUserMessageText,
+  issueReportPrompt,
+} from "../../lib/issue-report-prompt";
 import { hermesConnectionForMode } from "../../lib/hermes-connection";
 import {
   forgetSessionMode,
@@ -606,23 +610,6 @@ Extra details (when it started, steps to reproduce, attach a screenshot if you h
 
 /** Frames the user's bug report for June: investigate and write a diagnosis
  * for the team instead of treating it as a normal request for help. */
-function issueReportPrompt(report: string) {
-  return [
-    "The user is filing a bug report about the June desktop app. This conversation is part of the in-app reporting flow: your reply will be attached to the report and sent to the June development team, so write it for them.",
-    "",
-    "Do not try to fix the issue or walk the user through troubleshooting. Instead:",
-    "1. Read the report below and inspect any attached files or screenshots closely. Describe exactly what they show, including any visible error text.",
-    "2. Give your assessment of what is going wrong and which part of the app is likely involved.",
-    "3. Note anything else the team should look at.",
-    "",
-    "Keep it concise and factual. Close by thanking the user and letting them know the report and your assessment are being sent to the June team.",
-    "",
-    "---USER REPORT---",
-    report,
-    "---END USER REPORT---",
-  ].join("\n");
-}
-
 type PendingIssueReport = {
   description: string;
   attachmentNames: string[];
@@ -4996,7 +4983,9 @@ function AgentChatTurnRow({
           {textParts.map((part, index) => (
             <MarkdownContent
               key={`${turn.id}:text:${index}`}
-              markdown={part.text}
+              // Issue-report sessions open with the wrapped investigation
+              // prompt; the transcript shows only what the user typed.
+              markdown={displayedUserMessageText(part.text)}
             />
           ))}
         </div>
@@ -6233,7 +6222,12 @@ function renderMarkdownBlocks(
     if (heading) {
       flushParagraph();
       const level = Math.min(heading[1].length, 3);
-      const content = renderInlineMarkdown(heading[2], key, highlight, repairProse);
+      const content = renderInlineMarkdown(
+        heading[2],
+        key,
+        highlight,
+        repairProse,
+      );
       blocks.push(
         level === 1 ? (
           <h2 key={`h-${key++}`}>{content}</h2>
@@ -6764,7 +6758,8 @@ function stripHermesVisibleContext(value: string) {
     "",
   );
   const marker = withoutWarnings.search(/\n*--- Attached Context ---/m);
-  const visible = marker >= 0 ? withoutWarnings.slice(0, marker) : withoutWarnings;
+  const visible =
+    marker >= 0 ? withoutWarnings.slice(0, marker) : withoutWarnings;
   // Drop the scheduled-run delivery preamble so a routine's title and dedup
   // key come from its actual prompt, not the cron scaffolding.
   return stripScheduledRunPreamble(visible.trim());
