@@ -33,6 +33,7 @@ import { IconFileText } from "central-icons/IconFileText";
 import { IconFileZip } from "central-icons/IconFileZip";
 import { IconFolderSparkle } from "central-icons/IconFolderSparkle";
 import { IconHeartBeat } from "central-icons/IconHeartBeat";
+import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconPencil } from "central-icons/IconPencil";
@@ -62,6 +63,7 @@ import {
 import { BackButton } from "../ui/BackButton";
 import { Dialog } from "../ui/Dialog";
 import { EmptyState } from "../ui/EmptyState";
+import { HoverTip } from "../ui/HoverTip";
 import { InlineNotice } from "../ui/InlineNotice";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Spinner } from "../ui/Spinner";
@@ -3383,19 +3385,22 @@ export function AgentWorkspace({
 function SafetyBadge({ privacyBadge }: { privacyBadge?: ModelPrivacyBadge }) {
   if (!privacyBadge) return null;
   return (
-    <span
+    <HoverTip
+      tip={privacyBadge.description}
       className="agent-safety-badge"
       data-mode={privacyBadge.mode}
-      title={privacyBadge.description}
+      tabIndex={0}
       aria-label={`${privacyBadge.label} - ${privacyBadge.description}`}
     >
-      {privacyBadge.mode === "private" ? (
+      {privacyBadge.mode === "e2ee" ? (
+        <IconLock size={13} aria-hidden />
+      ) : privacyBadge.mode === "private" ? (
         <IconShieldAi size={13} aria-hidden />
       ) : (
         <IconAnonymous size={13} aria-hidden />
       )}
       <span className="agent-safety-badge-label">{privacyBadge.label}</span>
-    </span>
+    </HoverTip>
   );
 }
 
@@ -3406,14 +3411,15 @@ function UnrestrictedBadge() {
   const description =
     "June is running without the file sandbox and can change any file your account can. Start a session with Unrestricted off to restore the sandbox.";
   return (
-    <span
+    <HoverTip
+      tip={description}
       className="agent-safety-badge agent-sandbox-badge"
-      title={description}
+      tabIndex={0}
       aria-label={`Unrestricted - ${description}`}
     >
       <IconShieldCrossed size={13} aria-hidden />
       Unrestricted
-    </span>
+    </HoverTip>
   );
 }
 

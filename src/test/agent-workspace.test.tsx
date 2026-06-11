@@ -17,7 +17,11 @@ import {
   HERO_GREETINGS,
   type AgentSessionsChangedDetail,
 } from "../components/agent/AgentWorkspace";
-import { PROVIDER_MODEL_SETTINGS_CHANGED_EVENT } from "../lib/model-privacy";
+import {
+  ANONYMOUS_MODEL_DESCRIPTION,
+  E2EE_MODEL_DESCRIPTION,
+  PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
+} from "../lib/model-privacy";
 import { HermesGatewayError } from "../lib/hermes-gateway";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
@@ -316,11 +320,52 @@ describe("AgentWorkspace", () => {
 
     expect(await screen.findByText("Anonymous mode")).toBeInTheDocument();
     expect(
-      screen.getByLabelText(
-        "Anonymous mode - You're using a model that is anonymizing your prompts but may still train on your data.",
-      ),
+      screen.getByLabelText(`Anonymous mode - ${ANONYMOUS_MODEL_DESCRIPTION}`),
     ).toBeInTheDocument();
     expect(screen.queryByText("Private mode")).not.toBeInTheDocument();
+  });
+
+  it("labels e2ee models over private and explains the mode on hover", async () => {
+    mocks.providerModelSettings.mockResolvedValue({
+      settings: {
+        transcriptionProvider: "venice",
+        transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+        generationModel: "e2ee-glm",
+      },
+    });
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "e2ee-glm",
+      models: [
+        {
+          provider: "venice",
+          id: "e2ee-glm",
+          name: "E2EE GLM",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["e2ee"],
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const badge = await screen.findByText("E2EE");
+    expect(screen.queryByText("Private mode")).not.toBeInTheDocument();
+
+    // The hover callout replaces the native title tooltip.
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    await user.hover(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      E2EE_MODEL_DESCRIPTION,
+    );
+    await user.unhover(badge);
+    await waitFor(() =>
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+    );
   });
 
   it("refreshes the model privacy label when generation model settings change", async () => {
