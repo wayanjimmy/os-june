@@ -31,8 +31,9 @@ import { IconFilePdf } from "central-icons/IconFilePdf";
 import { IconFilePng } from "central-icons/IconFilePng";
 import { IconFileText } from "central-icons/IconFileText";
 import { IconFileZip } from "central-icons/IconFileZip";
-import { IconFolderSparkle } from "central-icons/IconFolderSparkle";
 import { IconHeartBeat } from "central-icons/IconHeartBeat";
+import { IconHistory } from "central-icons/IconHistory";
+import { IconListBullets } from "central-icons/IconListBullets";
 import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
@@ -411,15 +412,21 @@ type AgentShortcut = {
  * window is the curated first-impression mix (an instant run, a prefill, an
  * attach flow, and a health check) that shows when the shuffle is identity
  * (e.g. in tests with Math.random mocked to 0).
+ *
+ * Every suggestion must succeed inside the default write-jail: reads are
+ * broad, but writes land only in the agent workspace. Don't add shortcuts
+ * that rename, move, or delete the user's files (tidy a folder, free up
+ * disk space, dedupe) — the sandbox denies the write mid-task and June's
+ * own suggestion reads as broken.
  */
 const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
-    key: "tidy-downloads",
-    icon: <IconFolderSparkle size={18} />,
-    title: "Tidy my Downloads",
-    description: "Sort the clutter into folders and flag what's safe to toss.",
+    key: "recent-files",
+    icon: <IconHistory size={18} />,
+    title: "Catch up on recent files",
+    description: "A quick rundown of what's new across your folders.",
     prompt:
-      "Tidy up my Downloads folder: group the files into subfolders by type, then list anything older than six months that looks safe to delete. Don't delete anything without checking with me first.",
+      "Look through my Desktop, Documents, and Downloads folders for files added or changed in the last week and give me a quick rundown of what's new, grouped by what they seem to be for. Don't move or change anything.",
     action: "run",
   },
   {
@@ -458,31 +465,31 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     action: "prefill",
   },
   {
-    key: "rename-screenshots",
+    key: "describe-screenshots",
     icon: <IconCameraSparkle size={18} />,
-    title: "Rename my screenshots",
-    description: "Turn screenshot gibberish into names that mean something.",
+    title: "Find the right screenshot",
+    description: "June looks through them so you don't have to.",
     prompt:
-      "Look through the screenshots on my Desktop and in my Downloads folder, open each one, and rename it to a short descriptive name based on what it shows. Keep the file extensions and don't overwrite anything.",
+      "Look through the recent screenshots on my Desktop and in my Downloads folder, open each one, and tell me what it shows so I can find the one I'm looking for. Don't rename, move, or change anything.",
     action: "run",
   },
   {
     key: "draft-document",
     icon: <IconPencilLine size={18} />,
     title: "Draft a document",
-    description: "Start a write-up and save it to your Documents.",
+    description: "Start a write-up and get it as a downloadable file.",
     prompt:
-      "Draft a <kind of document> about <topic>, then save it as a Markdown file in my Documents folder.",
+      "Draft a <kind of document> about <topic>, then save it as a Markdown file in your workspace so I can download it.",
     action: "prefill",
   },
   {
-    key: "disk-space",
+    key: "analyze-spreadsheet",
     icon: <IconPieChart1 size={18} />,
-    title: "Free up disk space",
-    description: "Find what's eating your storage and what can go.",
+    title: "Analyze a spreadsheet",
+    description: "Key figures, trends, and oddities from a CSV or sheet.",
     prompt:
-      "Work out what's taking up the most disk space in my home folder, summarize the biggest culprits, and suggest what's safe to clean up. Don't delete anything without checking with me first.",
-    action: "run",
+      "Analyze the attached spreadsheet: summarize the key figures and trends, and call out anything that looks off.",
+    action: "attach",
   },
   {
     key: "extract-text",
@@ -494,13 +501,13 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     action: "attach",
   },
   {
-    key: "find-duplicates",
-    icon: <IconFiles size={18} />,
-    title: "Find duplicate files",
-    description: "Spot copies wasting space across your folders.",
+    key: "plan-project",
+    icon: <IconListBullets size={18} />,
+    title: "Plan a project",
+    description: "Turn a vague goal into concrete first steps.",
     prompt:
-      "Scan my Downloads, Documents, and Desktop folders for duplicate files, group the copies together, and tell me which ones look safe to remove. Don't delete anything without checking with me first.",
-    action: "run",
+      "Help me plan <a project>: break it into concrete steps, flag the risks, and suggest what to tackle first.",
+    action: "prefill",
   },
 ];
 

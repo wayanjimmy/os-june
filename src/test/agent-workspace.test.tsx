@@ -1688,21 +1688,21 @@ describe("AgentWorkspace", () => {
       JSON.stringify({ createdAt: Date.now() }),
     );
     // rand() of 0 keeps the rotating hero suggestions in curated pool order,
-    // so the leading window (incl. "Tidy my Downloads") is what renders.
+    // so the leading window (incl. "Catch up on recent files") is what renders.
     const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
       render(<AgentWorkspace />);
       const user = userEvent.setup();
 
       await user.click(
-        await screen.findByRole("button", { name: /Tidy my Downloads/ }),
+        await screen.findByRole("button", { name: /Catch up on recent files/ }),
       );
 
       await waitFor(() =>
         expect(mocks.gatewayRequest).toHaveBeenCalledWith(
           "prompt.submit",
           expect.objectContaining({
-            text: expect.stringContaining("Downloads folder"),
+            text: expect.stringContaining("changed in the last week"),
           }),
         ),
       );
