@@ -17,7 +17,11 @@ import {
   HERO_GREETINGS,
   type AgentSessionsChangedDetail,
 } from "../components/agent/AgentWorkspace";
-import { PROVIDER_MODEL_SETTINGS_CHANGED_EVENT } from "../lib/model-privacy";
+import {
+  ANONYMOUS_MODEL_DESCRIPTION,
+  E2EE_MODEL_DESCRIPTION,
+  PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
+} from "../lib/model-privacy";
 import { HermesGatewayError } from "../lib/hermes-gateway";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
@@ -252,6 +256,41 @@ describe("AgentWorkspace", () => {
     ).toBeNull();
   });
 
+  it("never announces the restored session as selected while a New Session is pending", async () => {
+    // Regression: "New session" from inside a project arms the pending marker
+    // and remounts the workspace. Initializing from the last-open restore used
+    // to dispatch a mount-time sessions-changed event selecting the old
+    // session, which App reads as "switched to existing work" — dropping the
+    // pending project assignment before the new session exists.
+    window.localStorage.setItem("scribe:agent:last-open-session", "session-1");
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({ createdAt: Date.now() }),
+    );
+    const sessionDetails: AgentSessionsChangedDetail[] = [];
+    const onSessionsChanged = (event: Event) =>
+      sessionDetails.push(
+        (event as CustomEvent<AgentSessionsChangedDetail>).detail,
+      );
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, onSessionsChanged);
+
+    try {
+      render(<AgentWorkspace />);
+
+      expect(await screen.findByText(HERO_GREETING)).toBeInTheDocument();
+      await waitFor(() => expect(mocks.listHermesSessions).toHaveBeenCalled());
+      expect(sessionDetails.length).toBeGreaterThan(0);
+      expect(
+        sessionDetails.every((detail) => detail.selectedSessionId == null),
+      ).toBe(true);
+    } finally {
+      window.removeEventListener(
+        AGENT_SESSIONS_CHANGED_EVENT,
+        onSessionsChanged,
+      );
+    }
+  });
+
   it("labels anonymous-only agent models as anonymous mode", async () => {
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
@@ -281,11 +320,52 @@ describe("AgentWorkspace", () => {
 
     expect(await screen.findByText("Anonymous mode")).toBeInTheDocument();
     expect(
-      screen.getByLabelText(
-        "Anonymous mode - You're using a model that is anonymizing your prompts but may still train on your data.",
-      ),
+      screen.getByLabelText(`Anonymous mode - ${ANONYMOUS_MODEL_DESCRIPTION}`),
     ).toBeInTheDocument();
     expect(screen.queryByText("Private mode")).not.toBeInTheDocument();
+  });
+
+  it("labels e2ee models over private and explains the mode on hover", async () => {
+    mocks.providerModelSettings.mockResolvedValue({
+      settings: {
+        transcriptionProvider: "venice",
+        transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+        generationModel: "e2ee-glm",
+      },
+    });
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "e2ee-glm",
+      models: [
+        {
+          provider: "venice",
+          id: "e2ee-glm",
+          name: "E2EE GLM",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["e2ee"],
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const badge = await screen.findByText("E2EE");
+    expect(screen.queryByText("Private mode")).not.toBeInTheDocument();
+
+    // The hover callout replaces the native title tooltip.
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    await user.hover(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      E2EE_MODEL_DESCRIPTION,
+    );
+    await user.unhover(badge);
+    await waitFor(() =>
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+    );
   });
 
   it("refreshes the model privacy label when generation model settings change", async () => {
@@ -1506,6 +1586,57 @@ describe("AgentWorkspace", () => {
         callsBefore,
       ),
     );
+  });
+
+  it("holds session broadcasts until the first fetch lands", async () => {
+    const sessionDetails: AgentSessionsChangedDetail[] = [];
+    const onSessionsChanged = (event: Event) =>
+      sessionDetails.push(
+        (event as CustomEvent<AgentSessionsChangedDetail>).detail,
+      );
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, onSessionsChanged);
+
+    // First click after app launch: the workspace mounts seeded with only the
+    // clicked session while listHermesSessions is still in flight. The sidebar
+    // replaces its list wholesale with each broadcast, so a pre-fetch
+    // broadcast would collapse it to one row and flicker it back.
+    let resolveSessions: (sessions: (typeof existingSession)[]) => void = () =>
+      undefined;
+    mocks.listHermesSessions.mockImplementation(
+      () =>
+        new Promise<(typeof existingSession)[]>((resolve) => {
+          resolveSessions = resolve;
+        }),
+    );
+    const clickedSession = {
+      id: "session-2",
+      title: "Clicked session",
+      preview: "Clicked preview",
+      last_active: "2026-06-05T12:00:00Z",
+    };
+
+    try {
+      render(<AgentWorkspace initialSession={clickedSession} />);
+
+      await waitFor(() => expect(mocks.listHermesSessions).toHaveBeenCalled());
+      expect(sessionDetails).toEqual([]);
+
+      await act(async () => {
+        resolveSessions([clickedSession, existingSession]);
+      });
+
+      await waitFor(() => expect(sessionDetails.length).toBeGreaterThan(0));
+      expect(sessionDetails[0].sessions.map((session) => session.id)).toEqual([
+        "session-2",
+        "session-1",
+      ]);
+      expect(sessionDetails[0].selectedSessionId).toBe("session-2");
+    } finally {
+      window.removeEventListener(
+        AGENT_SESSIONS_CHANGED_EVENT,
+        onSessionsChanged,
+      );
+    }
   });
 
   it("scrubs working state when deleting the selected session from the session bar", async () => {

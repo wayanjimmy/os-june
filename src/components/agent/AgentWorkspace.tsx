@@ -34,6 +34,7 @@ import { IconFileZip } from "central-icons/IconFileZip";
 import { IconHeartBeat } from "central-icons/IconHeartBeat";
 import { IconHistory } from "central-icons/IconHistory";
 import { IconListBullets } from "central-icons/IconListBullets";
+import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconPencil } from "central-icons/IconPencil";
@@ -63,6 +64,7 @@ import {
 import { BackButton } from "../ui/BackButton";
 import { Dialog } from "../ui/Dialog";
 import { EmptyState } from "../ui/EmptyState";
+import { HoverTip } from "../ui/HoverTip";
 import { InlineNotice } from "../ui/InlineNotice";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Spinner } from "../ui/Spinner";
@@ -664,17 +666,31 @@ export function AgentWorkspace({
   const [hermesSessionItems, setHermesSessionItems] = useState<
     HermesSessionInfo[]
   >(() => (initialSession ? [initialSession] : []));
+  // False until the first listHermesSessions fetch lands. Until then the
+  // items above only hold the mount seed (the clicked session, or nothing),
+  // and broadcasting that would wipe the sidebar's already-loaded list.
+  const [hermesSessionsHydrated, setHermesSessionsHydrated] = useState(false);
   // Mounting without an explicit target restores the last open conversation,
   // so app restarts and dev reloads land the user back in the session they
-  // were working in instead of bouncing them to the newest one.
+  // were working in instead of bouncing them to the newest one. A pending
+  // new-session marker overrides the restore: the mount-time sessions-changed
+  // dispatch would otherwise announce the restored session as selected, which
+  // App reads as "switched to an existing session" and drops a pending
+  // project assignment before the new session even exists.
   const [selectedHermesSessionId, setSelectedHermesSessionId] = useState<
     string | undefined
-  >(() => initialSessionId ?? readLastOpenSessionId());
+  >(
+    () =>
+      initialSessionId ??
+      (hasPendingNewSessionRequest() ? undefined : readLastOpenSessionId()),
+  );
   const selectedHermesSessionIdRef = useRef<string | undefined>(
     selectedHermesSessionId,
   );
   const lastAutoSubmittedRef = useRef<{ prompt: string; at: number }>();
-  const [newSessionMode, setNewSessionMode] = useState(false);
+  const [newSessionMode, setNewSessionMode] = useState(
+    () => !initialSessionId && hasPendingNewSessionRequest(),
+  );
   const [heroGreeting, setHeroGreeting] = useState(advanceHeroGreeting);
   const heroGreetingConsumedRef = useRef(false);
   const [heroDeck, setHeroDeck] = useState(shuffleAgentShortcuts);
@@ -772,7 +788,7 @@ export function AgentWorkspace({
   // Tasks whose hydration fetch has resolved (hydratedTaskIdsRef only says
   // the fetch *started*) — the scroll-settling logic needs the landing.
   const taskHistoryLoadedIdsRef = useRef<Set<string>>(new Set());
-  const newSessionModeRef = useRef(false);
+  const newSessionModeRef = useRef(newSessionMode);
   // True only while a brand-new thread is being started from the hero. The
   // hero→dock composer FLIP keys off this so it glides *only* when the empty
   // chat hands over to a fresh thread — not when the hero is dismissed by
@@ -1060,6 +1076,7 @@ export function AgentWorkspace({
     setHermesSessionsLoading(true);
     try {
       const sessions = applySessionTitleOverrides(await listHermesSessions());
+      setHermesSessionsHydrated(true);
       const pendingMessages = pendingHermesMessagesRef.current;
       const selectedSessionId = selectedHermesSessionIdRef.current;
       const workingSessions = workingSessionIdsRef.current;
@@ -1206,6 +1223,11 @@ export function AgentWorkspace({
   }, [pendingReply]);
 
   useEffect(() => {
+    // The sidebar and App replace their session lists wholesale with this
+    // payload, so an unhydrated broadcast (mount seed only) would collapse
+    // the list they already fetched themselves and flicker it back once the
+    // real fetch lands.
+    if (!hermesSessionsHydrated) return;
     dispatchAgentSessionsChanged({
       sessions: hermesSessionItems,
       selectedSessionId: selectedHermesSessionId,
@@ -1213,6 +1235,7 @@ export function AgentWorkspace({
       waitingSessionIds: Array.from(waitingSessionIds),
     });
   }, [
+    hermesSessionsHydrated,
     hermesSessionItems,
     selectedHermesSessionId,
     waitingSessionIds,
@@ -3369,19 +3392,22 @@ export function AgentWorkspace({
 function SafetyBadge({ privacyBadge }: { privacyBadge?: ModelPrivacyBadge }) {
   if (!privacyBadge) return null;
   return (
-    <span
+    <HoverTip
+      tip={privacyBadge.description}
       className="agent-safety-badge"
       data-mode={privacyBadge.mode}
-      title={privacyBadge.description}
+      tabIndex={0}
       aria-label={`${privacyBadge.label} - ${privacyBadge.description}`}
     >
-      {privacyBadge.mode === "private" ? (
+      {privacyBadge.mode === "e2ee" ? (
+        <IconLock size={13} aria-hidden />
+      ) : privacyBadge.mode === "private" ? (
         <IconShieldAi size={13} aria-hidden />
       ) : (
         <IconAnonymous size={13} aria-hidden />
       )}
       <span className="agent-safety-badge-label">{privacyBadge.label}</span>
-    </span>
+    </HoverTip>
   );
 }
 
@@ -3392,14 +3418,15 @@ function UnrestrictedBadge() {
   const description =
     "June is running without the file sandbox and can change any file your account can. Start a session with Unrestricted off to restore the sandbox.";
   return (
-    <span
+    <HoverTip
+      tip={description}
       className="agent-safety-badge agent-sandbox-badge"
-      title={description}
+      tabIndex={0}
       aria-label={`Unrestricted - ${description}`}
     >
       <IconShieldCrossed size={13} aria-hidden />
       Unrestricted
-    </span>
+    </HoverTip>
   );
 }
 
@@ -6357,6 +6384,23 @@ export function markAgentNewSessionPending(prompt?: string) {
 // would hijack whatever the user had open into a new session (and re-submit
 // the stale prompt).
 const AGENT_NEW_SESSION_PENDING_TTL_MS = 15_000;
+
+/** Non-consuming peek at the pending marker, for state init on a fresh
+ * mount. The mount effect still consumes it via pendingNewSessionRequest();
+ * peeking here must not clear it, or the auto-submit prompt would be lost. */
+function hasPendingNewSessionRequest(): boolean {
+  try {
+    const value = window.sessionStorage.getItem(AGENT_NEW_SESSION_PENDING_KEY);
+    if (value == null) return false;
+    const parsed = JSON.parse(value) as { createdAt?: number };
+    return (
+      typeof parsed.createdAt === "number" &&
+      Date.now() - parsed.createdAt <= AGENT_NEW_SESSION_PENDING_TTL_MS
+    );
+  } catch {
+    return false;
+  }
+}
 
 function pendingNewSessionRequest(): AgentNewSessionDetail | undefined {
   try {
