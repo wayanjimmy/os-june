@@ -119,6 +119,9 @@ describe("RoutinesView", () => {
 
     const prompt = onCreateRoutine.mock.calls[0][0] as string;
     expect(prompt).toContain("Do not set enabled_toolsets");
+    // Cron scripts run as shell subprocesses outside the toolset gate, so a
+    // sandboxed routine must not get one either.
+    expect(prompt).toContain("Do not attach a script");
     expect(prompt).not.toContain("Create the job with enabled_toolsets");
   });
 
@@ -157,7 +160,7 @@ describe("RoutinesView", () => {
     );
   });
 
-  it("badges only routines whose stored job carries machine toolsets", async () => {
+  it("badges routines that carry machine toolsets or a cron script", async () => {
     mocks.listRoutines.mockResolvedValue([
       job(),
       job({
@@ -165,12 +168,22 @@ describe("RoutinesView", () => {
         name: "Nightly cleanup",
         enabled_toolsets: ["terminal", "file", "web"],
       }),
+      // Scripts run as shell subprocesses of the unjailed gateway, outside
+      // the toolset gate, so a script-backed job is unrestricted even with
+      // no enabled_toolsets override.
+      job({
+        job_id: "ghi789",
+        name: "Disk watchdog",
+        script: "/Users/junho/bin/check-disk.sh",
+        no_agent: true,
+      }),
     ]);
     render(<RoutinesView onCreateRoutine={vi.fn()} onEditRoutine={vi.fn()} />);
 
     expect(await screen.findByText("Nightly cleanup")).toBeInTheDocument();
-    // One badge for the unrestricted routine, none for the sandboxed one.
-    expect(screen.getAllByText("Unrestricted")).toHaveLength(1);
+    // Badges for the toolset-widened and the script-backed routines, none
+    // for the sandboxed one.
+    expect(screen.getAllByText("Unrestricted")).toHaveLength(2);
   });
 
   it("shows the empty state and routes creation through the agent prompt", async () => {
