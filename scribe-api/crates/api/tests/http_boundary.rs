@@ -100,9 +100,9 @@ async fn integration_note_generate_rejects_wrong_model_kind() -> Result<(), Box<
 
 #[tokio::test]
 async fn integration_issue_report_requires_auth() -> Result<(), Box<dyn Error>> {
-    let response = send(json_request(
+    let response = send(multipart_request_with_auth(
         "/v1/issue-reports",
-        &serde_json::json!({ "description": "The recorder freezes" }),
+        multipart_body([text_part("description", "The recorder freezes")]),
         None,
     )?)
     .await;
@@ -116,10 +116,9 @@ async fn integration_issue_report_requires_auth() -> Result<(), Box<dyn Error>> 
 
 #[tokio::test]
 async fn integration_issue_report_rejects_blank_description() -> Result<(), Box<dyn Error>> {
-    let response = send(json_request(
+    let response = send(multipart_request(
         "/v1/issue-reports",
-        &serde_json::json!({ "description": "   " }),
-        Some(AUTHORIZATION),
+        multipart_body([text_part("description", "   ")]),
     )?)
     .await;
 
@@ -131,22 +130,30 @@ async fn integration_issue_report_rejects_blank_description() -> Result<(), Box<
 }
 
 #[tokio::test]
-async fn integration_issue_report_delivers_to_the_sink() -> Result<(), Box<dyn Error>> {
+async fn integration_issue_report_delivers_attachments_to_the_sink() -> Result<(), Box<dyn Error>> {
     let sink = Arc::new(RecordingIssueReportSink::default());
     let router = router(test_state_with_issue_sink(sink.clone(), test_attestation()));
 
     let response = match router
-        .oneshot(json_request(
+        .oneshot(multipart_request(
             "/v1/issue-reports",
-            &serde_json::json!({
-                "description": "The recorder freezes after a long meeting",
-                "agentDiagnosis": "Likely the audio capture thread is blocked",
-                "attachmentNames": ["screenshot.png"],
-                "sessionId": "session-9",
-                "appVersion": "0.0.5",
-                "platform": "macos"
-            }),
-            Some(AUTHORIZATION),
+            multipart_body([
+                text_part("description", "The recorder freezes after a long meeting"),
+                text_part(
+                    "agentDiagnosis",
+                    "Likely the audio capture thread is blocked",
+                ),
+                text_part("attachmentName", "screenshot.png"),
+                text_part("sessionId", "session-9"),
+                text_part("appVersion", "0.0.5"),
+                text_part("platform", "macos"),
+                typed_file_part(
+                    "attachment",
+                    "screenshot.png",
+                    "image/png",
+                    b"fake-png-bytes".to_vec(),
+                ),
+            ]),
         )?)
         .await
     {
@@ -174,6 +181,10 @@ async fn integration_issue_report_delivers_to_the_sink() -> Result<(), Box<dyn E
     );
     assert_eq!(reports[0].attachment_names, vec!["screenshot.png"]);
     assert_eq!(reports[0].session_id.as_deref(), Some("session-9"));
+    assert_eq!(reports[0].attachments.len(), 1);
+    assert_eq!(reports[0].attachments[0].name, "screenshot.png");
+    assert_eq!(reports[0].attachments[0].content_type, "image/png");
+    assert_eq!(reports[0].attachments[0].bytes, b"fake-png-bytes".to_vec());
     Ok(())
 }
 
@@ -445,15 +456,22 @@ fn get_request(uri: &str) -> Result<Request<Body>, axum::http::Error> {
 }
 
 fn multipart_request(uri: &str, body: Vec<u8>) -> Result<Request<Body>, axum::http::Error> {
-    Request::builder()
-        .method(Method::POST)
-        .uri(uri)
-        .header(header::AUTHORIZATION, AUTHORIZATION)
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={}", boundary()),
-        )
-        .body(Body::from(body))
+    multipart_request_with_auth(uri, body, Some(AUTHORIZATION))
+}
+
+fn multipart_request_with_auth(
+    uri: &str,
+    body: Vec<u8>,
+    authorization: Option<&str>,
+) -> Result<Request<Body>, axum::http::Error> {
+    let mut builder = Request::builder().method(Method::POST).uri(uri).header(
+        header::CONTENT_TYPE,
+        format!("multipart/form-data; boundary={}", boundary()),
+    );
+    if let Some(authorization) = authorization {
+        builder = builder.header(header::AUTHORIZATION, authorization);
+    }
+    builder.body(Body::from(body))
 }
 
 async fn response_json(
@@ -480,6 +498,7 @@ enum MultipartPart {
     File {
         name: &'static str,
         filename: &'static str,
+        content_type: &'static str,
         bytes: Vec<u8>,
     },
 }
@@ -489,9 +508,19 @@ fn text_part(name: &'static str, value: &'static str) -> MultipartPart {
 }
 
 fn file_part(name: &'static str, filename: &'static str, bytes: Vec<u8>) -> MultipartPart {
+    typed_file_part(name, filename, "audio/wav", bytes)
+}
+
+fn typed_file_part(
+    name: &'static str,
+    filename: &'static str,
+    content_type: &'static str,
+    bytes: Vec<u8>,
+) -> MultipartPart {
     MultipartPart::File {
         name,
         filename,
+        content_type,
         bytes,
     }
 }
@@ -511,11 +540,12 @@ fn multipart_body<const N: usize>(parts: [MultipartPart; N]) -> Vec<u8> {
             MultipartPart::File {
                 name,
                 filename,
+                content_type,
                 bytes,
             } => {
                 body.extend_from_slice(
                     format!(
-                        "Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: audio/wav\r\n\r\n"
+                        "Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
                     )
                     .as_bytes(),
                 );

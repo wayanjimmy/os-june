@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use scribe_config::IssueReportsConfig;
 use scribe_domain::{DomainError, IssueReport, IssueReportSink};
 use serde::Serialize;
@@ -46,7 +47,7 @@ impl IssueReportSink for WebhookIssueReportSink {
         tracing::info!(
             user_id = %report.user_id.0,
             has_diagnosis = report.agent_diagnosis.is_some(),
-            attachments = report.attachment_names.len(),
+            attachments = report.attachments.len(),
             "issue_reports: report forwarded to webhook"
         );
         Ok(())
@@ -65,6 +66,9 @@ impl IssueReportSink for LogIssueReportSink {
             description = %report.description,
             agent_diagnosis = report.agent_diagnosis.as_deref().unwrap_or(""),
             attachment_names = ?report.attachment_names,
+            // The Debug impl reports name/type/length only — uploaded bytes
+            // never reach the logs.
+            attachments = ?report.attachments,
             session_id = report.session_id.as_deref().unwrap_or(""),
             app_version = report.app_version.as_deref().unwrap_or(""),
             platform = report.platform.as_deref().unwrap_or(""),
@@ -80,9 +84,17 @@ struct IssueReportWire<'a> {
     description: &'a str,
     agent_diagnosis: Option<&'a str>,
     attachment_names: &'a [String],
+    attachments: Vec<AttachmentWire<'a>>,
     session_id: Option<&'a str>,
     app_version: Option<&'a str>,
     platform: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct AttachmentWire<'a> {
+    name: &'a str,
+    content_type: &'a str,
+    bytes_base64: String,
 }
 
 impl<'a> From<&'a IssueReport> for IssueReportWire<'a> {
@@ -92,6 +104,15 @@ impl<'a> From<&'a IssueReport> for IssueReportWire<'a> {
             description: &report.description,
             agent_diagnosis: report.agent_diagnosis.as_deref(),
             attachment_names: &report.attachment_names,
+            attachments: report
+                .attachments
+                .iter()
+                .map(|attachment| AttachmentWire {
+                    name: &attachment.name,
+                    content_type: &attachment.content_type,
+                    bytes_base64: BASE64.encode(&attachment.bytes),
+                })
+                .collect(),
             session_id: report.session_id.as_deref(),
             app_version: report.app_version.as_deref(),
             platform: report.platform.as_deref(),
@@ -112,6 +133,11 @@ mod tests {
             description: "The recorder freezes".to_string(),
             agent_diagnosis: Some("Likely the audio capture thread".to_string()),
             attachment_names: vec!["screenshot.png".to_string()],
+            attachments: vec![scribe_domain::IssueReportAttachment {
+                name: "screenshot.png".to_string(),
+                content_type: "image/png".to_string(),
+                bytes: b"png-bytes".to_vec(),
+            }],
             session_id: Some("session-1".to_string()),
             app_version: Some("0.0.5".to_string()),
             platform: Some("macos".to_string()),
@@ -136,6 +162,11 @@ mod tests {
                 "description": "The recorder freezes",
                 "agent_diagnosis": "Likely the audio capture thread",
                 "attachment_names": ["screenshot.png"],
+                "attachments": [{
+                    "name": "screenshot.png",
+                    "content_type": "image/png",
+                    "bytes_base64": BASE64.encode(b"png-bytes"),
+                }],
             })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)

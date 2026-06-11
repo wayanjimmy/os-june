@@ -773,6 +773,9 @@ export type SubmitIssueReportRequest = {
   /** June's diagnostic assessment from the report session, when available. */
   agentDiagnosis?: string;
   attachmentNames: string[];
+  /** Workspace paths of the attached files; their bytes are uploaded with
+   * the report. */
+  attachmentPaths: string[];
   sessionId?: string;
 };
 

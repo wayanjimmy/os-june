@@ -616,6 +616,9 @@ function issueReportPrompt(report: string) {
 type PendingIssueReport = {
   description: string;
   attachmentNames: string[];
+  /** Workspace paths captured at submit, so the files can be uploaded with
+   * the report even after the composer clears its attachment chips. */
+  attachmentPaths: string[];
 };
 
 type AgentDeleteSessionDetail = {
@@ -1645,6 +1648,9 @@ export function AgentWorkspace({
                 attachmentNames: attachments.map(
                   (attachment) => attachment.name,
                 ),
+                attachmentPaths: attachments.map(
+                  (attachment) => attachment.path,
+                ),
               },
             }
           : undefined,
@@ -1860,6 +1866,7 @@ export function AgentWorkspace({
         description: report.description,
         agentDiagnosis,
         attachmentNames: report.attachmentNames,
+        attachmentPaths: report.attachmentPaths,
         sessionId,
       });
       setIssueReportNotice(

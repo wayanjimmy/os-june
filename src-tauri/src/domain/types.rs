@@ -585,6 +585,10 @@ pub struct SubmitIssueReportRequest {
     pub agent_diagnosis: Option<String>,
     #[serde(default)]
     pub attachment_names: Vec<String>,
+    /// Local paths of the attached files (already imported into the Hermes
+    /// workspace); their bytes are uploaded with the report.
+    #[serde(default)]
+    pub attachment_paths: Vec<String>,
     #[serde(default)]
     pub session_id: Option<String>,
 }

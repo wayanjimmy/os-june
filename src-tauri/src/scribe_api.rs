@@ -531,18 +531,9 @@ pub async fn suggest_agent_session_title(prompt: &str) -> Result<String, AppErro
     })
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IssueReportWireRequest<'a> {
-    description: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_diagnosis: Option<&'a str>,
-    attachment_names: &'a [String],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<&'a str>,
-    app_version: &'a str,
-    platform: &'a str,
-}
+// Matches the server's per-attachment cap; bigger files are listed by name
+// in the report but their bytes stay local.
+const ISSUE_ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
 
 pub async fn submit_issue_report(
     request: &crate::domain::types::SubmitIssueReportRequest,
@@ -555,18 +546,74 @@ pub async fn submit_issue_report(
             "Cannot send an empty issue report.",
         ));
     }
-    post_json(
-        "/v1/issue-reports",
-        &IssueReportWireRequest {
-            description,
-            agent_diagnosis: request.agent_diagnosis.as_deref(),
-            attachment_names: &request.attachment_names,
-            session_id: request.session_id.as_deref(),
-            app_version,
-            platform: std::env::consts::OS,
-        },
-    )
-    .await
+    let mut form = Form::new()
+        .text("description", description.to_string())
+        .text("appVersion", app_version.to_string())
+        .text("platform", std::env::consts::OS);
+    if let Some(session_id) = request
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        form = form.text("sessionId", session_id.to_string());
+    }
+    if let Some(diagnosis) = request
+        .agent_diagnosis
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        form = form.text("agentDiagnosis", diagnosis.to_string());
+    }
+    for name in &request.attachment_names {
+        form = form.text("attachmentName", name.clone());
+    }
+    // Attachment uploads are best-effort: an unreadable or oversized file
+    // must not block the report, and its name above still tells the team it
+    // existed.
+    for path in &request.attachment_paths {
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("skipping unreadable issue report attachment {path}: {error}");
+                continue;
+            }
+        };
+        if bytes.is_empty() || bytes.len() > ISSUE_ATTACHMENT_MAX_BYTES {
+            eprintln!(
+                "skipping issue report attachment {path}: {} bytes",
+                bytes.len()
+            );
+            continue;
+        }
+        let filename = Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".to_string());
+        let part = Part::bytes(bytes)
+            .file_name(filename)
+            .mime_str(issue_attachment_mime(path))
+            .map_err(|error| AppError::new("issue_report_attachment_invalid", error.to_string()))?;
+        form = form.part("attachment", part);
+    }
+    post_multipart("/v1/issue-reports", form).await
+}
+
+fn issue_attachment_mime(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase());
+    match extension.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("heic") => "image/heic",
+        Some("pdf") => "application/pdf",
+        Some("txt" | "log") => "text/plain",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Plain-language explanation of a pending approval request, written by the

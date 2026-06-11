@@ -340,6 +340,14 @@ describe("AgentWorkspace", () => {
     );
     await user.clear(composer);
     await user.type(composer, "The recorder crashes after long meetings");
+    const form = document.querySelector(".agent-composer");
+    expect(form).not.toBeNull();
+    fireEvent.drop(form as HTMLFormElement, {
+      dataTransfer: {
+        files: [new File(["png"], "screenshot.png", { type: "image/png" })],
+      },
+    });
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Start session" }));
 
     // June gets the investigation framing, with the user's words inside it.
@@ -382,7 +390,10 @@ describe("AgentWorkspace", () => {
       expect(mocks.submitIssueReport).toHaveBeenCalledWith({
         description: "The recorder crashes after long meetings",
         agentDiagnosis: "The screenshot shows the recorder stuck on saving.",
-        attachmentNames: [],
+        attachmentNames: ["screenshot.png"],
+        attachmentPaths: [
+          "/Users/junho/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/screenshot.png",
+        ],
         sessionId: "session-2",
       }),
     );

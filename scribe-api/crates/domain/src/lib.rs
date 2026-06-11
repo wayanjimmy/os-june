@@ -168,10 +168,34 @@ pub struct IssueReport {
     pub user_id: UserId,
     pub description: String,
     pub agent_diagnosis: Option<String>,
+    /// Names of everything the user attached, including files whose bytes
+    /// were too large or unreadable to upload.
     pub attachment_names: Vec<String>,
+    /// The attachment files (typically screenshots) that were uploaded.
+    pub attachments: Vec<IssueReportAttachment>,
     pub session_id: Option<String>,
     pub app_version: Option<String>,
     pub platform: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct IssueReportAttachment {
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Manual Debug: the bytes are image-sized payloads that must never be
+/// dumped into logs or error messages.
+impl std::fmt::Debug for IssueReportAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IssueReportAttachment")
+            .field("name", &self.name)
+            .field("content_type", &self.content_type)
+            .field("byte_len", &self.bytes.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
