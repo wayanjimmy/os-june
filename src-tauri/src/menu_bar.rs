@@ -6,6 +6,13 @@ use tauri::{
 };
 
 const TRAY_ID: &str = "agent-menu-bar";
+
+/// The June logo mark as a macOS template image (black glyph on transparent,
+/// rendered from icons/tray-icon-template.svg). The menu bar must show the
+/// same mark as the app icon — but the app icon itself can't be used
+/// directly: template rendering keeps only the alpha channel, so the icon's
+/// opaque squircle background becomes a solid blob instead of the glyph.
+const TRAY_ICON_TEMPLATE_PNG: &[u8] = include_bytes!("../icons/tray-icon-template.png");
 const AGENT_MENU_BAR_STATE_EVENT: &str = "scribe:menu-bar:agent-state";
 const AGENT_MENU_BAR_NEW_SESSION_EVENT: &str = "scribe:menu-bar:new-agent-session";
 const AGENT_MENU_BAR_OPEN_SESSION_EVENT: &str = "scribe:menu-bar:open-agent-session";
@@ -73,8 +80,17 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
         tray_builder = tray_builder.title(title);
     }
 
-    if let Some(icon) = app.handle().default_window_icon().cloned() {
-        tray_builder = tray_builder.icon(icon).icon_as_template(true);
+    match tauri::image::Image::from_bytes(TRAY_ICON_TEMPLATE_PNG) {
+        Ok(icon) => {
+            tray_builder = tray_builder.icon(icon).icon_as_template(true);
+        }
+        // The embedded asset can only fail to decode if it was corrupted at
+        // build time; a wrong-looking menu bar item beats a missing one.
+        Err(_) => {
+            if let Some(icon) = app.handle().default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon).icon_as_template(true);
+            }
+        }
     }
 
     let tray = tray_builder.build(app)?;
@@ -354,6 +370,31 @@ fn escape_menu_text(value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_template_icon_is_a_real_template_image() {
+        let icon = tauri::image::Image::from_bytes(TRAY_ICON_TEMPLATE_PNG)
+            .expect("embedded tray template PNG must decode");
+        assert_eq!(icon.width(), icon.height(), "menu bar icons are square");
+        // macOS template rendering uses only the alpha channel: the mark must
+        // be opaque and the background transparent, or the menu bar shows a
+        // solid blob (the bug this asset exists to fix). Both must be present.
+        let alphas: Vec<u8> = icon.rgba().chunks(4).map(|px| px[3]).collect();
+        assert!(
+            alphas.iter().any(|alpha| *alpha == 0),
+            "template needs a transparent background"
+        );
+        assert!(
+            alphas.iter().any(|alpha| *alpha == 255),
+            "template needs an opaque mark"
+        );
+        // Corners stay transparent — an opaque squircle background (the app
+        // icon's shape) would fail here.
+        let side = icon.width() as usize;
+        for corner in [0, side - 1, side * (side - 1), side * side - 1] {
+            assert_eq!(alphas[corner], 0, "corner pixels must be transparent");
+        }
+    }
 
     #[test]
     fn tray_title_uses_active_agent_status() {
