@@ -2,6 +2,7 @@ import {
   type HTMLAttributes,
   type ReactNode,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -38,9 +39,21 @@ type HoverTipProps = HTMLAttributes<HTMLSpanElement> & {
  * letting it drift off its anchor.
  */
 export function HoverTip({ tip, children, ...spanProps }: HoverTipProps) {
+  const {
+    "aria-describedby": ariaDescribedBy,
+    onBlur,
+    onFocus,
+    onMouseEnter,
+    onMouseLeave,
+    ...restSpanProps
+  } = spanProps;
   const anchorRef = useRef<HTMLSpanElement | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
+  const tooltipId = useId();
   const [position, setPosition] = useState<TipPosition>();
+  const describedBy = [ariaDescribedBy, position ? tooltipId : null]
+    .filter(Boolean)
+    .join(" ");
 
   function cancelHoverIntent() {
     if (hoverTimerRef.current !== null) {
@@ -93,16 +106,30 @@ export function HoverTip({ tip, children, ...spanProps }: HoverTipProps) {
   return (
     <span
       ref={anchorRef}
-      {...spanProps}
-      onMouseEnter={showAfterHoverIntent}
-      onMouseLeave={hide}
-      onFocus={show}
-      onBlur={hide}
+      {...restSpanProps}
+      aria-describedby={describedBy}
+      onMouseEnter={(event) => {
+        onMouseEnter?.(event);
+        showAfterHoverIntent();
+      }}
+      onMouseLeave={(event) => {
+        onMouseLeave?.(event);
+        hide();
+      }}
+      onFocus={(event) => {
+        onFocus?.(event);
+        show();
+      }}
+      onBlur={(event) => {
+        onBlur?.(event);
+        hide();
+      }}
     >
       {children}
       {position
         ? createPortal(
             <span
+              id={tooltipId}
               className="hover-tip"
               role="tooltip"
               data-side={position.side}
