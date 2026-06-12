@@ -75,9 +75,16 @@ Your environment: sessions run by default inside a macOS kernel sandbox (Seatbel
 
 /// Appended after the sandbox section when the user has NOT enabled Agent
 /// CLI access: the agent must recognize CLI failures as sandbox-caused and
-/// say so instead of misdiagnosing them as the user's auth problem.
+/// say so instead of misdiagnosing them as the user's auth problem — and it
+/// can request the fix in-chat via a literal token the app turns into a
+/// one-click approval card. The agent itself can never flip the setting:
+/// the flag file lives outside every sandbox write root by design, so the
+/// jailed process cannot rewrite the policy that governs it.
+///
+/// `AGENT_CLI_ACCESS_REQUEST_TOKEN` in `src/lib/agent-cli-access.ts` must
+/// match the token spelled out below.
 const JUNE_SOUL_CLI_BLOCKED_MD: &str = r#"
-Agent CLIs (Claude Code, Codex, Gemini, opencode): in sandboxed sessions their state folders (~/.claude and ~/.claude.json, ~/.codex, ~/.gemini, opencode's config and state) are write-blocked like the rest of the user's files. Those tools then fail to save sessions or store refreshed logins, and often report "not logged in" even when the user is. When a CLI fails this way, name the sandbox as the cause first, then give the user their real options: enable "Agent CLI access" in Settings, Agent tab (covers new sessions), or start this work in an Unrestricted session. Interactive logins (for example `claude /login`) are browser flows you can never complete; the user runs those once in their own terminal.
+Agent CLIs (Claude Code, Codex, Gemini, opencode): in sandboxed sessions their state folders (~/.claude and ~/.claude.json, ~/.codex, ~/.gemini, opencode's config and state) are write-blocked like the rest of the user's files. Those tools then fail to save sessions or store refreshed logins, and often report "not logged in" even when the user is. When a CLI fails this way, name the sandbox as the cause first, then request the fix directly: put the literal token [REQUEST:AGENT_CLI_ACCESS] on its own line in your reply. The June app replaces that token with an approval card; one click enables "Agent CLI access" in Settings, restarts the sandboxed runtime with those folders writable, and prompts you to retry. Use the token only for this setting and at most once per reply. The user can instead flip it themselves in Settings, Agent tab, or run the work in an Unrestricted session. Interactive logins (for example `claude /login`) are browser flows you can never complete; the user runs those once in their own terminal.
 "#;
 
 /// Appended after the sandbox section when the user HAS enabled Agent CLI
@@ -2970,9 +2977,11 @@ mod tests {
         assert!(soul.contains("Seatbelt"));
         assert!(soul.contains("write-jail"));
         assert!(soul.contains("operation not permitted"));
-        // CLI access off: the soul teaches the failure mode and the remedy.
+        // CLI access off: the soul teaches the failure mode and the remedy,
+        // including the in-chat request token the app renders as a card.
         assert!(soul.contains("Agent CLI access"));
         assert!(soul.contains("name the sandbox as the cause"));
+        assert!(soul.contains("[REQUEST:AGENT_CLI_ACCESS]"));
         assert!(!soul.contains("first-class job"));
     }
 
@@ -2988,6 +2997,8 @@ mod tests {
         // Both variants tell June it can never complete interactive logins.
         assert!(soul.contains("claude /login"));
         assert!(!soul.contains("name the sandbox as the cause"));
+        // Access already granted: there is nothing to request.
+        assert!(!soul.contains("[REQUEST:AGENT_CLI_ACCESS]"));
     }
 
     #[test]

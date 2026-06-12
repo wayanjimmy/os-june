@@ -105,6 +105,7 @@ vi.mock("../lib/tauri", () => ({
   providerModelSettings: vi.fn(async () => ({
     settings: { generationModel: "" },
   })),
+  hermesAgentCliAccess: vi.fn(async () => ({ enabled: false })),
   listVeniceModels: vi.fn(async () => ({
     mode: "generation",
     modelType: "text",

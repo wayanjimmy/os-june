@@ -10,6 +10,7 @@ import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconFolder1 } from "central-icons/IconFolder1";
 import { IconFolders } from "central-icons/IconFolders";
+import { IconConsole } from "central-icons/IconConsole";
 import { IconShieldCheck } from "central-icons/IconShieldCheck";
 import { IconStopCircle } from "central-icons/IconStopCircle";
 import { IconToolbox } from "central-icons/IconToolbox";
@@ -83,6 +84,7 @@ import {
   hermesBridgeMessagingPlatforms,
   hermesBridgeFilePreview,
   hermesBridgeFileText,
+  hermesAgentCliAccess,
   hermesBridgeSkills,
   hermesBridgeStatus,
   hermesBridgeToolsets,
@@ -95,6 +97,7 @@ import {
   providerModelSettings,
   retryAgentTask,
   sendAgentMessage,
+  setHermesAgentCliAccess,
   setVeniceModel,
   startHermesBridge,
   submitIssueReport,
@@ -169,6 +172,11 @@ import {
   rememberSessionMode,
   sessionUnrestricted,
 } from "../../lib/agent-session-modes";
+import {
+  AGENT_CLI_ACCESS_ENABLED_MESSAGE,
+  hasAgentCliAccessRequest,
+  stripAgentCliAccessRequest,
+} from "../../lib/agent-cli-access";
 import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
@@ -925,6 +933,26 @@ export function AgentWorkspace({
   const [clarifySubmitting, setClarifySubmitting] = useState<
     Record<string, string>
   >({});
+  // Whether "Agent CLI access" (Settings, Agent tab) is on — drives the
+  // in-chat request card June can raise via its soul token. undefined until
+  // the stored value loads, so a card never flashes the wrong state.
+  const [cliAccessEnabled, setCliAccessEnabled] = useState<boolean>();
+  const [cliAccessSubmitting, setCliAccessSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    hermesAgentCliAccess()
+      .then((status) => {
+        if (!cancelled) setCliAccessEnabled(status.enabled);
+      })
+      .catch(() => {
+        // Unknown stays unknown; the card keeps its actionable default.
+        if (!cancelled) setCliAccessEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Dev-tools response gallery: when set, the timeline is replaced by a labeled
   // catalog of every agent response part type. Toggled from the console via
   // window.__agentGallery() — see the effect below. The errors flag marks the
@@ -2698,6 +2726,26 @@ export function AgentWorkspace({
     }
   }
 
+  // One-click approval of June's in-chat [REQUEST:AGENT_CLI_ACCESS] card.
+  // The agent can never flip the setting itself (the flag lives outside the
+  // sandbox's write roots), so the click is the trust boundary: it persists
+  // the opt-in, which also retires the sandboxed runtime, and the follow-up
+  // send respawns it with the CLI state folders writable and hands the
+  // conversation back to June to retry.
+  async function enableCliAccessFromChat() {
+    setCliAccessSubmitting(true);
+    try {
+      await setHermesAgentCliAccess(true);
+      setCliAccessEnabled(true);
+      await submitHermesSession(AGENT_CLI_ACCESS_ENABLED_MESSAGE);
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setCliAccessSubmitting(false);
+    }
+  }
+
   function pushLiveEvent(key: string, event: HermesGatewayEvent) {
     const liveEvent = { ...event, receivedAt: new Date().toISOString() };
     const nextEvents = [...(liveEventsRef.current[key] ?? []), liveEvent].slice(
@@ -3683,6 +3731,11 @@ export function AgentWorkspace({
           artifacts={turnArtifacts.get(turn.id)}
           approvalSubmitting={approvalSubmitting}
           clarifySubmitting={clarifySubmitting}
+          cliAccess={{
+            enabled: cliAccessEnabled,
+            submitting: cliAccessSubmitting,
+            onEnable: () => void enableCliAccessFromChat(),
+          }}
           thinkingOpen={thinkingOpen}
           onThinkingOpenChange={setThinkingOpen}
           onDownloadArtifact={downloadArtifact}
@@ -3767,6 +3820,11 @@ export function AgentWorkspace({
             artifacts={turnArtifacts.get(turn.id)}
             approvalSubmitting={approvalSubmitting}
             clarifySubmitting={clarifySubmitting}
+            cliAccess={{
+              enabled: cliAccessEnabled,
+              submitting: cliAccessSubmitting,
+              onEnable: () => void enableCliAccessFromChat(),
+            }}
             thinkingOpen={thinkingOpen}
             onThinkingOpenChange={setThinkingOpen}
             onDownloadArtifact={downloadArtifact}
@@ -5546,6 +5604,7 @@ function AgentChatTurnRow({
   approvalSubmitting,
   artifacts,
   clarifySubmitting,
+  cliAccess,
   thinkingOpen,
   onApproval,
   onClarify,
@@ -5559,6 +5618,9 @@ function AgentChatTurnRow({
   approvalSubmitting: Partial<Record<string, AgentApprovalChoice>>;
   artifacts?: AgentArtifact[];
   clarifySubmitting: Record<string, string>;
+  /** State + handler for June's in-chat Agent CLI access request card.
+   * Optional so the dev gallery can render rows without the live setting. */
+  cliAccess?: AgentCliAccessCardProps;
   thinkingOpen: (key: string) => boolean;
   onApproval: (
     part: Extract<AgentChatPart, { type: "approval" }>,
@@ -5691,9 +5753,24 @@ function AgentChatTurnRow({
         ) : null}
         {turn.parts.map((part, index) =>
           part.type === "text" ? (
-            <div key={`${turn.id}:text:${index}`}>
-              <MarkdownContent markdown={part.text} repairProse />
-            </div>
+            hasAgentCliAccessRequest(part.text) ? (
+              // June's soul emits a literal token to request the Agent CLI
+              // access setting; the token renders as an approval card, never
+              // as text.
+              <div key={`${turn.id}:text:${index}`}>
+                {stripAgentCliAccessRequest(part.text) ? (
+                  <MarkdownContent
+                    markdown={stripAgentCliAccessRequest(part.text)}
+                    repairProse
+                  />
+                ) : null}
+                <AgentCliAccessCard cliAccess={cliAccess} />
+              </div>
+            ) : (
+              <div key={`${turn.id}:text:${index}`}>
+                <MarkdownContent markdown={part.text} repairProse />
+              </div>
+            )
           ) : part.type === "context" ? (
             <ContextCompactionPart
               key={`${turn.id}:context:${index}`}
@@ -5925,6 +6002,91 @@ function ClarifyPart({
             ) : null}
           </>
         ) : null}
+      </div>
+    </article>
+  );
+}
+
+type AgentCliAccessCardProps = {
+  /** undefined while the stored setting is still loading. */
+  enabled?: boolean;
+  submitting: boolean;
+  onEnable: () => void;
+};
+
+/** June asked to enable "Agent CLI access" via the literal token its soul
+ * teaches ([REQUEST:AGENT_CLI_ACCESS]). The agent can never flip the setting
+ * itself — the flag file sits outside every sandbox write root — so this
+ * card is the one-click, user-approved path. Resolution is derived from the
+ * live setting rather than stored per message: a revisited transcript shows
+ * "Enabled" once the grant is on, and re-offers the choice while it is off.
+ * Mirrors the approval card chrome. */
+function AgentCliAccessCard({
+  cliAccess,
+}: {
+  cliAccess?: AgentCliAccessCardProps;
+}) {
+  const [dismissed, setDismissed] = useState(false);
+  const enabled = cliAccess?.enabled === true;
+  const resolved = enabled || dismissed;
+  const busy = Boolean(cliAccess?.submitting);
+  return (
+    <article
+      className="agent-approval-card"
+      data-status={resolved ? "resolved" : "pending"}
+    >
+      <span className="agent-tool-icon">
+        <IconConsole size={14} />
+      </span>
+      <div>
+        <div className="agent-tool-title">
+          <span>Agent CLI access requested</span>
+          <span
+            className="agent-tool-live-status"
+            data-status={resolved ? "complete" : "running"}
+          >
+            {resolved ? "Resolved" : "Waiting"}
+          </span>
+        </div>
+        <p>
+          June wants write access to the state folders of your coding CLIs
+          (Claude Code, Codex, Gemini, opencode) so they stay logged in and
+          can save their work in sandboxed sessions. Those folders configure
+          software that also runs outside June's sandbox. Enabling turns on
+          "Agent CLI access" in Settings and restarts the sandboxed runtime.
+        </p>
+        {resolved ? (
+          <p
+            className="agent-approval-result"
+            data-choice={enabled ? "once" : "deny"}
+          >
+            {enabled ? (
+              <IconCheckmark1Small size={14} />
+            ) : (
+              <IconCrossMedium size={14} />
+            )}
+            {enabled ? "Agent CLI access enabled" : "Not now"}
+          </p>
+        ) : (
+          <div className="agent-approval-actions">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy || !cliAccess || cliAccess.enabled === undefined}
+              onClick={() => cliAccess?.onEnable()}
+            >
+              {busy ? "Enabling…" : "Enable Agent CLI access"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost agent-approval-deny"
+              disabled={busy}
+              onClick={() => setDismissed(true)}
+            >
+              Not now
+            </button>
+          </div>
+        )}
       </div>
     </article>
   );

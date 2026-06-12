@@ -63,6 +63,8 @@ const mocks = vi.hoisted(() => ({
   updateHermesBridgeMessagingPlatform: vi.fn(),
   deleteHermesSession: vi.fn(),
   listHermesSessionMessages: vi.fn(),
+  hermesAgentCliAccess: vi.fn(),
+  setHermesAgentCliAccess: vi.fn(),
   listHermesSessions: vi.fn(),
   gatewayRequest: vi.fn(),
   gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
@@ -94,6 +96,7 @@ vi.mock("../lib/tauri", () => ({
   hermesBridgeFilePreview: mocks.hermesBridgeFilePreview,
   hermesBridgeFileText: mocks.hermesBridgeFileText,
   hermesBridgeMessagingPlatforms: mocks.hermesBridgeMessagingPlatforms,
+  hermesAgentCliAccess: mocks.hermesAgentCliAccess,
   hermesBridgeSkills: mocks.hermesBridgeSkills,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
   hermesBridgeToolsets: mocks.hermesBridgeToolsets,
@@ -105,6 +108,7 @@ vi.mock("../lib/tauri", () => ({
   osAccountsTopUp: mocks.osAccountsTopUp,
   providerModelSettings: mocks.providerModelSettings,
   retryAgentTask: mocks.retryAgentTask,
+  setHermesAgentCliAccess: mocks.setHermesAgentCliAccess,
   setVeniceModel: mocks.setVeniceModel,
   saveAgentAssistantMessage: mocks.saveAgentAssistantMessage,
   saveAgentHermesSession: mocks.saveAgentHermesSession,
@@ -229,6 +233,7 @@ describe("AgentWorkspace", () => {
     );
     mocks.listHermesSessions.mockResolvedValue([existingSession]);
     mocks.listHermesSessionMessages.mockResolvedValue([]);
+    mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({ roots: [] });
     mocks.hermesBridgeFilePreview.mockResolvedValue(null);
     mocks.hermesBridgeFileText.mockResolvedValue(null);
@@ -804,6 +809,108 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace />);
 
     expect(await screen.findByText("CLI Run Tracking")).toBeInTheDocument();
+  });
+
+  it("renders June's CLI access request as a card and enables the setting", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "use the codex cli to say hi",
+        timestamp: "2026-06-12T10:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content:
+          "The sandbox blocks Codex's state folders.\n\n[REQUEST:AGENT_CLI_ACCESS]",
+        timestamp: "2026-06-12T10:00:05Z",
+      },
+    ]);
+    mocks.setHermesAgentCliAccess.mockResolvedValue({ enabled: true });
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(
+      await screen.findByText("Agent CLI access requested"),
+    ).toBeInTheDocument();
+    // The token renders as the card, never as literal text.
+    expect(screen.queryByText(/REQUEST:AGENT_CLI_ACCESS/)).toBeNull();
+    expect(
+      screen.getByText(/sandbox blocks Codex's state folders/),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Enable Agent CLI access" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setHermesAgentCliAccess).toHaveBeenCalledWith(true),
+    );
+    // June is told the grant is live, so it retries on the restarted runtime.
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringContaining("I enabled Agent CLI access"),
+      }),
+    );
+    expect(
+      await screen.findByText("Agent CLI access enabled"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the CLI access request as already granted when the setting is on", async () => {
+    mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: true });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "[REQUEST:AGENT_CLI_ACCESS]",
+        timestamp: "2026-06-12T10:00:05Z",
+      },
+    ]);
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(
+      await screen.findByText("Agent CLI access requested"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Agent CLI access enabled"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Enable Agent CLI access" }),
+    ).toBeNull();
+  });
+
+  it("dismisses the CLI access request without changing the setting", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Codex is blocked.\n\n[REQUEST:AGENT_CLI_ACCESS]",
+        timestamp: "2026-06-12T10:00:05Z",
+      },
+    ]);
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Not now" }),
+    );
+
+    expect(mocks.setHermesAgentCliAccess).not.toHaveBeenCalled();
+    // The card resolves quietly; nothing is sent into the session.
+    expect(await screen.findByText("Not now")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Enable Agent CLI access" }),
+    ).toBeNull();
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith(
+      "prompt.submit",
+      expect.anything(),
+    );
   });
 
   it("repairs gateway-glued contractions in assistant prose but not code or user text", async () => {
