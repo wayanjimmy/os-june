@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSettings } from "../components/settings/AppSettings";
@@ -892,6 +892,63 @@ describe("AppSettings", () => {
         pressCount: 1,
       }),
     );
+  });
+
+  it("captures a key chord from DOM keydown without the helper seeing keys", async () => {
+    // Key chords are read from the focused window's DOM: that is what lets
+    // the helper drop its keyDown monitors, whose presence triggered the
+    // macOS Input Monitoring ("keylogger") prompt on first launch.
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
+    const changeButtons = await screen.findAllByRole("button", {
+      name: "Change",
+    });
+    await user.click(changeButtons[0]);
+    await waitFor(() =>
+      expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+        type: "start_shortcut_capture",
+        pressCount: 1,
+      }),
+    );
+
+    fireEvent.keyDown(window, {
+      key: "p",
+      code: "KeyP",
+      ctrlKey: true,
+      altKey: true,
+    });
+
+    await waitFor(() =>
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith("push_to_talk", {
+        code: "KeyP",
+        label: "Ctrl+Opt+P",
+        modifiers: {
+          command: false,
+          control: true,
+          option: true,
+          shift: false,
+          function: false,
+        },
+        pressCount: 1,
+      }),
+    );
+    // The chord was decided in the DOM, so the helper capture gets cancelled.
+    expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+      type: "cancel_shortcut_capture",
+    });
   });
 
   it("resets customized dictation shortcuts and hides reset for defaults", async () => {
