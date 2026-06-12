@@ -30,11 +30,12 @@ const SCRIBE_HERMES_DISABLE_SANDBOX_ENV: &str = "SCRIBE_HERMES_DISABLE_SANDBOX";
 // Referenced by the spawn match arm on every target; only ever reached when
 // `prepare_sandbox` returns a profile, which it only does on macOS.
 const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
-const HERMES_AGENT_INSTALL_COMMIT: &str = "31c40c72c03cb11d5e596d015d61e7dd118cecee";
+// v2026.6.5 — see the bump PR for the audited pin→tag compatibility delta.
+const HERMES_AGENT_INSTALL_COMMIT: &str = "3c231eb3979ab9c57d5cd6d02f1d577a3b718b43";
 const HERMES_SOURCE_TARBALL_URL: &str =
-    "https://github.com/NousResearch/hermes-agent/archive/31c40c72c03cb11d5e596d015d61e7dd118cecee.tar.gz";
+    "https://github.com/NousResearch/hermes-agent/archive/3c231eb3979ab9c57d5cd6d02f1d577a3b718b43.tar.gz";
 const HERMES_SOURCE_TARBALL_SHA256: &str =
-    "287ead740a444d7e8c8e00a6d6e073d9b3329034f649a07b42e0a3f5b14686e4";
+    "c36c4b4a205b09673a6bc742c2c4361bac6e92139e795378a4335422458c3a43";
 const FILESYSTEM_MAX_DEPTH: usize = 2;
 const FILESYSTEM_MAX_ENTRIES_PER_DIR: usize = 80;
 const HERMES_IMPORT_MAX_BYTES: u64 = 50 * 1024 * 1024;
@@ -571,10 +572,12 @@ async fn start_hermes_bridge_inner(
         );
     }
     let port_string = port.to_string();
-    let hermes_args: [&str; 7] = [
+    // No --tui: upstream removed the flag from the dashboard subcommand in
+    // v2026.6.5 (cae6b5486) — the embedded chat gateway (/api/ws) is always
+    // enabled now, and passing the flag is an argparse error.
+    let hermes_args: [&str; 6] = [
         "dashboard",
         "--no-open",
-        "--tui",
         "--host",
         "127.0.0.1",
         "--port",

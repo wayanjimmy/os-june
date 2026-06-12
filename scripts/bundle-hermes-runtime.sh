@@ -133,7 +133,15 @@ if ! (cd "$out/hermes-agent/web" && npm ci --no-audit --no-fund && npm run build
   tail -40 "$web_log" >&2
   die "web UI build failed (full log: $web_log)"
 fi
-rm -rf "$out/hermes-agent/web/node_modules"
+# npm workspaces (root package.json lists web/, ui-tui/, apps/*) hoist the
+# install to the REPO ROOT, so pruning web/node_modules alone leaves a root
+# node_modules full of .bin symlinks — which the no-symlinks gate below
+# rejects. None of it is needed at runtime: the dashboard serves the
+# prebuilt web_dist, and the Node TUI is an interactive-terminal surface
+# June never launches.
+rm -rf "$out/hermes-agent/node_modules" \
+  "$out/hermes-agent/web/node_modules" \
+  "$out/hermes-agent/ui-tui/node_modules"
 [ -f "$out/hermes-agent/hermes_cli/web_dist/index.html" ] || die "web_dist missing after build"
 
 # ---- relocatable CPython + hash-verified deps --------------------------------
