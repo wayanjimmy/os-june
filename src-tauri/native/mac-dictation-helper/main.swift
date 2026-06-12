@@ -358,8 +358,13 @@ final class ShortcutKeyMonitor {
     private static let doublePressWindow: TimeInterval = 0.34
 
     private var globalMonitor: Any?
-    private var eventTap: CFMachPort?
-    private var eventTapRunLoopSource: CFRunLoopSource?
+    private var carbonHandlerRef: EventHandlerRef?
+    /// Registered Carbon hot keys by their EventHotKeyID.id. Carbon's
+    /// RegisterEventHotKey delivers pressed/released edges for key chords
+    /// with NO permission prompt, unlike keyDown monitors and event taps,
+    /// which both summon the Input Monitoring ("keylogger") dialog.
+    private var carbonHotKeys: [UInt32: (identity: ShortcutIdentity, ref: EventHotKeyRef)] = [:]
+    private var nextCarbonHotKeyId: UInt32 = 1
     private var shortcuts: [ShortcutKind: MonitoredShortcut] = [
         .pushToTalk: .defaultPushToTalk,
         .toggle: MonitoredShortcut(
@@ -393,26 +398,19 @@ final class ShortcutKeyMonitor {
     private init() {}
 
     func start() {
-        guard globalMonitor == nil, eventTap == nil else {
+        guard globalMonitor == nil else {
             return
         }
 
         startGlobalMonitor()
-        startEventTap()
+        installCarbonHotKeyHandler()
+        registerCarbonHotKeys()
 
-        if globalMonitor == nil, eventTap == nil {
+        if globalMonitor == nil {
             emit("fn_monitor_unavailable", [
                 "message": "Could not monitor global shortcut key events.",
             ])
         }
-    }
-
-    fileprivate func enableEventTap() {
-        guard let eventTap else {
-            return
-        }
-
-        CGEvent.tapEnable(tap: eventTap, enable: true)
     }
 
     /// A flagsChanged event names the key that changed (`keyCode`), and the
@@ -503,32 +501,9 @@ final class ShortcutKeyMonitor {
             && (!subset.function || current.function)
     }
 
-    fileprivate func handle(type: CGEventType, event: CGEvent) {
-        if isCapturingShortcut {
-            handleCapture(type: type, keyCode: keyCode(from: event), flags: event.flags)
-            return
-        }
-
-        switch type {
-        case .keyDown:
-            guard let identity = matchingIdentity(keyCode: keyCode(from: event), flags: event.flags) else {
-                return
-            }
-            handlePhysicalDown(identity: identity)
-        case .keyUp:
-            guard let identity = activeIdentity, keyCode(from: event) == identity.keyCode else {
-                return
-            }
-            handlePhysicalUp(identity: identity)
-        case .flagsChanged:
-            handleFlagsChanged(shortcutModifiers(from: event.flags), changedKeyCode: keyCode(from: event))
-        default:
-            break
-        }
-    }
-
     func setShortcut(_ nextShortcut: MonitoredShortcut, kind: ShortcutKind) {
         shortcuts[kind] = nextShortcut
+        registerCarbonHotKeys()
         cancelPendingPush()
         activeIdentity = nil
         activePushIdentity = nil
@@ -544,102 +519,118 @@ final class ShortcutKeyMonitor {
         activeIdentity = nil
         pendingOverlapIdentity = nil
         cancelPendingModifierOnlyCapture()
+        // A registered hot key consumes its chord system-wide, so the rebind
+        // UI's DOM would never see the user's current shortcut. Suspend them
+        // for the duration of the capture.
+        unregisterCarbonHotKeys()
         emit("shortcut_capture_started")
     }
 
     func cancelShortcutCapture() {
         isCapturingShortcut = false
         cancelPendingModifierOnlyCapture()
+        registerCarbonHotKeys()
         emit("shortcut_capture_cancelled")
     }
 
+    /// flagsChanged ONLY, deliberately: modifier traffic is visible to a
+    /// global monitor under the Accessibility permission June already holds,
+    /// while .keyDown/.keyUp in this mask is what made macOS demand Input
+    /// Monitoring on first launch. Key chords are watched by Carbon hot keys
+    /// instead (registerCarbonHotKeys), which need no permission at all.
     private func startGlobalMonitor() {
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown, .keyUp], handler: { [weak self] event in
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged], handler: { [weak self] event in
             self?.handle(event: event)
         })
     }
 
-    private func startEventTap() {
-        let mask = CGEventMask(
-            (1 << CGEventType.flagsChanged.rawValue)
-                | (1 << CGEventType.keyDown.rawValue)
-                | (1 << CGEventType.keyUp.rawValue)
-        )
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .tailAppendEventTap,
-            options: .listenOnly,
-            eventsOfInterest: mask,
-            callback: shortcutEventTapCallback,
-            userInfo: userInfo
-        ) else {
+    private func installCarbonHotKeyHandler() {
+        guard carbonHandlerRef == nil else {
             return
         }
+        var specs = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
+        ]
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetEventDispatcherTarget(), carbonHotKeyCallback, 2, &specs, userInfo, &carbonHandlerRef)
+    }
 
-        eventTap = tap
-        eventTapRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        if let eventTapRunLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetMain(), eventTapRunLoopSource, .commonModes)
+    private func unregisterCarbonHotKeys() {
+        for entry in carbonHotKeys.values {
+            UnregisterEventHotKey(entry.ref)
         }
-        CGEvent.tapEnable(tap: tap, enable: true)
+        carbonHotKeys.removeAll()
+    }
+
+    private func registerCarbonHotKeys() {
+        unregisterCarbonHotKeys()
+
+        for shortcut in shortcuts.values {
+            guard !shortcut.isModifierOnly else {
+                continue // flagsChanged path handles modifier-only chords.
+            }
+            guard !shortcut.modifiers.function else {
+                // Carbon has no fn modifier bit, and nothing permission-free
+                // can watch fn+key chords. Say so instead of silently dying.
+                emit("fn_monitor_unavailable", [
+                    "message": "The shortcut \(shortcut.label) combines Fn with another key, which is no longer supported. Pick a different shortcut in Settings.",
+                ])
+                continue
+            }
+            var carbonModifiers: UInt32 = 0
+            if shortcut.modifiers.command { carbonModifiers |= UInt32(cmdKey) }
+            if shortcut.modifiers.control { carbonModifiers |= UInt32(controlKey) }
+            if shortcut.modifiers.option { carbonModifiers |= UInt32(optionKey) }
+            if shortcut.modifiers.shift { carbonModifiers |= UInt32(shiftKey) }
+
+            var ref: EventHotKeyRef?
+            let hotKeyId = EventHotKeyID(signature: OSType(0x4A_44_48_4B), id: nextCarbonHotKeyId) // "JDHK"
+            let status = RegisterEventHotKey(
+                UInt32(shortcut.keyCode),
+                carbonModifiers,
+                hotKeyId,
+                GetEventDispatcherTarget(),
+                0,
+                &ref
+            )
+            if status == noErr, let ref {
+                carbonHotKeys[nextCarbonHotKeyId] = (ShortcutIdentity(shortcut), ref)
+            } else {
+                emit("fn_monitor_unavailable", [
+                    "message": "Could not register the shortcut \(shortcut.label).",
+                ])
+            }
+            nextCarbonHotKeyId += 1
+        }
+    }
+
+    fileprivate func handleCarbonHotKey(id: UInt32, pressed: Bool) {
+        guard !isCapturingShortcut, let entry = carbonHotKeys[id] else {
+            return
+        }
+        if pressed {
+            handlePhysicalDown(identity: entry.identity)
+        } else {
+            handlePhysicalUp(identity: entry.identity)
+        }
     }
 
     private func handle(event: NSEvent) {
-        if isCapturingShortcut {
-            handleCapture(type: event.type, keyCode: UInt16(event.keyCode), flags: event.modifierFlags)
+        guard event.type == .flagsChanged else {
             return
         }
-
-        switch event.type {
-        case .keyDown:
-            guard let identity = matchingIdentity(keyCode: UInt16(event.keyCode), flags: event.modifierFlags) else {
-                return
-            }
-            handlePhysicalDown(identity: identity)
-        case .keyUp:
-            guard let identity = activeIdentity, UInt16(event.keyCode) == identity.keyCode else {
-                return
-            }
-            handlePhysicalUp(identity: identity)
-        case .flagsChanged:
-            handleFlagsChanged(
-                shortcutModifiers(from: event.modifierFlags),
-                changedKeyCode: UInt16(event.keyCode)
-            )
-        default:
-            break
+        if isCapturingShortcut {
+            // Modifier-only chords (fn included) are captured here; key
+            // chords are captured by the focused June window's DOM, which
+            // sees ordinary keystrokes without any permission.
+            handleCapture(modifiers: shortcutModifiers(from: event.modifierFlags))
+            return
         }
-    }
-
-    private func handleCapture(type: CGEventType, keyCode: UInt16, flags: CGEventFlags) {
-        switch type {
-        case .keyDown:
-            captureShortcut(keyCode: keyCode, modifiers: shortcutModifiers(from: flags))
-        case .flagsChanged:
-            handleCapture(flags: flags)
-        default:
-            break
-        }
-    }
-
-    private func handleCapture(type: NSEvent.EventType, keyCode: UInt16, flags: NSEvent.ModifierFlags) {
-        switch type {
-        case .keyDown:
-            captureShortcut(keyCode: keyCode, modifiers: shortcutModifiers(from: flags))
-        case .flagsChanged:
-            handleCapture(flags: flags)
-        default:
-            break
-        }
-    }
-
-    private func handleCapture(flags: CGEventFlags) {
-        handleCapture(modifiers: shortcutModifiers(from: flags))
-    }
-
-    private func handleCapture(flags: NSEvent.ModifierFlags) {
-        handleCapture(modifiers: shortcutModifiers(from: flags))
+        handleFlagsChanged(
+            shortcutModifiers(from: event.modifierFlags),
+            changedKeyCode: UInt16(event.keyCode)
+        )
     }
 
     private func handleCapture(modifiers: ShortcutModifiers) {
@@ -648,32 +639,6 @@ final class ShortcutKeyMonitor {
         } else {
             cancelPendingModifierOnlyCapture()
         }
-    }
-
-    private func captureShortcut(keyCode: UInt16, modifiers: ShortcutModifiers) {
-        cancelPendingModifierOnlyCapture()
-        guard let (code, label) = keyCodeMetadata[keyCode] else {
-            emit("shortcut_capture_error", [
-                "message": "That key is not supported for global shortcuts.",
-            ])
-            return
-        }
-        guard modifiers.hasAny else {
-            emit("shortcut_capture_error", [
-                "message": "Shortcut must include Cmd, Ctrl, Opt, Shift, or Fn.",
-            ])
-            return
-        }
-
-        finishCapture(
-            MonitoredShortcut(
-                keyCode: keyCode,
-                code: code,
-                label: (modifiers.labelParts + [label]).joined(separator: "+"),
-                modifiers: modifiers,
-                pressCount: capturePressCount
-            )
-        )
     }
 
     private func scheduleModifierOnlyCapture(modifiers: ShortcutModifiers) {
@@ -711,6 +676,9 @@ final class ShortcutKeyMonitor {
 
         isCapturingShortcut = false
         cancelPendingModifierOnlyCapture()
+        // Resume the previous hot keys now; set_shortcut re-registers with
+        // the new chord once the frontend persists it.
+        registerCarbonHotKeys()
         emitJSON("shortcut_captured", [
             "shortcut": nextShortcut.payload,
         ])
@@ -720,26 +688,6 @@ final class ShortcutKeyMonitor {
         pendingModifierOnlyCapture?.cancel()
         pendingModifierOnlyCapture = nil
         pendingModifierOnlyModifiers = nil
-    }
-
-    private func matchingIdentity(keyCode: UInt16, flags: CGEventFlags) -> ShortcutIdentity? {
-        for shortcut in shortcuts.values where !shortcut.isModifierOnly {
-            guard keyCode == shortcut.keyCode, modifiersMatch(flags, shortcut.modifiers) else {
-                continue
-            }
-            return ShortcutIdentity(shortcut)
-        }
-        return nil
-    }
-
-    private func matchingIdentity(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> ShortcutIdentity? {
-        for shortcut in shortcuts.values where !shortcut.isModifierOnly {
-            guard keyCode == shortcut.keyCode, modifiersMatch(flags, shortcut.modifiers) else {
-                continue
-            }
-            return ShortcutIdentity(shortcut)
-        }
-        return nil
     }
 
     private func matchingModifierOnlyIdentity(_ current: ShortcutModifiers) -> ShortcutIdentity? {
@@ -888,36 +836,6 @@ final class ShortcutKeyMonitor {
     }
 }
 
-private func keyCode(from event: CGEvent) -> UInt16 {
-    UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-}
-
-private func modifiersMatch(_ flags: CGEventFlags, _ modifiers: ShortcutModifiers) -> Bool {
-    flags.contains(.maskCommand) == modifiers.command
-        && flags.contains(.maskControl) == modifiers.control
-        && flags.contains(.maskAlternate) == modifiers.option
-        && flags.contains(.maskShift) == modifiers.shift
-        && flags.contains(.maskSecondaryFn) == modifiers.function
-}
-
-private func modifiersMatch(_ flags: NSEvent.ModifierFlags, _ modifiers: ShortcutModifiers) -> Bool {
-    flags.contains(.command) == modifiers.command
-        && flags.contains(.control) == modifiers.control
-        && flags.contains(.option) == modifiers.option
-        && flags.contains(.shift) == modifiers.shift
-        && flags.contains(.function) == modifiers.function
-}
-
-private func shortcutModifiers(from flags: CGEventFlags) -> ShortcutModifiers {
-    ShortcutModifiers(
-        command: flags.contains(.maskCommand),
-        control: flags.contains(.maskControl),
-        option: flags.contains(.maskAlternate),
-        shift: flags.contains(.maskShift),
-        function: flags.contains(.maskSecondaryFn)
-    )
-}
-
 private func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> ShortcutModifiers {
     ShortcutModifiers(
         command: flags.contains(.command),
@@ -928,80 +846,30 @@ private func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> ShortcutMod
     )
 }
 
-private let keyCodeMetadata: [UInt16: (code: String, label: String)] = [
-    0x00: ("KeyA", "A"),
-    0x01: ("KeyS", "S"),
-    0x02: ("KeyD", "D"),
-    0x03: ("KeyF", "F"),
-    0x04: ("KeyH", "H"),
-    0x05: ("KeyG", "G"),
-    0x06: ("KeyZ", "Z"),
-    0x07: ("KeyX", "X"),
-    0x08: ("KeyC", "C"),
-    0x09: ("KeyV", "V"),
-    0x0b: ("KeyB", "B"),
-    0x0c: ("KeyQ", "Q"),
-    0x0d: ("KeyW", "W"),
-    0x0e: ("KeyE", "E"),
-    0x0f: ("KeyR", "R"),
-    0x10: ("KeyY", "Y"),
-    0x11: ("KeyT", "T"),
-    0x12: ("Digit1", "1"),
-    0x13: ("Digit2", "2"),
-    0x14: ("Digit3", "3"),
-    0x15: ("Digit4", "4"),
-    0x16: ("Digit6", "6"),
-    0x17: ("Digit5", "5"),
-    0x18: ("Equal", "="),
-    0x19: ("Digit9", "9"),
-    0x1a: ("Digit7", "7"),
-    0x1b: ("Minus", "-"),
-    0x1c: ("Digit8", "8"),
-    0x1d: ("Digit0", "0"),
-    0x1e: ("BracketRight", "]"),
-    0x1f: ("KeyO", "O"),
-    0x20: ("KeyU", "U"),
-    0x21: ("BracketLeft", "["),
-    0x22: ("KeyI", "I"),
-    0x23: ("KeyP", "P"),
-    0x24: ("Enter", "Return"),
-    0x25: ("KeyL", "L"),
-    0x26: ("KeyJ", "J"),
-    0x27: ("Quote", "'"),
-    0x28: ("KeyK", "K"),
-    0x29: ("Semicolon", ";"),
-    0x2a: ("Backslash", "\\"),
-    0x2b: ("Comma", ","),
-    0x2c: ("Slash", "/"),
-    0x2d: ("KeyN", "N"),
-    0x2e: ("KeyM", "M"),
-    0x2f: ("Period", "."),
-    0x30: ("Tab", "Tab"),
-    0x31: ("Space", "Space"),
-    0x32: ("Backquote", "`"),
-    0x33: ("Backspace", "Delete"),
-    0x35: ("Escape", "Esc"),
-    0x7a: ("F1", "F1"),
-    0x7b: ("ArrowLeft", "Left"),
-    0x7c: ("ArrowRight", "Right"),
-    0x7d: ("ArrowDown", "Down"),
-    0x7e: ("ArrowUp", "Up"),
-]
-
-private let shortcutEventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
-    guard let userInfo else {
-        return Unmanaged.passUnretained(event)
+private let carbonHotKeyCallback: EventHandlerUPP = { _, eventRef, userInfo in
+    guard let eventRef, let userInfo else {
+        return OSStatus(eventNotHandledErr)
     }
-
+    var hotKeyId = EventHotKeyID()
+    let status = GetEventParameter(
+        eventRef,
+        EventParamName(kEventParamDirectObject),
+        EventParamType(typeEventHotKeyID),
+        nil,
+        MemoryLayout<EventHotKeyID>.size,
+        nil,
+        &hotKeyId
+    )
+    guard status == noErr else {
+        return status
+    }
     let monitor = Unmanaged<ShortcutKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-        monitor.enableEventTap()
-        return Unmanaged.passUnretained(event)
-    }
-
-    monitor.handle(type: type, event: event)
-
-    return Unmanaged.passUnretained(event)
+    let pressed = GetEventKind(eventRef) == UInt32(kEventHotKeyPressed)
+    // GetEventDispatcherTarget delivers on the main thread already; calling
+    // synchronously avoids a run-loop hop during which re-registration
+    // (setShortcut) could clear the hot-key table and drop this press.
+    monitor.handleCarbonHotKey(id: hotKeyId.id, pressed: pressed)
+    return noErr
 }
 
 final class FocusTargetController {

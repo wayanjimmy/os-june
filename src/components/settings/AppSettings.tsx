@@ -43,7 +43,11 @@ import {
   BillingSettingsSection,
 } from "../account/AccountSettings";
 import { KeycapShortcut } from "../shortcuts/KeycapShortcut";
-import { shortcutFromCapturePayload } from "../shortcuts/use-shortcut-capture";
+import {
+  MODIFIER_REQUIRED_MESSAGE,
+  chordFromKeyEvent,
+  shortcutFromCapturePayload,
+} from "../shortcuts/use-shortcut-capture";
 import {
   selectPopoverPlacement,
   selectPopoverStyle,
@@ -371,16 +375,44 @@ export function AppSettings({
     };
   }, [languageOpen]);
 
+  // The capture effect below must call the latest saveShortcut, not the one
+  // from the render in which capturing began (it is a plain function,
+  // redefined every render). Same ref pattern as use-shortcut-capture.
+  const saveShortcutRef = useRef(saveShortcut);
+  useEffect(() => {
+    saveShortcutRef.current = saveShortcut;
+  });
+
   useEffect(() => {
     if (!capturingShortcut) return;
+    const kind = capturingShortcut;
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
         void cancelShortcutCapture();
+        return;
       }
+      // Key chords are read here in the DOM (the window is focused during a
+      // rebind); the helper's flagsChanged monitor only contributes fn and
+      // bare-modifier chords. This split is what lets the helper run without
+      // the Input Monitoring permission.
+      const result = chordFromKeyEvent(event);
+      if (result.kind === "ignore") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (result.kind === "needsModifier") {
+        setShortcutError(MODIFIER_REQUIRED_MESSAGE);
+        setStatus(MODIFIER_REQUIRED_MESSAGE);
+        return;
+      }
+      setShortcutError(undefined);
+      void dictationHelperCommand({ type: "cancel_shortcut_capture" }).catch(
+        () => undefined,
+      );
+      void saveShortcutRef.current(kind, result.shortcut);
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [capturingShortcut]);
 
   async function requestMicrophones() {

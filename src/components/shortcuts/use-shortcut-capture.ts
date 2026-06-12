@@ -14,15 +14,19 @@ export type CapturedShortcut = Pick<
 >;
 
 /**
- * Native record-a-shortcut flow: `start()` puts the dictation helper into
- * capture mode (it owns the event tap, so fn and bare modifiers work — DOM
- * keydown can't see those), the captured chord comes back as a
- * `shortcut_captured` helper event, and the hook persists it through
- * `setDictationShortcut` before reporting back. Escape cancels.
+ * Record-a-shortcut flow with two capture sources, neither of which needs
+ * the Input Monitoring permission:
  *
- * Settings grew this flow first (inline in AppSettings); the onboarding
- * practice step uses this hook. Both speak the same helper protocol, so a
- * capture started here is indistinguishable from one started in Settings.
+ * - Key chords are read from DOM keydown right here: the rebind UI only
+ *   runs while June's window is focused, so ordinary keystrokes reach the
+ *   webview without any global monitoring.
+ * - fn and bare-modifier chords never reach the DOM, so `start()` also puts
+ *   the dictation helper into capture mode; its flagsChanged-only monitor
+ *   (covered by the Accessibility permission June already holds) reports
+ *   them back as a `shortcut_captured` event.
+ *
+ * Both paths persist through `setDictationShortcut`, whose backend rejects
+ * unsupported keys with a clear error. Escape cancels.
  */
 export function useShortcutCapture({
   kind,
@@ -93,6 +97,10 @@ export function useShortcutCapture({
         setCapturing(false);
         return;
       }
+      persistCaptured(captured);
+    });
+
+    function persistCaptured(captured: CapturedShortcut) {
       const current = callbacksRef.current;
       setDictationShortcut(current.kind, captured)
         .then((saved) => {
@@ -105,19 +113,33 @@ export function useShortcutCapture({
           setCapturing(false);
           setError(messageFromError(caught));
         });
-    });
+    }
 
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
         void cancel();
+        return;
       }
+      const result = chordFromKeyEvent(event);
+      if (result.kind === "ignore") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (result.kind === "needsModifier") {
+        setError(MODIFIER_REQUIRED_MESSAGE);
+        return;
+      }
+      // Stop the helper's capture before persisting: the chord is decided.
+      void dictationHelperCommand({ type: "cancel_shortcut_capture" }).catch(
+        () => undefined,
+      );
+      persistCaptured(result.shortcut);
     }
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
 
     return () => {
       active = false;
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, true);
       void unlisten.then((fn) => fn());
     };
   }, [capturing, cancel]);
@@ -172,6 +194,55 @@ export function shortcutFromCapturePayload(
     modifiers,
     pressCount,
   };
+}
+
+/** What a keydown means for an in-progress capture. Bare modifier presses
+ * are ignored here (the helper's flagsChanged monitor owns those, since the
+ * DOM cannot see fn); a real key either completes a chord or, without any
+ * modifier, asks the user for one. */
+export type CaptureKeyResult =
+  | { kind: "ignore" }
+  | { kind: "needsModifier" }
+  | { kind: "chord"; shortcut: CapturedShortcut };
+
+export const MODIFIER_REQUIRED_MESSAGE =
+  "Shortcut must include Cmd, Ctrl, Opt, Shift, or Fn.";
+
+export function chordFromKeyEvent(event: KeyboardEvent): CaptureKeyResult {
+  if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) {
+    return { kind: "ignore" };
+  }
+  if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+    return { kind: "needsModifier" };
+  }
+  const modifiers = {
+    command: event.metaKey,
+    control: event.ctrlKey,
+    option: event.altKey,
+    shift: event.shiftKey,
+    function: false,
+  };
+  const label = [
+    modifiers.command ? "Cmd" : undefined,
+    modifiers.control ? "Ctrl" : undefined,
+    modifiers.option ? "Opt" : undefined,
+    modifiers.shift ? "Shift" : undefined,
+    keyLabel(event.code),
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join("+");
+  return {
+    kind: "chord",
+    shortcut: { code: event.code, modifiers, label, pressCount: 1 },
+  };
+}
+
+/** Friendly key name from a DOM `code`: "KeyD" -> "D", "Digit5" -> "5";
+ * anything else (F5, Space, ArrowUp) already reads fine as-is. */
+function keyLabel(code: string) {
+  if (code.startsWith("Key") && code.length === 4) return code.slice(3);
+  if (code.startsWith("Digit") && code.length === 6) return code.slice(5);
+  return code;
 }
 
 function messageFromError(error: unknown) {
