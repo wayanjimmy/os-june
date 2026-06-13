@@ -6,6 +6,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+const SYSTEM_AUDIO_MIN_MACOS_VERSION: &str =
+    include_str!("../../system-audio-min-macos-version.txt");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct MacosVersion {
+    major: u32,
+    minor: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SystemAudioStats {
     pub level: AudioLevelDto,
@@ -197,7 +206,22 @@ impl SystemAudioCapture {
 pub fn system_audio_readiness() -> SourceReadinessDto {
     #[cfg(target_os = "macos")]
     {
-        let capture_available = macos_version_supports_system_audio() && helper_app_path().exists();
+        let os_supported = macos_version_supports_system_audio();
+        let helper_available = helper_app_path().exists();
+        let capture_available = os_supported && helper_available;
+        let message = if !os_supported {
+            Some(format!(
+                "System audio capture requires macOS {} or later. Use microphone-only recording on this Mac.",
+                system_audio_min_macos_version_label()
+            ))
+        } else if !helper_available {
+            Some(
+                "System audio helper is not built. Restart June or run pnpm tauri:dev again."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         SourceReadinessDto {
             source: RecordingSource::System,
             required: true,
@@ -211,17 +235,12 @@ pub fn system_audio_readiness() -> SourceReadinessDto {
             capture_available,
             recovery_action: if capture_available {
                 Some("openSystemAudioSettings".to_string())
-            } else {
+            } else if !os_supported {
                 Some("upgradeMacos".to_string())
-            },
-            message: if capture_available {
-                None
             } else {
-                Some(
-                    "System audio capture requires macOS 14.2 or later and a built capture helper."
-                        .to_string(),
-                )
+                Some("restartApp".to_string())
             },
+            message,
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -329,13 +348,35 @@ fn macos_version_supports_system_audio() -> bool {
         return false;
     };
     let version = String::from_utf8_lossy(&output.stdout);
-    let mut parts = version
-        .trim()
-        .split('.')
-        .filter_map(|part| part.parse::<u32>().ok());
-    let major = parts.next().unwrap_or(0);
-    let minor = parts.next().unwrap_or(0);
-    major > 14 || (major == 14 && minor >= 2)
+    macos_version_string_supports_system_audio(&version)
+}
+
+fn macos_version_string_supports_system_audio(version: &str) -> bool {
+    let Some(current) = parse_macos_version(version) else {
+        return false;
+    };
+    let Some(minimum) = parse_macos_version(SYSTEM_AUDIO_MIN_MACOS_VERSION) else {
+        return false;
+    };
+    current >= minimum
+}
+
+fn system_audio_min_macos_version_label() -> &'static str {
+    SYSTEM_AUDIO_MIN_MACOS_VERSION.trim()
+}
+
+fn parse_macos_version(version: &str) -> Option<MacosVersion> {
+    let mut parts = version.trim().split('.').map(|part| part.parse::<u32>());
+    let major = match parts.next() {
+        Some(Ok(major)) => major,
+        _ => return None,
+    };
+    let minor = match parts.next() {
+        Some(Ok(minor)) => minor,
+        Some(Err(_)) => return None,
+        None => 0,
+    };
+    Some(MacosVersion { major, minor })
 }
 
 pub fn helper_app_path() -> PathBuf {
@@ -553,3 +594,30 @@ fn dump_helper_log(path: &Path) {
 
 #[cfg(not(debug_assertions))]
 fn dump_helper_log(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{macos_version_string_supports_system_audio, system_audio_min_macos_version_label};
+
+    #[test]
+    fn system_audio_support_label_uses_shared_minimum_version() {
+        assert_eq!(system_audio_min_macos_version_label(), "14.2");
+    }
+
+    #[test]
+    fn system_audio_support_starts_at_macos_14_2() {
+        assert!(!macos_version_string_supports_system_audio("14.0"));
+        assert!(!macos_version_string_supports_system_audio("14.1.1"));
+        assert!(macos_version_string_supports_system_audio("14.2"));
+        assert!(macos_version_string_supports_system_audio("14.6.1"));
+        assert!(macos_version_string_supports_system_audio("15.0"));
+        assert!(macos_version_string_supports_system_audio("26.0"));
+    }
+
+    #[test]
+    fn system_audio_support_rejects_unparseable_versions() {
+        assert!(!macos_version_string_supports_system_audio(""));
+        assert!(!macos_version_string_supports_system_audio("14.beta"));
+        assert!(!macos_version_string_supports_system_audio("not-a-version"));
+    }
+}

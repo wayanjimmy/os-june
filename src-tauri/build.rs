@@ -1,3 +1,6 @@
+const SYSTEM_AUDIO_MIN_MACOS_VERSION_FILE: &str = "system-audio-min-macos-version.txt";
+const DICTATION_HELPER_MIN_MACOS_VERSION: &str = "14.0";
+
 fn main() {
     println!("cargo:rerun-if-changed=tauri.conf.json");
     println!("cargo:rerun-if-changed=Entitlements.plist");
@@ -132,6 +135,8 @@ fn build_system_audio_helper() {
         return;
     }
     println!("cargo:rerun-if-changed={}", source.display());
+    let system_audio_min_macos_version = read_system_audio_min_macos_version(&manifest_dir)
+        .expect("system audio minimum macOS version should be configured");
 
     let helper_dir = manifest_dir
         .parent()
@@ -158,7 +163,7 @@ fn build_system_audio_helper() {
     let mut should_sign = false;
     if !executable_current {
         let mut command = std::process::Command::new("swiftc");
-        configure_swift_command(&mut command, &manifest_dir, "14.2");
+        configure_swift_command(&mut command, &manifest_dir, &system_audio_min_macos_version);
         let status = command
             .arg("-framework")
             .arg("Foundation")
@@ -182,7 +187,8 @@ fn build_system_audio_helper() {
     }
 
     let plist = contents_dir.join("Info.plist");
-    let plist_contents = r#"<?xml version="1.0" encoding="UTF-8"?>
+    let plist_contents = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -205,18 +211,19 @@ fn build_system_audio_helper() {
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
-  <string>14.2</string>
+  <string>{system_audio_min_macos_version}</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSAudioCaptureUsageDescription</key>
   <string>June records system audio locally so generated notes can include meeting or media audio from your Mac.</string>
 </dict>
 </plist>
-"#;
+"#
+    );
     let plist_current =
-        std::fs::read_to_string(&plist).is_ok_and(|current| current == plist_contents);
+        std::fs::read_to_string(&plist).is_ok_and(|current| current == plist_contents.as_str());
     if !plist_current {
-        std::fs::write(plist, plist_contents)
+        std::fs::write(plist, &plist_contents)
             .expect("system audio helper Info.plist should be written");
         should_sign = true;
     }
@@ -224,6 +231,17 @@ fn build_system_audio_helper() {
     if should_sign || has_signing_identity() {
         sign_helper_app(&manifest_dir, &app_dir);
     }
+}
+
+fn read_system_audio_min_macos_version(manifest_dir: &std::path::Path) -> Option<String> {
+    let version_file = manifest_dir.join(SYSTEM_AUDIO_MIN_MACOS_VERSION_FILE);
+    println!("cargo:rerun-if-changed={}", version_file.display());
+    let version = std::fs::read_to_string(version_file).ok()?;
+    let version = version.trim();
+    if version.is_empty() {
+        return None;
+    }
+    Some(version.to_string())
 }
 
 fn build_dictation_helper() {
@@ -270,7 +288,11 @@ fn build_dictation_helper() {
     let mut should_sign = false;
     if !executable_current {
         let mut command = std::process::Command::new("swiftc");
-        configure_swift_command(&mut command, &manifest_dir, "14.0");
+        configure_swift_command(
+            &mut command,
+            &manifest_dir,
+            DICTATION_HELPER_MIN_MACOS_VERSION,
+        );
         let status = command
             .arg("-framework")
             .arg("Foundation")
@@ -296,7 +318,8 @@ fn build_dictation_helper() {
     }
 
     let plist = contents_dir.join("Info.plist");
-    let plist_contents = r#"<?xml version="1.0" encoding="UTF-8"?>
+    let plist_contents = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -321,16 +344,17 @@ fn build_dictation_helper() {
   <key>LSUIElement</key>
   <true/>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>{DICTATION_HELPER_MIN_MACOS_VERSION}</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>June needs microphone access to turn your speech into text.</string>
 </dict>
 </plist>
-"#;
+"#
+    );
     let plist_current =
-        std::fs::read_to_string(&plist).is_ok_and(|current| current == plist_contents);
+        std::fs::read_to_string(&plist).is_ok_and(|current| current == plist_contents.as_str());
     if !plist_current {
-        std::fs::write(plist, plist_contents)
+        std::fs::write(plist, &plist_contents)
             .expect("dictation helper Info.plist should be written");
         should_sign = true;
     }
