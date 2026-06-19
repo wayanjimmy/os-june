@@ -1,13 +1,14 @@
 use crate::domain::types::{
     RecordingSource, RecordingSourceMode, RecoverableRecordingDto, RecoverableSourceDto,
 };
-use sqlx::Row;
-use sqlx::SqlitePool;
+use sqlx::query::query;
+use sqlx::row::Row;
+use sqlx_sqlite::SqlitePool;
 
 pub async fn scan_recoverable_recordings(
     pool: &SqlitePool,
-) -> Result<Vec<RecoverableRecordingDto>, sqlx::Error> {
-    let rows = sqlx::query(
+) -> Result<Vec<RecoverableRecordingDto>, sqlx::error::Error> {
+    let rows = query(
         "SELECT id, note_id, source_mode, started_at, partial_path, final_path
          FROM recording_sessions
          WHERE status IN ('recording', 'paused', 'finalizing', 'validating', 'transcribing', 'generating', 'failed', 'recoverable')",
@@ -49,8 +50,8 @@ pub async fn scan_recoverable_recordings(
 async fn recoverable_sources(
     pool: &SqlitePool,
     session_id: &str,
-) -> Result<Vec<RecoverableSourceDto>, sqlx::Error> {
-    let rows = sqlx::query(
+) -> Result<Vec<RecoverableSourceDto>, sqlx::error::Error> {
+    let rows = query(
         "SELECT source, partial_path, path, last_error
          FROM audio_artifacts
          WHERE recording_session_id = ?",

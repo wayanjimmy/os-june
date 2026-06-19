@@ -19,8 +19,8 @@ impl AppError {
     }
 }
 
-impl From<sqlx::Error> for AppError {
-    fn from(value: sqlx::Error) -> Self {
+impl From<sqlx::error::Error> for AppError {
+    fn from(value: sqlx::error::Error) -> Self {
         Self::new("storage_unavailable", value.to_string())
     }
 }

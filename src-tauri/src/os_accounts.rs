@@ -1368,6 +1368,11 @@ async fn store_tokens(pair: &TokenPair) -> Result<(), AppError> {
     if use_dev_plaintext_token_store() {
         return store_dev_plaintext_tokens(json).await;
     }
+    store_platform_tokens(json).await
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn store_platform_tokens(json: String) -> Result<(), AppError> {
     tokio::task::spawn_blocking(move || {
         keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)
             .and_then(|entry| entry.set_password(&json))
@@ -1377,11 +1382,24 @@ async fn store_tokens(pair: &TokenPair) -> Result<(), AppError> {
     .map_err(|e| AppError::new("keychain_write_failed", e.to_string()))
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn store_platform_tokens(_json: String) -> Result<(), AppError> {
+    Err(AppError::new(
+        "secure_token_storage_unavailable",
+        "Secure token storage is only available on macOS and Windows.",
+    ))
+}
+
 async fn load_tokens() -> Option<TokenPair> {
     #[cfg(debug_assertions)]
     if use_dev_plaintext_token_store() {
         return load_dev_plaintext_tokens().await;
     }
+    load_platform_tokens().await
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn load_platform_tokens() -> Option<TokenPair> {
     let raw = tokio::task::spawn_blocking(|| {
         keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)
             .ok()
@@ -1390,6 +1408,11 @@ async fn load_tokens() -> Option<TokenPair> {
     .await
     .ok()??;
     serde_json::from_str(&raw).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn load_platform_tokens() -> Option<TokenPair> {
+    None
 }
 
 async fn clear_tokens() {
@@ -1401,6 +1424,11 @@ async fn clear_tokens() {
         .await;
         return;
     }
+    clear_platform_tokens().await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn clear_platform_tokens() {
     let _ = tokio::task::spawn_blocking(|| {
         if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER) {
             let _ = entry.delete_credential();
@@ -1408,6 +1436,9 @@ async fn clear_tokens() {
     })
     .await;
 }
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn clear_platform_tokens() {}
 
 #[cfg(debug_assertions)]
 fn use_dev_plaintext_token_store() -> bool {

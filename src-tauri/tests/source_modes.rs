@@ -2,7 +2,8 @@ use os_scribe_lib::{
     db::{migrations::run_migrations, repositories::Repositories},
     domain::types::RecordingSourceMode,
 };
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::query::query;
+use sqlx_sqlite::SqlitePoolOptions;
 
 async fn test_repositories() -> Repositories {
     let pool = SqlitePoolOptions::new()
@@ -185,13 +186,13 @@ async fn note_source_transcripts_are_ordered_by_session_then_turn() {
         )
         .await
         .expect("second session should be created");
-    sqlx::query("UPDATE recording_sessions SET started_at = ? WHERE id = ?")
+    query("UPDATE recording_sessions SET started_at = ? WHERE id = ?")
         .bind("2026-05-20T10:00:00.000Z")
         .bind("session-1")
         .execute(&repos.pool)
         .await
         .expect("first session timestamp");
-    sqlx::query("UPDATE recording_sessions SET started_at = ? WHERE id = ?")
+    query("UPDATE recording_sessions SET started_at = ? WHERE id = ?")
         .bind("2026-05-20T10:05:00.000Z")
         .bind("session-2")
         .execute(&repos.pool)

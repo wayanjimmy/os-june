@@ -2,7 +2,7 @@ use os_scribe_lib::{
     db::{migrations::run_migrations, repositories::Repositories},
     domain::types::{ProcessingStatus, RecordingSourceMode},
 };
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx_sqlite::SqlitePoolOptions;
 
 async fn repos() -> Repositories {
     let pool = SqlitePoolOptions::new()

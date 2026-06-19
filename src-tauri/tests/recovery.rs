@@ -3,7 +3,8 @@ use os_scribe_lib::{
     db::{migrations::run_migrations, repositories::Repositories},
     domain::types::{ProcessingStatus, RecordingSourceMode, RecordingState},
 };
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::query_scalar::query_scalar;
+use sqlx_sqlite::SqlitePoolOptions;
 use tempfile::tempdir;
 
 async fn repos() -> Repositories {
@@ -88,7 +89,7 @@ async fn recovery_snapshot_persists_elapsed_time_for_session_and_sources() {
         .await
         .expect("artifacts");
     let artifact_status: String =
-        sqlx::query_scalar("SELECT status FROM audio_artifacts WHERE recording_session_id = ?")
+        query_scalar("SELECT status FROM audio_artifacts WHERE recording_session_id = ?")
             .bind("session-1")
             .fetch_one(&repos.pool)
             .await
@@ -129,7 +130,7 @@ async fn boot_recovery_marks_note_recoverable_when_audio_survived() {
     }
     let recovered_note = repos.get_note(&note.id).await.expect("note");
     let recording_status: String =
-        sqlx::query_scalar("SELECT status FROM recording_sessions WHERE id = ?")
+        query_scalar("SELECT status FROM recording_sessions WHERE id = ?")
             .bind("session-1")
             .fetch_one(&repos.pool)
             .await

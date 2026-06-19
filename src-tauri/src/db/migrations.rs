@@ -1,13 +1,11 @@
-use sqlx::SqlitePool;
+use sqlx::query::query;
+use sqlx_sqlite::SqlitePool;
 
-pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
+pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::error::Error> {
     for statement in include_str!("../../migrations/001_init.sql").split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
-            sqlx::query(statement)
-                .execute(_pool)
-                .await
-                .map_err(sqlx::migrate::MigrateError::Execute)?;
+            query(statement).execute(_pool).await?;
         }
     }
     ensure_column(
@@ -64,37 +62,25 @@ pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::migrate::Mig
     for statement in include_str!("../../migrations/002_source_modes.sql").split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
-            sqlx::query(statement)
-                .execute(_pool)
-                .await
-                .map_err(sqlx::migrate::MigrateError::Execute)?;
+            query(statement).execute(_pool).await?;
         }
     }
     for statement in include_str!("../../migrations/003_generation_blocks.sql").split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
-            sqlx::query(statement)
-                .execute(_pool)
-                .await
-                .map_err(sqlx::migrate::MigrateError::Execute)?;
+            query(statement).execute(_pool).await?;
         }
     }
     for statement in include_str!("../../migrations/004_dictionary.sql").split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
-            sqlx::query(statement)
-                .execute(_pool)
-                .await
-                .map_err(sqlx::migrate::MigrateError::Execute)?;
+            query(statement).execute(_pool).await?;
         }
     }
     for statement in include_str!("../../migrations/005_dictation_history.sql").split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
-            sqlx::query(statement)
-                .execute(_pool)
-                .await
-                .map_err(sqlx::migrate::MigrateError::Execute)?;
+            query(statement).execute(_pool).await?;
         }
     }
     // The dedupe DELETE in this migration scans `transcripts`, so only run it
@@ -106,20 +92,14 @@ pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::migrate::Mig
         {
             let statement = statement.trim();
             if !statement.is_empty() {
-                sqlx::query(statement)
-                    .execute(_pool)
-                    .await
-                    .map_err(sqlx::migrate::MigrateError::Execute)?;
+                query(statement).execute(_pool).await?;
             }
         }
     }
     for statement in include_str!("../../migrations/007_agent.sql").split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
-            sqlx::query(statement)
-                .execute(_pool)
-                .await
-                .map_err(sqlx::migrate::MigrateError::Execute)?;
+            query(statement).execute(_pool).await?;
         }
     }
     ensure_column(_pool, "agent_tasks", "hermes_session_id", "TEXT").await?;
@@ -134,31 +114,24 @@ pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::migrate::Mig
         {
             let statement = statement.trim();
             if !statement.is_empty() {
-                sqlx::query(statement)
-                    .execute(_pool)
-                    .await
-                    .map_err(sqlx::migrate::MigrateError::Execute)?;
+                query(statement).execute(_pool).await?;
             }
         }
     }
     for statement in include_str!("../../migrations/009_session_folders.sql").split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
-            sqlx::query(statement)
-                .execute(_pool)
-                .await
-                .map_err(sqlx::migrate::MigrateError::Execute)?;
+            query(statement).execute(_pool).await?;
         }
     }
     Ok(())
 }
 
-async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool, sqlx::migrate::MigrateError> {
-    let row = sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?")
+async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool, sqlx::error::Error> {
+    let row = query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?")
         .bind(index)
         .fetch_optional(pool)
-        .await
-        .map_err(sqlx::migrate::MigrateError::Execute)?;
+        .await?;
     Ok(row.is_some())
 }
 
@@ -167,41 +140,32 @@ async fn ensure_column(
     table: &str,
     column: &str,
     definition: &str,
-) -> Result<(), sqlx::migrate::MigrateError> {
+) -> Result<(), sqlx::error::Error> {
     let pragma = format!("PRAGMA table_info({table})");
-    let rows = sqlx::query(&pragma)
-        .fetch_all(pool)
-        .await
-        .map_err(sqlx::migrate::MigrateError::Execute)?;
+    let rows = query(&pragma).fetch_all(pool).await?;
     let exists = rows.iter().any(|row| {
-        use sqlx::Row;
+        use sqlx::row::Row;
         row.get::<String, _>("name") == column
     });
     if !exists {
         let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
-        match sqlx::query(&alter).execute(pool).await {
+        match query(&alter).execute(pool).await {
             Ok(_) => {}
             Err(error) if is_duplicate_column_error(&error, column) => {}
-            Err(error) => return Err(sqlx::migrate::MigrateError::Execute(error)),
+            Err(error) => return Err(error),
         }
     }
     Ok(())
 }
 
-fn is_duplicate_column_error(error: &sqlx::Error, column: &str) -> bool {
+fn is_duplicate_column_error(error: &sqlx::error::Error, column: &str) -> bool {
     let message = error.to_string().to_lowercase();
     message.contains("duplicate column name") && message.contains(&column.to_lowercase())
 }
 
-async fn drop_index_if_exists(
-    pool: &SqlitePool,
-    index: &str,
-) -> Result<(), sqlx::migrate::MigrateError> {
+async fn drop_index_if_exists(pool: &SqlitePool, index: &str) -> Result<(), sqlx::error::Error> {
     let sql = format!("DROP INDEX IF EXISTS {}", quote_sqlite_identifier(index));
-    sqlx::query(&sql)
-        .execute(pool)
-        .await
-        .map_err(sqlx::migrate::MigrateError::Execute)?;
+    query(&sql).execute(pool).await?;
     Ok(())
 }
 

@@ -6,7 +6,9 @@ use crate::domain::types::{
     RecordingState, SessionFolderDto, TranscriptDto,
 };
 use chrono::{Duration, SecondsFormat, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx::query::query;
+use sqlx::row::Row;
+use sqlx_sqlite::SqlitePool;
 use uuid::Uuid;
 
 const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
@@ -21,8 +23,8 @@ impl Repositories {
         Self { pool }
     }
 
-    pub async fn list_folders(&self) -> Result<Vec<FolderDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    pub async fn list_folders(&self) -> Result<Vec<FolderDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, name, description, created_at, updated_at FROM folders WHERE deleted_at IS NULL ORDER BY lower(name) ASC",
         )
         .fetch_all(&self.pool)
@@ -35,7 +37,7 @@ impl Repositories {
         &self,
         name: impl AsRef<str>,
         description: Option<&str>,
-    ) -> Result<FolderDto, sqlx::Error> {
+    ) -> Result<FolderDto, sqlx::error::Error> {
         let now = timestamp();
         let description = description
             .map(|value| value.trim().to_string())
@@ -48,7 +50,7 @@ impl Repositories {
             updated_at: now,
         };
 
-        sqlx::query(
+        query(
             "INSERT INTO folders (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&folder.id)
@@ -73,7 +75,7 @@ impl Repositories {
         let description = description
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let result = sqlx::query(
+        let result = query(
             "UPDATE folders SET name = ?, description = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(trimmed)
@@ -89,7 +91,7 @@ impl Repositories {
             ));
         }
 
-        let row = sqlx::query(
+        let row = query(
             "SELECT id, name, description, created_at, updated_at FROM folders WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(folder_id)
@@ -99,12 +101,15 @@ impl Repositories {
         Ok(folder_from_row(row))
     }
 
-    pub async fn create_note(&self, folder_id: Option<String>) -> Result<NoteDto, sqlx::Error> {
+    pub async fn create_note(
+        &self,
+        folder_id: Option<String>,
+    ) -> Result<NoteDto, sqlx::error::Error> {
         let now = timestamp();
         let id = Uuid::new_v4().to_string();
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        query(
             "INSERT INTO notes (id, title, processing_status, created_at, updated_at) VALUES (?, '', 'draft', ?, ?)",
         )
         .bind(&id)
@@ -114,7 +119,7 @@ impl Repositories {
         .await?;
 
         if let Some(folder_id) = folder_id {
-            sqlx::query("INSERT OR IGNORE INTO note_folders (note_id, folder_id, assigned_at) VALUES (?, ?, ?)")
+            query("INSERT OR IGNORE INTO note_folders (note_id, folder_id, assigned_at) VALUES (?, ?, ?)")
                 .bind(&id)
                 .bind(folder_id)
                 .bind(&now)
@@ -126,8 +131,8 @@ impl Repositories {
         self.get_note(&id).await
     }
 
-    pub async fn get_note(&self, note_id: &str) -> Result<NoteDto, sqlx::Error> {
-        let row = sqlx::query(
+    pub async fn get_note(&self, note_id: &str) -> Result<NoteDto, sqlx::error::Error> {
+        let row = query(
             "SELECT id, title, generated_content, edited_content, active_tab, processing_status, created_at, updated_at, last_error FROM notes WHERE id = ?",
         )
         .bind(note_id)
@@ -174,9 +179,9 @@ impl Repositories {
         folder_id: Option<String>,
         limit: i64,
         _cursor: Option<String>,
-    ) -> Result<ListNotesResponse, sqlx::Error> {
+    ) -> Result<ListNotesResponse, sqlx::error::Error> {
         let rows = if let Some(folder_id) = folder_id {
-            sqlx::query(
+            query(
                 "SELECT n.id, n.title, n.generated_content, n.edited_content, n.processing_status, n.created_at, n.updated_at
                  FROM notes n
                  INNER JOIN note_folders nf ON nf.note_id = n.id
@@ -189,7 +194,7 @@ impl Repositories {
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query(
+            query(
                 "SELECT id, title, generated_content, edited_content, processing_status, created_at, updated_at
                  FROM notes
                  ORDER BY created_at DESC, rowid DESC
@@ -236,8 +241,8 @@ impl Repositories {
         &self,
         note_id: &str,
         folder_id: &str,
-    ) -> Result<NoteDto, sqlx::Error> {
-        sqlx::query(
+    ) -> Result<NoteDto, sqlx::error::Error> {
+        query(
             "INSERT OR IGNORE INTO note_folders (note_id, folder_id, assigned_at) VALUES (?, ?, ?)",
         )
         .bind(note_id)
@@ -252,8 +257,8 @@ impl Repositories {
         &self,
         note_id: &str,
         folder_id: &str,
-    ) -> Result<NoteDto, sqlx::Error> {
-        sqlx::query("DELETE FROM note_folders WHERE note_id = ? AND folder_id = ?")
+    ) -> Result<NoteDto, sqlx::error::Error> {
+        query("DELETE FROM note_folders WHERE note_id = ? AND folder_id = ?")
             .bind(note_id)
             .bind(folder_id)
             .execute(&self.pool)
@@ -261,8 +266,8 @@ impl Repositories {
         self.get_note(note_id).await
     }
 
-    pub async fn list_session_folders(&self) -> Result<Vec<SessionFolderDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    pub async fn list_session_folders(&self) -> Result<Vec<SessionFolderDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT sf.session_id, sf.folder_id
              FROM session_folders sf
              INNER JOIN folders f ON f.id = sf.folder_id
@@ -284,8 +289,8 @@ impl Repositories {
         &self,
         session_id: &str,
         folder_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "INSERT OR IGNORE INTO session_folders (session_id, folder_id, assigned_at) VALUES (?, ?, ?)",
         )
         .bind(session_id)
@@ -300,8 +305,8 @@ impl Repositories {
         &self,
         session_id: &str,
         folder_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM session_folders WHERE session_id = ? AND folder_id = ?")
+    ) -> Result<(), sqlx::error::Error> {
+        query("DELETE FROM session_folders WHERE session_id = ? AND folder_id = ?")
             .bind(session_id)
             .bind(folder_id)
             .execute(&self.pool)
@@ -309,8 +314,10 @@ impl Repositories {
         Ok(())
     }
 
-    pub async fn list_dictionary_entries(&self) -> Result<Vec<DictionaryEntryDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    pub async fn list_dictionary_entries(
+        &self,
+    ) -> Result<Vec<DictionaryEntryDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, phrase, created_at, updated_at
              FROM dictionary_entries
              WHERE deleted_at IS NULL
@@ -326,7 +333,7 @@ impl Repositories {
         text: &str,
         language: Option<String>,
         provider: &str,
-    ) -> Result<Option<DictationHistoryItemDto>, sqlx::Error> {
+    ) -> Result<Option<DictationHistoryItemDto>, sqlx::error::Error> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(None);
@@ -338,7 +345,7 @@ impl Repositories {
             provider: provider.to_string(),
             created_at: timestamp(),
         };
-        sqlx::query(
+        query(
             "INSERT INTO dictation_history (id, text, language, provider, created_at)
              VALUES (?, ?, ?, ?, ?)",
         )
@@ -356,9 +363,9 @@ impl Repositories {
     pub async fn list_dictation_history(
         &self,
         limit: i64,
-    ) -> Result<ListDictationHistoryResponse, sqlx::Error> {
+    ) -> Result<ListDictationHistoryResponse, sqlx::error::Error> {
         self.prune_old_dictation_history().await?;
-        let rows = sqlx::query(
+        let rows = query(
             "SELECT id, text, language, provider, created_at
              FROM dictation_history
              WHERE created_at >= ?
@@ -379,17 +386,17 @@ impl Repositories {
         })
     }
 
-    pub async fn prune_old_dictation_history(&self) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM dictation_history WHERE created_at < ?")
+    pub async fn prune_old_dictation_history(&self) -> Result<(), sqlx::error::Error> {
+        query("DELETE FROM dictation_history WHERE created_at < ?")
             .bind(dictation_history_cutoff_timestamp())
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    pub async fn pause_running_agent_tasks_on_launch(&self) -> Result<(), sqlx::Error> {
+    pub async fn pause_running_agent_tasks_on_launch(&self) -> Result<(), sqlx::error::Error> {
         let now = timestamp();
-        sqlx::query(
+        query(
             "UPDATE agent_tasks
              SET status = 'paused',
                  progress_summary = 'Paused when June restarted.',
@@ -406,8 +413,10 @@ impl Repositories {
     /// is already an assistant reply. `paused` and `waiting_for_user` are
     /// deliberate resting states (placeholder pauses, clarify exchanges) and
     /// must never be force-completed by this repair.
-    pub async fn complete_agent_tasks_with_assistant_messages(&self) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    pub async fn complete_agent_tasks_with_assistant_messages(
+        &self,
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "UPDATE agent_tasks
              SET status = 'completed',
                  progress_summary = 'Completed.',
@@ -436,8 +445,8 @@ impl Repositories {
         Ok(())
     }
 
-    pub async fn list_agent_tasks(&self) -> Result<AgentTaskListResponse, sqlx::Error> {
-        let rows = sqlx::query(
+    pub async fn list_agent_tasks(&self) -> Result<AgentTaskListResponse, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, title, prompt, status, safety_profile, progress_summary, last_error,
                     hermes_session_id, created_at, updated_at, completed_at
              FROM agent_tasks
@@ -456,7 +465,7 @@ impl Repositories {
         prompt: &str,
         title: Option<&str>,
         safety_profile: AgentSafetyProfile,
-    ) -> Result<AgentTaskDto, sqlx::Error> {
+    ) -> Result<AgentTaskDto, sqlx::error::Error> {
         let now = timestamp();
         let task_id = Uuid::new_v4().to_string();
         let trimmed_prompt = prompt.trim();
@@ -467,7 +476,7 @@ impl Repositories {
             .unwrap_or_else(|| title_from_prompt(trimmed_prompt));
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        query(
             "INSERT INTO agent_tasks
              (id, title, prompt, status, safety_profile, progress_summary, created_at, updated_at)
              VALUES (?, ?, ?, 'queued', ?, 'Queued for the agent runtime.', ?, ?)",
@@ -480,7 +489,7 @@ impl Repositories {
         .bind(&now)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        query(
             "INSERT INTO agent_messages (id, task_id, role, content, created_at)
              VALUES (?, ?, 'user', ?, ?)",
         )
@@ -494,8 +503,8 @@ impl Repositories {
         self.get_agent_task(&task_id).await
     }
 
-    pub async fn get_agent_task(&self, task_id: &str) -> Result<AgentTaskDto, sqlx::Error> {
-        let row = sqlx::query(
+    pub async fn get_agent_task(&self, task_id: &str) -> Result<AgentTaskDto, sqlx::error::Error> {
+        let row = query(
             "SELECT id, title, prompt, status, safety_profile, progress_summary, last_error,
                     hermes_session_id, created_at, updated_at, completed_at
              FROM agent_tasks
@@ -514,8 +523,8 @@ impl Repositories {
         &self,
         task_id: &str,
         hermes_session_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE agent_tasks SET hermes_session_id = ? WHERE id = ?")
+    ) -> Result<(), sqlx::error::Error> {
+        query("UPDATE agent_tasks SET hermes_session_id = ? WHERE id = ?")
             .bind(hermes_session_id)
             .bind(task_id)
             .execute(&self.pool)
@@ -528,10 +537,10 @@ impl Repositories {
         task_id: &str,
         role: AgentMessageRole,
         content: &str,
-    ) -> Result<AgentMessageDto, sqlx::Error> {
+    ) -> Result<AgentMessageDto, sqlx::error::Error> {
         let now = timestamp();
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        query(
             "INSERT INTO agent_messages (id, task_id, role, content, created_at)
              VALUES (?, ?, ?, ?, ?)",
         )
@@ -542,12 +551,12 @@ impl Repositories {
         .bind(&now)
         .execute(&self.pool)
         .await?;
-        sqlx::query("UPDATE agent_tasks SET updated_at = ? WHERE id = ?")
+        query("UPDATE agent_tasks SET updated_at = ? WHERE id = ?")
             .bind(&now)
             .bind(task_id)
             .execute(&self.pool)
             .await?;
-        let row = sqlx::query(
+        let row = query(
             "SELECT id, task_id, role, content, created_at
              FROM agent_messages
              WHERE id = ?",
@@ -570,8 +579,8 @@ impl Repositories {
         content: &str,
         created_at: &str,
         external_id: &str,
-    ) -> Result<bool, sqlx::Error> {
-        let existing = sqlx::query(
+    ) -> Result<bool, sqlx::error::Error> {
+        let existing = query(
             "SELECT 1 FROM agent_messages
              WHERE task_id = ?
                AND role = ?
@@ -587,7 +596,7 @@ impl Repositories {
         if existing.is_some() {
             return Ok(false);
         }
-        let result = sqlx::query(
+        let result = query(
             "INSERT OR IGNORE INTO agent_messages
              (id, task_id, role, content, created_at, external_id)
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -609,13 +618,13 @@ impl Repositories {
         status: AgentTaskStatus,
         progress_summary: Option<&str>,
         last_error: Option<&str>,
-    ) -> Result<AgentTaskDto, sqlx::Error> {
+    ) -> Result<AgentTaskDto, sqlx::error::Error> {
         let now = timestamp();
         let completed_at = match status {
             AgentTaskStatus::Completed | AgentTaskStatus::Cancelled => Some(now.clone()),
             _ => None,
         };
-        sqlx::query(
+        query(
             "UPDATE agent_tasks
              SET status = ?, progress_summary = ?, last_error = ?, updated_at = ?,
                  completed_at = COALESCE(?, completed_at)
@@ -644,7 +653,7 @@ impl Repositories {
         progress_summary: Option<&str>,
         last_error: Option<&str>,
         allowed_current: &[AgentTaskStatus],
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<bool, sqlx::error::Error> {
         if allowed_current.is_empty() {
             return Ok(false);
         }
@@ -660,7 +669,7 @@ impl Repositories {
                  completed_at = COALESCE(?, completed_at)
              WHERE id = ? AND status IN ({placeholders})"
         );
-        let mut query = sqlx::query(&sql)
+        let mut query = query(&sql)
             .bind(status.as_db())
             .bind(progress_summary)
             .bind(last_error)
@@ -681,14 +690,13 @@ impl Repositories {
         &self,
         task_id: &str,
         hermes_session_id: &str,
-    ) -> Result<bool, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT 1 FROM agent_tasks WHERE hermes_session_id = ? AND id != ? LIMIT 1",
-        )
-        .bind(hermes_session_id)
-        .bind(task_id)
-        .fetch_optional(&self.pool)
-        .await?;
+    ) -> Result<bool, sqlx::error::Error> {
+        let row =
+            query("SELECT 1 FROM agent_tasks WHERE hermes_session_id = ? AND id != ? LIMIT 1")
+                .bind(hermes_session_id)
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.is_some())
     }
 
@@ -701,7 +709,7 @@ impl Repositories {
         arguments_json: Option<&str>,
         result_json: Option<&str>,
         redacted: bool,
-    ) -> Result<AgentToolEventDto, sqlx::Error> {
+    ) -> Result<AgentToolEventDto, sqlx::error::Error> {
         let now = timestamp();
         let completed_at = match status {
             AgentToolEventStatus::Completed
@@ -710,7 +718,7 @@ impl Repositories {
             _ => None,
         };
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        query(
             "INSERT INTO agent_tool_events
              (id, task_id, tool_name, status, summary, arguments_json, result_json,
               redacted, created_at, completed_at)
@@ -728,12 +736,12 @@ impl Repositories {
         .bind(completed_at)
         .execute(&self.pool)
         .await?;
-        sqlx::query("UPDATE agent_tasks SET updated_at = ? WHERE id = ?")
+        query("UPDATE agent_tasks SET updated_at = ? WHERE id = ?")
             .bind(&now)
             .bind(task_id)
             .execute(&self.pool)
             .await?;
-        let row = sqlx::query(
+        let row = query(
             "SELECT id, task_id, tool_name, status, summary, arguments_json, result_json,
                     redacted, created_at, completed_at
              FROM agent_tool_events
@@ -748,8 +756,8 @@ impl Repositories {
     pub async fn agent_tool_events(
         &self,
         task_id: &str,
-    ) -> Result<Vec<AgentToolEventDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    ) -> Result<Vec<AgentToolEventDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, task_id, tool_name, status, summary, arguments_json, result_json,
                     redacted, created_at, completed_at
              FROM agent_tool_events
@@ -762,8 +770,11 @@ impl Repositories {
         Ok(rows.into_iter().map(agent_tool_event_from_row).collect())
     }
 
-    async fn agent_messages(&self, task_id: &str) -> Result<Vec<AgentMessageDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    async fn agent_messages(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<AgentMessageDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, task_id, role, content, created_at
              FROM agent_messages
              WHERE task_id = ?
@@ -775,8 +786,8 @@ impl Repositories {
         Ok(rows.into_iter().map(agent_message_from_row).collect())
     }
 
-    pub async fn delete_dictation_history_item(&self, id: &str) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM dictation_history WHERE id = ?")
+    pub async fn delete_dictation_history_item(&self, id: &str) -> Result<(), sqlx::error::Error> {
+        query("DELETE FROM dictation_history WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -786,7 +797,7 @@ impl Repositories {
     pub async fn create_dictionary_entry(
         &self,
         phrase: &str,
-    ) -> Result<DictionaryEntryDto, sqlx::Error> {
+    ) -> Result<DictionaryEntryDto, sqlx::error::Error> {
         let now = timestamp();
         let entry = DictionaryEntryDto {
             id: Uuid::new_v4().to_string(),
@@ -794,7 +805,7 @@ impl Repositories {
             created_at: now.clone(),
             updated_at: now,
         };
-        sqlx::query(
+        query(
             "INSERT INTO dictionary_entries (id, phrase, created_at, updated_at)
              VALUES (?, ?, ?, ?)",
         )
@@ -813,7 +824,7 @@ impl Repositories {
         phrase: &str,
     ) -> Result<DictionaryEntryDto, AppError> {
         let now = timestamp();
-        let result = sqlx::query(
+        let result = query(
             "UPDATE dictionary_entries
              SET phrase = ?, updated_at = ?
              WHERE id = ? AND deleted_at IS NULL",
@@ -829,7 +840,7 @@ impl Repositories {
                 "Dictionary entry was not found.",
             ));
         }
-        let row = sqlx::query(
+        let row = query(
             "SELECT id, phrase, created_at, updated_at
              FROM dictionary_entries
              WHERE id = ? AND deleted_at IS NULL",
@@ -842,7 +853,7 @@ impl Repositories {
 
     pub async fn delete_dictionary_entry(&self, entry_id: &str) -> Result<(), AppError> {
         let now = timestamp();
-        let result = sqlx::query(
+        let result = query(
             "UPDATE dictionary_entries SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(&now)
@@ -865,7 +876,7 @@ impl Repositories {
         title: Option<String>,
         edited_content: Option<String>,
         active_tab: Option<String>,
-    ) -> Result<NoteDto, sqlx::Error> {
+    ) -> Result<NoteDto, sqlx::error::Error> {
         let current = self.get_note(note_id).await?;
         let next_title = title.unwrap_or(current.title);
         let next_content = edited_content.or(current.edited_content);
@@ -873,7 +884,7 @@ impl Repositories {
             .or(current.active_tab)
             .unwrap_or_else(|| "notes".to_string());
 
-        sqlx::query(
+        query(
             "UPDATE notes SET title = ?, edited_content = ?, active_tab = ?, updated_at = ? WHERE id = ?",
         )
         .bind(next_title)
@@ -890,8 +901,8 @@ impl Repositories {
     pub async fn audio_artifact_paths_for_note(
         &self,
         note_id: &str,
-    ) -> Result<Vec<String>, sqlx::Error> {
-        let rows = sqlx::query("SELECT path FROM audio_artifacts WHERE note_id = ?")
+    ) -> Result<Vec<String>, sqlx::error::Error> {
+        let rows = query("SELECT path FROM audio_artifacts WHERE note_id = ?")
             .bind(note_id)
             .fetch_all(&self.pool)
             .await?;
@@ -901,7 +912,7 @@ impl Repositories {
     pub async fn audio_artifact_paths_for_notes(
         &self,
         note_ids: &[String],
-    ) -> Result<Vec<String>, sqlx::Error> {
+    ) -> Result<Vec<String>, sqlx::error::Error> {
         let mut paths = Vec::new();
         for note_id in note_ids {
             paths.extend(self.audio_artifact_paths_for_note(note_id).await?);
@@ -909,13 +920,13 @@ impl Repositories {
         Ok(paths)
     }
 
-    pub async fn delete_note(&self, note_id: &str) -> Result<(), sqlx::Error> {
+    pub async fn delete_note(&self, note_id: &str) -> Result<(), sqlx::error::Error> {
         let mut tx = self.pool.begin().await?;
         delete_note_records(&mut tx, note_id).await?;
         tx.commit().await
     }
 
-    pub async fn delete_notes(&self, note_ids: &[String]) -> Result<(), sqlx::Error> {
+    pub async fn delete_notes(&self, note_ids: &[String]) -> Result<(), sqlx::error::Error> {
         let mut tx = self.pool.begin().await?;
         for note_id in note_ids {
             delete_note_records(&mut tx, note_id).await?;
@@ -927,40 +938,40 @@ impl Repositories {
         &self,
         folder_id: &str,
         delete_notes: bool,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), sqlx::error::Error> {
         let now = timestamp();
         let mut tx = self.pool.begin().await?;
 
         if delete_notes {
-            sqlx::query(
+            query(
                 "DELETE FROM note_generation_blocks
                  WHERE note_id IN (SELECT note_id FROM note_folders WHERE folder_id = ?)",
             )
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            query(
                 "DELETE FROM generation_results
                  WHERE note_id IN (SELECT note_id FROM note_folders WHERE folder_id = ?)",
             )
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            query(
                 "DELETE FROM transcripts
                  WHERE note_id IN (SELECT note_id FROM note_folders WHERE folder_id = ?)",
             )
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            query(
                 "DELETE FROM audio_artifacts
                  WHERE note_id IN (SELECT note_id FROM note_folders WHERE folder_id = ?)",
             )
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            query(
                 "DELETE FROM recording_checkpoints
                  WHERE recording_session_id IN (
                    SELECT rs.id
@@ -972,14 +983,14 @@ impl Repositories {
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            query(
                 "DELETE FROM recording_sessions
                  WHERE note_id IN (SELECT note_id FROM note_folders WHERE folder_id = ?)",
             )
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            query(
                 "DELETE FROM notes
                  WHERE id IN (SELECT note_id FROM note_folders WHERE folder_id = ?)",
             )
@@ -988,15 +999,15 @@ impl Repositories {
             .await?;
         }
 
-        sqlx::query("DELETE FROM note_folders WHERE folder_id = ?")
+        query("DELETE FROM note_folders WHERE folder_id = ?")
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM session_folders WHERE folder_id = ?")
+        query("DELETE FROM session_folders WHERE folder_id = ?")
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE folders SET deleted_at = ?, updated_at = ? WHERE id = ?")
+        query("UPDATE folders SET deleted_at = ?, updated_at = ? WHERE id = ?")
             .bind(&now)
             .bind(&now)
             .bind(folder_id)
@@ -1011,8 +1022,8 @@ impl Repositories {
         note_id: &str,
         status: ProcessingStatus,
         last_error: Option<String>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "UPDATE notes SET processing_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
         )
         .bind(status.as_db())
@@ -1029,7 +1040,7 @@ impl Repositories {
         note_id: &str,
         title: Option<String>,
         content: String,
-    ) -> Result<NoteDto, sqlx::Error> {
+    ) -> Result<NoteDto, sqlx::error::Error> {
         self.set_generated_note_for_session(note_id, None, None, title, content)
             .await
     }
@@ -1041,7 +1052,7 @@ impl Repositories {
         generation_result_id: Option<&str>,
         title: Option<String>,
         content: String,
-    ) -> Result<NoteDto, sqlx::Error> {
+    ) -> Result<NoteDto, sqlx::error::Error> {
         let current = self.get_note(note_id).await?;
         let title = if is_replaceable_generated_title(&current.title) {
             usable_generated_title(title.as_deref())
@@ -1114,7 +1125,7 @@ impl Repositories {
                 append_note_content(Some(edited_content), content)
             }
         });
-        sqlx::query(
+        query(
             "UPDATE notes SET title = ?, generated_content = ?, edited_content = ?, active_tab = 'notes', processing_status = 'ready', last_error = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(title)
@@ -1131,8 +1142,8 @@ impl Repositories {
         &self,
         note_id: &str,
         recording_session_id: &str,
-    ) -> Result<bool, sqlx::Error> {
-        let row = sqlx::query(
+    ) -> Result<bool, sqlx::error::Error> {
+        let row = query(
             "SELECT 1 FROM note_generation_blocks WHERE note_id = ? AND recording_session_id = ? LIMIT 1",
         )
         .bind(note_id)
@@ -1142,12 +1153,11 @@ impl Repositories {
         Ok(row.is_some())
     }
 
-    async fn generation_block_count(&self, note_id: &str) -> Result<i64, sqlx::Error> {
-        let row =
-            sqlx::query("SELECT COUNT(*) AS count FROM note_generation_blocks WHERE note_id = ?")
-                .bind(note_id)
-                .fetch_one(&self.pool)
-                .await?;
+    async fn generation_block_count(&self, note_id: &str) -> Result<i64, sqlx::error::Error> {
+        let row = query("SELECT COUNT(*) AS count FROM note_generation_blocks WHERE note_id = ?")
+            .bind(note_id)
+            .fetch_one(&self.pool)
+            .await?;
         Ok(row.get("count"))
     }
 
@@ -1156,12 +1166,12 @@ impl Repositories {
         note_id: &str,
         content: Option<&str>,
         title_suggestion: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), sqlx::error::Error> {
         let Some(content) = content.map(str::trim).filter(|value| !value.is_empty()) else {
             return Ok(());
         };
         let now = timestamp();
-        sqlx::query(
+        query(
             "INSERT INTO note_generation_blocks
              (id, note_id, recording_session_id, generation_result_id, content, title_suggestion, sort_order, created_at, updated_at)
              VALUES (?, ?, NULL, NULL, ?, ?, 0, ?, ?)",
@@ -1184,9 +1194,9 @@ impl Repositories {
         generation_result_id: Option<&str>,
         title_suggestion: Option<&str>,
         content: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), sqlx::error::Error> {
         let now = timestamp();
-        if let Some(row) = sqlx::query(
+        if let Some(row) = query(
             "SELECT id FROM note_generation_blocks WHERE note_id = ? AND recording_session_id = ? LIMIT 1",
         )
         .bind(note_id)
@@ -1195,7 +1205,7 @@ impl Repositories {
         .await?
         {
             let id: String = row.get("id");
-            sqlx::query(
+            query(
                 "UPDATE note_generation_blocks
                  SET generation_result_id = ?, content = ?, title_suggestion = ?, updated_at = ?
                  WHERE id = ?",
@@ -1211,7 +1221,7 @@ impl Repositories {
         }
 
         let sort_order = self.next_generation_block_sort_order(note_id).await?;
-        sqlx::query(
+        query(
             "INSERT INTO note_generation_blocks
              (id, note_id, recording_session_id, generation_result_id, content, title_suggestion, sort_order, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1230,8 +1240,11 @@ impl Repositories {
         Ok(())
     }
 
-    async fn next_generation_block_sort_order(&self, note_id: &str) -> Result<i64, sqlx::Error> {
-        let row = sqlx::query(
+    async fn next_generation_block_sort_order(
+        &self,
+        note_id: &str,
+    ) -> Result<i64, sqlx::error::Error> {
+        let row = query(
             "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order
              FROM note_generation_blocks
              WHERE note_id = ?",
@@ -1245,8 +1258,8 @@ impl Repositories {
     async fn compose_generation_blocks(
         &self,
         note_id: &str,
-    ) -> Result<Option<String>, sqlx::Error> {
-        let rows = sqlx::query(
+    ) -> Result<Option<String>, sqlx::error::Error> {
+        let rows = query(
             "SELECT content
              FROM note_generation_blocks
              WHERE note_id = ?
@@ -1275,8 +1288,8 @@ impl Repositories {
         partial_path: &str,
         final_path: &str,
         device_label: Option<String>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "INSERT INTO recording_sessions (id, note_id, source_mode, status, started_at, expected_elapsed_ms, device_label, permission_state, partial_path, final_path)
              VALUES (?, ?, ?, 'recording', ?, 0, ?, 'granted', ?, ?)",
         )
@@ -1297,8 +1310,8 @@ impl Repositories {
     pub async fn recording_session_source_mode(
         &self,
         session_id: &str,
-    ) -> Result<Option<RecordingSourceMode>, sqlx::Error> {
-        let row = sqlx::query("SELECT source_mode FROM recording_sessions WHERE id = ?")
+    ) -> Result<Option<RecordingSourceMode>, sqlx::error::Error> {
+        let row = query("SELECT source_mode FROM recording_sessions WHERE id = ?")
             .bind(session_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -1318,8 +1331,8 @@ impl Repositories {
         rms_amplitude: Option<f32>,
         validation_summary: Option<String>,
         last_error: Option<String>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "UPDATE recording_sessions
              SET status = ?, expected_elapsed_ms = ?, file_size_bytes = ?, duration_ms = ?, checksum = ?,
                  peak_amplitude = ?, rms_amplitude = ?, validation_summary = ?, last_error = ?,
@@ -1348,10 +1361,10 @@ impl Repositories {
         session_id: &str,
         state: RecordingState,
         elapsed_ms: i64,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), sqlx::error::Error> {
         let status = state.as_db();
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        query(
             "UPDATE recording_sessions
              SET status = ?, expected_elapsed_ms = max(expected_elapsed_ms, ?)
              WHERE id = ?
@@ -1362,7 +1375,7 @@ impl Repositories {
         .bind(session_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        query(
             "UPDATE audio_artifacts
              SET status = ?, expected_duration_ms = max(expected_duration_ms, ?)
              WHERE recording_session_id = ?
@@ -1380,11 +1393,11 @@ impl Repositories {
         &self,
         session_id: &str,
         note_id: &str,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), sqlx::error::Error> {
         let now = timestamp();
         let message = "Recording interrupted before it could be finished.";
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        query(
             "UPDATE recording_sessions
              SET status = 'recoverable',
                  last_error = COALESCE(last_error, ?),
@@ -1406,7 +1419,7 @@ impl Repositories {
         .bind(session_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        query(
             "UPDATE audio_artifacts
              SET status = 'recoverable',
                  last_error = COALESCE(last_error, ?)
@@ -1426,7 +1439,7 @@ impl Repositories {
         .bind(session_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        query(
             "UPDATE notes
              SET processing_status = ?,
                  last_error = ?,
@@ -1442,8 +1455,11 @@ impl Repositories {
         tx.commit().await
     }
 
-    pub async fn mark_recording_recovery_valid(&self, session_id: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    pub async fn mark_recording_recovery_valid(
+        &self,
+        session_id: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "UPDATE recording_sessions
              SET status = 'valid',
                  last_error = NULL,
@@ -1463,8 +1479,8 @@ impl Repositories {
         session_id: &str,
         kind: &str,
         details: Option<String>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "INSERT INTO recording_checkpoints (id, recording_session_id, kind, created_at, details) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
@@ -1484,8 +1500,8 @@ impl Repositories {
         source: Option<&str>,
         kind: &str,
         details: Option<String>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "INSERT INTO recording_checkpoints (id, recording_session_id, source_artifact_id, source, kind, created_at, details)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
@@ -1508,7 +1524,7 @@ impl Repositories {
         source: &str,
         partial_path: &str,
         final_path: &str,
-    ) -> Result<AudioArtifactDto, sqlx::Error> {
+    ) -> Result<AudioArtifactDto, sqlx::error::Error> {
         let artifact = AudioArtifactDto {
             id: Uuid::new_v4().to_string(),
             source: source.to_string(),
@@ -1518,7 +1534,7 @@ impl Repositories {
             checksum: String::new(),
             created_at: timestamp(),
         };
-        sqlx::query(
+        query(
             "INSERT INTO audio_artifacts
              (id, note_id, recording_session_id, source, partial_path, path, format, duration_ms, size_bytes, checksum, status, expected_duration_ms, created_at)
              VALUES (?, ?, ?, ?, ?, ?, 'wav', 0, 0, '', 'recording', 0, ?)",
@@ -1538,8 +1554,8 @@ impl Repositories {
     pub async fn source_artifacts_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<AudioArtifactDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    ) -> Result<Vec<AudioArtifactDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at
              FROM audio_artifacts
              WHERE recording_session_id = ?
@@ -1565,8 +1581,8 @@ impl Repositories {
     pub async fn source_artifact_paths_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<SourceArtifactPath>, sqlx::Error> {
-        let rows = sqlx::query(
+    ) -> Result<Vec<SourceArtifactPath>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, note_id, source, partial_path, path, expected_duration_ms
              FROM audio_artifacts
              WHERE recording_session_id = ?
@@ -1600,8 +1616,8 @@ impl Repositories {
         expected_duration_ms: i64,
         validation_summary: Option<String>,
         last_error: Option<String>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(), sqlx::error::Error> {
+        query(
             "UPDATE audio_artifacts
              SET path = ?, status = ?, duration_ms = ?, size_bytes = ?, checksum = ?, expected_duration_ms = ?,
                  validation_summary = ?, last_error = ?
@@ -1629,7 +1645,7 @@ impl Repositories {
         duration_ms: i64,
         size_bytes: i64,
         checksum: &str,
-    ) -> Result<AudioArtifactDto, sqlx::Error> {
+    ) -> Result<AudioArtifactDto, sqlx::error::Error> {
         let artifact = AudioArtifactDto {
             id: Uuid::new_v4().to_string(),
             source: "microphone".to_string(),
@@ -1639,7 +1655,7 @@ impl Repositories {
             checksum: checksum.to_string(),
             created_at: timestamp(),
         };
-        sqlx::query(
+        query(
             "INSERT INTO audio_artifacts (id, note_id, recording_session_id, source, path, format, duration_ms, size_bytes, checksum, status, expected_duration_ms, created_at)
              VALUES (?, ?, ?, 'microphone', ?, 'wav', ?, ?, ?, 'valid', ?, ?)",
         )
@@ -1660,8 +1676,8 @@ impl Repositories {
     pub async fn latest_audio_artifact_path(
         &self,
         note_id: &str,
-    ) -> Result<Option<(String, String)>, sqlx::Error> {
-        let row = sqlx::query(
+    ) -> Result<Option<(String, String)>, sqlx::error::Error> {
+        let row = query(
             "SELECT id, path FROM audio_artifacts WHERE note_id = ? AND status = 'valid' ORDER BY created_at DESC LIMIT 1",
         )
         .bind(note_id)
@@ -1673,8 +1689,8 @@ impl Repositories {
     async fn latest_audio_artifact(
         &self,
         note_id: &str,
-    ) -> Result<Option<AudioArtifactDto>, sqlx::Error> {
-        let row = sqlx::query(
+    ) -> Result<Option<AudioArtifactDto>, sqlx::error::Error> {
+        let row = query(
             "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at
              FROM audio_artifacts
              WHERE note_id = ? AND status = 'valid'
@@ -1698,8 +1714,8 @@ impl Repositories {
     pub async fn latest_valid_audio_artifact_paths(
         &self,
         note_id: &str,
-    ) -> Result<Vec<(String, String, String, String)>, sqlx::Error> {
-        let session = sqlx::query(
+    ) -> Result<Vec<(String, String, String, String)>, sqlx::error::Error> {
+        let session = query(
             "SELECT recording_session_id
              FROM audio_artifacts
              WHERE note_id = ? AND status = 'valid'
@@ -1713,7 +1729,7 @@ impl Repositories {
             return Ok(Vec::new());
         };
         let session_id: String = session.get("recording_session_id");
-        let rows = sqlx::query(
+        let rows = query(
             "SELECT id, source, path, recording_session_id
              FROM audio_artifacts
              WHERE note_id = ? AND recording_session_id = ? AND status = 'valid'
@@ -1739,8 +1755,8 @@ impl Repositories {
     async fn latest_audio_sources(
         &self,
         note_id: &str,
-    ) -> Result<Vec<AudioArtifactDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    ) -> Result<Vec<AudioArtifactDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at
              FROM audio_artifacts
              WHERE note_id = ? AND status = 'valid'
@@ -1763,8 +1779,11 @@ impl Repositories {
             .collect())
     }
 
-    async fn latest_transcript(&self, note_id: &str) -> Result<Option<TranscriptDto>, sqlx::Error> {
-        let row = sqlx::query(
+    async fn latest_transcript(
+        &self,
+        note_id: &str,
+    ) -> Result<Option<TranscriptDto>, sqlx::error::Error> {
+        let row = query(
             "SELECT id, text, source_mode, source, start_ms, end_ms, turn_index, language, status, last_error
              FROM transcripts
              WHERE note_id = ?
@@ -1790,8 +1809,11 @@ impl Repositories {
         }))
     }
 
-    async fn source_transcripts(&self, note_id: &str) -> Result<Vec<TranscriptDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    async fn source_transcripts(
+        &self,
+        note_id: &str,
+    ) -> Result<Vec<TranscriptDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT t.id, t.text, t.source_mode, t.source, t.start_ms, t.end_ms, t.turn_index, t.language, t.status, t.last_error
              FROM transcripts t
              LEFT JOIN recording_sessions rs ON rs.id = t.recording_session_id
@@ -1830,8 +1852,8 @@ impl Repositories {
     pub async fn successful_source_turn_transcripts_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<TranscriptDto>, sqlx::Error> {
-        let rows = sqlx::query(
+    ) -> Result<Vec<TranscriptDto>, sqlx::error::Error> {
+        let rows = query(
             "SELECT id, text, source_mode, source, start_ms, end_ms, turn_index, language, status, last_error
              FROM transcripts
              WHERE recording_session_id = ?
@@ -1869,7 +1891,7 @@ impl Repositories {
         text: &str,
         language: Option<String>,
         provider: &str,
-    ) -> Result<TranscriptDto, sqlx::Error> {
+    ) -> Result<TranscriptDto, sqlx::error::Error> {
         let transcript = TranscriptDto {
             id: Uuid::new_v4().to_string(),
             text: text.to_string(),
@@ -1883,7 +1905,7 @@ impl Repositories {
             last_error: None,
         };
         let now = timestamp();
-        sqlx::query(
+        query(
             "INSERT INTO transcripts (id, note_id, audio_artifact_id, source_artifact_id, source, source_mode, text, language, provider, status, retry_count, created_at, updated_at)
              VALUES (?, ?, ?, ?, 'microphone', 'microphone_only', ?, ?, ?, 'succeeded', 0, ?, ?)",
         )
@@ -1915,7 +1937,7 @@ impl Repositories {
         start_ms: Option<i64>,
         end_ms: Option<i64>,
         turn_index: Option<i64>,
-    ) -> Result<TranscriptDto, sqlx::Error> {
+    ) -> Result<TranscriptDto, sqlx::error::Error> {
         let transcript = TranscriptDto {
             id: Uuid::new_v4().to_string(),
             text: text.to_string(),
@@ -1929,7 +1951,7 @@ impl Repositories {
             last_error: None,
         };
         let now = timestamp();
-        sqlx::query(
+        query(
             "INSERT INTO transcripts
              (id, note_id, recording_session_id, audio_artifact_id, source_artifact_id, source, source_mode, text, start_ms, end_ms, turn_index, language, provider, status, retry_count, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, ?, ?)",
@@ -1968,9 +1990,9 @@ impl Repositories {
         start_ms: i64,
         end_ms: i64,
         turn_index: i64,
-    ) -> Result<TranscriptDto, sqlx::Error> {
+    ) -> Result<TranscriptDto, sqlx::error::Error> {
         let now = timestamp();
-        let row = sqlx::query(
+        let row = query(
             "INSERT INTO transcripts
              (id, note_id, recording_session_id, audio_artifact_id, source_artifact_id, source, source_mode, text, start_ms, end_ms, turn_index, language, provider, status, retry_count, last_error, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, NULL, ?, ?)
@@ -2035,7 +2057,7 @@ impl Repositories {
         start_ms: Option<i64>,
         end_ms: Option<i64>,
         turn_index: Option<i64>,
-    ) -> Result<TranscriptDto, sqlx::Error> {
+    ) -> Result<TranscriptDto, sqlx::error::Error> {
         let transcript = TranscriptDto {
             id: Uuid::new_v4().to_string(),
             text: String::new(),
@@ -2049,7 +2071,7 @@ impl Repositories {
             last_error: Some(last_error.to_string()),
         };
         let now = timestamp();
-        sqlx::query(
+        query(
             "INSERT INTO transcripts
              (id, note_id, recording_session_id, audio_artifact_id, source_artifact_id, source, source_mode, text, start_ms, end_ms, turn_index, language, provider, status, retry_count, last_error, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, NULL, ?, 'failed', 0, ?, ?, ?)",
@@ -2086,9 +2108,9 @@ impl Repositories {
         start_ms: i64,
         end_ms: i64,
         turn_index: i64,
-    ) -> Result<TranscriptDto, sqlx::Error> {
+    ) -> Result<TranscriptDto, sqlx::error::Error> {
         let now = timestamp();
-        let row = sqlx::query(
+        let row = query(
             "INSERT INTO transcripts
              (id, note_id, recording_session_id, audio_artifact_id, source_artifact_id, source, source_mode, text, start_ms, end_ms, turn_index, language, provider, status, retry_count, last_error, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, NULL, ?, 'failed', 0, ?, ?, ?)
@@ -2147,10 +2169,10 @@ impl Repositories {
         title_suggestion: Option<String>,
         provider: &str,
         prompt_version: &str,
-    ) -> Result<String, sqlx::Error> {
+    ) -> Result<String, sqlx::error::Error> {
         let now = timestamp();
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        query(
             "INSERT INTO generation_results (id, note_id, transcript_id, content, title_suggestion, provider, prompt_version, status, retry_count, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, ?, ?)",
         )
@@ -2171,8 +2193,8 @@ impl Repositories {
     pub async fn recording_recovery_info(
         &self,
         session_id: &str,
-    ) -> Result<Option<RecordingRecoveryInfo>, sqlx::Error> {
-        let row = sqlx::query(
+    ) -> Result<Option<RecordingRecoveryInfo>, sqlx::error::Error> {
+        let row = query(
             "SELECT id, note_id, source_mode, partial_path, final_path, expected_elapsed_ms
              FROM recording_sessions
              WHERE id = ?",
@@ -2194,12 +2216,12 @@ impl Repositories {
         &self,
         session_id: &str,
         note_id: &str,
-    ) -> Result<NoteDto, sqlx::Error> {
-        sqlx::query("UPDATE recording_sessions SET status = 'failed', last_error = 'Discarded by user' WHERE id = ?")
+    ) -> Result<NoteDto, sqlx::error::Error> {
+        query("UPDATE recording_sessions SET status = 'failed', last_error = 'Discarded by user' WHERE id = ?")
             .bind(session_id)
             .execute(&self.pool)
             .await?;
-        sqlx::query(
+        query(
             "UPDATE audio_artifacts
              SET status = 'discarded', last_error = 'Discarded by user'
              WHERE recording_session_id = ?",
@@ -2216,8 +2238,8 @@ impl Repositories {
         self.get_note(note_id).await
     }
 
-    async fn folder_ids(&self, note_id: &str) -> Result<Vec<String>, sqlx::Error> {
-        let rows = sqlx::query(
+    async fn folder_ids(&self, note_id: &str) -> Result<Vec<String>, sqlx::error::Error> {
+        let rows = query(
             "SELECT nf.folder_id
              FROM note_folders nf
              INNER JOIN folders f ON f.id = nf.folder_id
@@ -2232,41 +2254,41 @@ impl Repositories {
 }
 
 async fn delete_note_records(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
     note_id: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM note_generation_blocks WHERE note_id = ?")
+) -> Result<(), sqlx::error::Error> {
+    query("DELETE FROM note_generation_blocks WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM generation_results WHERE note_id = ?")
+    query("DELETE FROM generation_results WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM transcripts WHERE note_id = ?")
+    query("DELETE FROM transcripts WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM audio_artifacts WHERE note_id = ?")
+    query("DELETE FROM audio_artifacts WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query(
+    query(
         "DELETE FROM recording_checkpoints
          WHERE recording_session_id IN (SELECT id FROM recording_sessions WHERE note_id = ?)",
     )
     .bind(note_id)
     .execute(&mut **tx)
     .await?;
-    sqlx::query("DELETE FROM recording_sessions WHERE note_id = ?")
+    query("DELETE FROM recording_sessions WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM note_folders WHERE note_id = ?")
+    query("DELETE FROM note_folders WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM notes WHERE id = ?")
+    query("DELETE FROM notes WHERE id = ?")
         .bind(note_id)
         .execute(&mut **tx)
         .await?;
@@ -2558,7 +2580,7 @@ pub fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn folder_from_row(row: sqlx::sqlite::SqliteRow) -> FolderDto {
+fn folder_from_row(row: sqlx_sqlite::SqliteRow) -> FolderDto {
     FolderDto {
         id: row.get("id"),
         name: row.get("name"),
@@ -2578,7 +2600,7 @@ fn folder_from_row(row: sqlx::sqlite::SqliteRow) -> FolderDto {
     }
 }
 
-fn dictionary_entry_from_row(row: sqlx::sqlite::SqliteRow) -> DictionaryEntryDto {
+fn dictionary_entry_from_row(row: sqlx_sqlite::SqliteRow) -> DictionaryEntryDto {
     DictionaryEntryDto {
         id: row.get("id"),
         phrase: row.get("phrase"),
@@ -2587,7 +2609,7 @@ fn dictionary_entry_from_row(row: sqlx::sqlite::SqliteRow) -> DictionaryEntryDto
     }
 }
 
-fn dictation_history_item_from_row(row: sqlx::sqlite::SqliteRow) -> DictationHistoryItemDto {
+fn dictation_history_item_from_row(row: sqlx_sqlite::SqliteRow) -> DictationHistoryItemDto {
     DictationHistoryItemDto {
         id: row.get("id"),
         text: row.get("text"),
@@ -2597,7 +2619,7 @@ fn dictation_history_item_from_row(row: sqlx::sqlite::SqliteRow) -> DictationHis
     }
 }
 
-fn agent_task_from_row(row: sqlx::sqlite::SqliteRow) -> AgentTaskDto {
+fn agent_task_from_row(row: sqlx_sqlite::SqliteRow) -> AgentTaskDto {
     AgentTaskDto {
         id: row.get("id"),
         title: row.get("title"),
@@ -2615,7 +2637,7 @@ fn agent_task_from_row(row: sqlx::sqlite::SqliteRow) -> AgentTaskDto {
     }
 }
 
-fn agent_message_from_row(row: sqlx::sqlite::SqliteRow) -> AgentMessageDto {
+fn agent_message_from_row(row: sqlx_sqlite::SqliteRow) -> AgentMessageDto {
     AgentMessageDto {
         id: row.get("id"),
         task_id: row.get("task_id"),
@@ -2625,7 +2647,7 @@ fn agent_message_from_row(row: sqlx::sqlite::SqliteRow) -> AgentMessageDto {
     }
 }
 
-fn agent_tool_event_from_row(row: sqlx::sqlite::SqliteRow) -> AgentToolEventDto {
+fn agent_tool_event_from_row(row: sqlx_sqlite::SqliteRow) -> AgentToolEventDto {
     AgentToolEventDto {
         id: row.get("id"),
         task_id: row.get("task_id"),

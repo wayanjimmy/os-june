@@ -3,7 +3,7 @@ use os_scribe_lib::{
     db::{migrations::run_migrations, repositories::Repositories},
     domain::types::RecordingSourceMode,
 };
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx_sqlite::SqlitePoolOptions;
 use tempfile::tempdir;
 
 async fn repos() -> Repositories {

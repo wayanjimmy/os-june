@@ -40,8 +40,10 @@ use crate::{
     },
 };
 use chrono::{TimeZone, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::query::query;
+use sqlx::row::Row;
+use sqlx_sqlite::SqlitePool;
+use sqlx_sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
@@ -1541,7 +1543,7 @@ async fn hydrate_agent_task_from_hermes(
         return Ok(());
     };
 
-    let rows = sqlx::query(
+    let rows = query(
         "SELECT CAST(id AS TEXT) AS id, content, timestamp
          FROM messages
          WHERE session_id = ?
@@ -1631,7 +1633,7 @@ async fn match_hermes_session_for_task(
     else {
         return Ok(None);
     };
-    let rows = sqlx::query(
+    let rows = query(
         "SELECT id
          FROM sessions
          WHERE title = ?

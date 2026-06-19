@@ -2,7 +2,7 @@ use os_scribe_lib::{
     db::{migrations::run_migrations, repositories::Repositories},
     domain::types::{AgentMessageRole, AgentSafetyProfile, AgentTaskStatus, AgentToolEventStatus},
 };
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx_sqlite::SqlitePoolOptions;
 
 async fn test_repositories() -> Repositories {
     let pool = SqlitePoolOptions::new()

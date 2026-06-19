@@ -1,0 +1,48 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "12:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+    groups:
+      tauri:
+        patterns:
+          - "@tauri-apps/*"
+      frontend-tooling:
+        patterns:
+          - "@vitejs/*"
+          - "vite"
+          - "typescript"
+          - "vitest"
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+      time: "12:15"
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: cargo
+    directory: /scribe-api
+    schedule:
+      interval: weekly
+      day: monday
+      time: "12:30"
+      timezone: America/New_York
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "12:45"
+      timezone: America/New_York
+    open-pull-requests-limit: 10

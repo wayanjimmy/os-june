@@ -17,13 +17,13 @@ runs:
         echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
       with:
         toolchain: ${{ steps.toolchain.outputs.channel }}
         components: rustfmt, clippy
 
     - name: Cache cargo registry
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: |
           ~/.cargo/registry/index
@@ -34,7 +34,7 @@ runs:
           cargo-registry-${{ runner.os }}-
 
     - name: Cache cargo target
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: scribe-api/target
         key: cargo-target-${{ runner.os }}-${{ hashFiles('scribe-api/Cargo.lock') }}
