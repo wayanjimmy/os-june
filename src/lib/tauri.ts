@@ -449,6 +449,9 @@ export type HermesSkillDocument = {
   name: string;
   relativePath: string;
   content: string;
+  /** True for skills loaded from an external dir (e.g. ~/.agents/skills).
+   *  June can read but not write them, so the editor is read-only. */
+  readOnly?: boolean;
 };
 
 export type HermesToolsetInfo = {

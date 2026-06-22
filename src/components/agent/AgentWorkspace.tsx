@@ -5253,6 +5253,7 @@ function SkillEditorPanel({
   onSave: () => void;
 }) {
   const title = skill?.name ?? document?.name ?? "Skill";
+  const readOnly = Boolean(document?.readOnly);
   return (
     <section
       className="agent-management-panel agent-skill-editor-panel"
@@ -5278,6 +5279,7 @@ function SkillEditorPanel({
               {document?.relativePath ? (
                 <span>{document.relativePath}</span>
               ) : null}
+              {readOnly ? <span>Read-only</span> : null}
               {skill ? (
                 <span>{skill.enabled ? "Enabled" : "Disabled"}</span>
               ) : null}
@@ -5295,27 +5297,36 @@ function SkillEditorPanel({
             value={value}
             aria-label={`${title} skill Markdown`}
             disabled={saving}
+            readOnly={readOnly}
             spellCheck={false}
             onChange={(event) => onChange(event.currentTarget.value)}
           />
         )}
       </div>
       <footer className="agent-messaging-footer">
-        <button
-          type="button"
-          disabled={!dirty || saving || loading}
-          onClick={onCancel}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="primary-action primary-solid"
-          disabled={!dirty || saving || loading || !document}
-          onClick={onSave}
-        >
-          {saving ? "Saving..." : "Save changes"}
-        </button>
+        {readOnly ? (
+          <p className="agent-skill-editor-readonly-note">
+            Read-only. This skill loads from ~/.agents/skills. Edit it on disk.
+          </p>
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={!dirty || saving || loading}
+              onClick={onCancel}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-action primary-solid"
+              disabled={!dirty || saving || loading || !document}
+              onClick={onSave}
+            >
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+          </>
+        )}
       </footer>
     </section>
   );

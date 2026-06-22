@@ -1316,6 +1316,12 @@ input:focus-visible,
   margin-right: auto;
 }
 
+.agent-skill-editor-readonly-note {
+  margin: 0 auto 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
 /* Action cards (approval, clarify) — a clean system card: card surface, subtle
  * border, soft shadow. */
 .agent-safety-panel,
