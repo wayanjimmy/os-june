@@ -521,6 +521,18 @@ pub fn start_on_app_start(app: &tauri::App) {
     });
 }
 
+#[tauri::command]
+pub async fn ensure_hermes_bridge_gateway(bridge: State<'_, HermesBridge>) -> Result<(), AppError> {
+    let connections = live_connections(&bridge)?;
+    let Some(connection) = connections.first() else {
+        return Err(AppError::new(
+            "hermes_bridge_not_running",
+            "Hermes bridge is not running.",
+        ));
+    };
+    ensure_hermes_gateway_running(connection).await
+}
+
 async fn start_hermes_bridge_inner(
     app: &AppHandle,
     bridge: &HermesBridge,
@@ -1859,17 +1871,49 @@ async fn hermes_api_json(
 async fn start_hermes_gateway_if_needed(
     connection: &HermesBridgeConnection,
 ) -> Result<(), AppError> {
-    let status = hermes_connection_json(connection, reqwest::Method::GET, "/api/status", None)
-        .await
-        .unwrap_or_else(|_| serde_json::json!({}));
-    if status
-        .get("gateway_running")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    if hermes_gateway_running(connection).await.unwrap_or(false) {
         return Ok(());
     }
     spawn_hermes_gateway_start(connection)
+}
+
+async fn ensure_hermes_gateway_running(
+    connection: &HermesBridgeConnection,
+) -> Result<(), AppError> {
+    if hermes_gateway_running(connection).await.unwrap_or(false) {
+        return Ok(());
+    }
+
+    run_hermes_gateway_start(connection).await?;
+    wait_for_hermes_gateway(connection).await
+}
+
+async fn hermes_gateway_running(connection: &HermesBridgeConnection) -> Result<bool, AppError> {
+    let status =
+        hermes_connection_json(connection, reqwest::Method::GET, "/api/status", None).await?;
+    Ok(status
+        .get("gateway_running")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
+}
+
+async fn wait_for_hermes_gateway(connection: &HermesBridgeConnection) -> Result<(), AppError> {
+    const GATEWAY_READY_TIMEOUT: Duration = Duration::from_secs(10);
+    const GATEWAY_READY_POLL: Duration = Duration::from_millis(250);
+
+    let started = Instant::now();
+    loop {
+        if hermes_gateway_running(connection).await.unwrap_or(false) {
+            return Ok(());
+        }
+        if started.elapsed() >= GATEWAY_READY_TIMEOUT {
+            return Err(AppError::new(
+                "hermes_gateway_start_failed",
+                "`hermes gateway start` completed, but the gateway is still not running. See logs/gateway-start.log.",
+            ));
+        }
+        tokio::time::sleep(GATEWAY_READY_POLL).await;
+    }
 }
 
 /// Starts the messaging gateway by running `hermes gateway start` as a direct
@@ -1888,16 +1932,7 @@ async fn start_hermes_gateway_if_needed(
 /// `<hermes_home>/logs/gateway-start.log` (the same file the bridge's action
 /// runner appends to) and the exit status is reaped in the background.
 fn spawn_hermes_gateway_start(connection: &HermesBridgeConnection) -> Result<(), AppError> {
-    let hermes_home = PathBuf::from(&connection.hermes_home);
-    let mut cmd = build_hermes_gateway_start_command(connection, &hermes_home);
-    match open_gateway_start_log(&hermes_home) {
-        Some((log_for_stdout, log_for_stderr)) => {
-            cmd.stdout(log_for_stdout).stderr(log_for_stderr);
-        }
-        None => {
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-    }
+    let mut cmd = hermes_gateway_start_command(connection);
     let mut child = cmd.spawn().map_err(|error| {
         AppError::new(
             "hermes_gateway_start_failed",
@@ -1916,6 +1951,45 @@ fn spawn_hermes_gateway_start(connection: &HermesBridgeConnection) -> Result<(),
         }
     });
     Ok(())
+}
+
+async fn run_hermes_gateway_start(connection: &HermesBridgeConnection) -> Result<(), AppError> {
+    let mut cmd = hermes_gateway_start_command(connection);
+    let status = tauri::async_runtime::spawn_blocking(move || cmd.status())
+        .await
+        .map_err(|error| {
+            AppError::new(
+                "hermes_gateway_start_failed",
+                format!("Could not wait for `hermes gateway start`. {error}"),
+            )
+        })?
+        .map_err(|error| {
+            AppError::new(
+                "hermes_gateway_start_failed",
+                format!("Could not run `hermes gateway start`. {error}"),
+            )
+        })?;
+    if !status.success() {
+        return Err(AppError::new(
+            "hermes_gateway_start_failed",
+            format!("`hermes gateway start` exited with {status}. See logs/gateway-start.log."),
+        ));
+    }
+    Ok(())
+}
+
+fn hermes_gateway_start_command(connection: &HermesBridgeConnection) -> Command {
+    let hermes_home = PathBuf::from(&connection.hermes_home);
+    let mut cmd = build_hermes_gateway_start_command(connection, &hermes_home);
+    match open_gateway_start_log(&hermes_home) {
+        Some((log_for_stdout, log_for_stderr)) => {
+            cmd.stdout(log_for_stdout).stderr(log_for_stderr);
+        }
+        None => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+    cmd
 }
 
 /// Pure command construction so a test can assert the spawn is the bare hermes
@@ -3869,6 +3943,32 @@ mod tests {
             Some("1")
         );
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/hermes-home")));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn gateway_start_reports_nonzero_exit() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let connection = HermesBridgeConnection {
+            base_url: "http://127.0.0.1:1".to_string(),
+            ws_url: "ws://127.0.0.1:1/api/ws".to_string(),
+            token: "session-token".to_string(),
+            port: 1,
+            command: "/usr/bin/false".to_string(),
+            hermes_home: home.path().to_string_lossy().into_owned(),
+            cwd: None,
+            provider_proxy_port: 2,
+            pid: 3,
+            sandboxed: true,
+            full_mode: false,
+        };
+
+        let error = run_hermes_gateway_start(&connection)
+            .await
+            .expect_err("nonzero gateway start exits fail");
+
+        assert_eq!(error.code, "hermes_gateway_start_failed");
+        assert!(error.message.contains("exited"));
     }
 
     #[test]
