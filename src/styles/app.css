@@ -6430,31 +6430,48 @@ input:focus-visible,
   font-weight: 400;
 }
 
-.note-generating {
-  display: inline-flex;
-  align-items: center;
+.note-processing-progress {
+  display: grid;
   gap: var(--sp-2);
+  width: min(100%, 380px);
   margin: var(--sp-4) 0 0;
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-3);
   border-radius: var(--r-md);
   background: color-mix(in oklch, var(--muted) 68%, var(--card));
   font-size: var(--fs-md);
   font-weight: 500;
-  line-height: 1;
+  line-height: 1.1;
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
 }
 
-/* The rolling dot spinner (drawn, colored via currentColor) — the same working
+.transcript-processing-progress {
+  max-width: min(100%, var(--content-max));
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+}
+
+.note-processing-progress-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* The rolling dot spinner (drawn, colored via currentColor) is the same working
  * indicator as the agent chat, sidebar, and composer notice. */
-.note-generating-spinner {
+.note-processing-progress-spinner {
   flex: none;
   color: color-mix(in oklch, var(--muted-foreground) 80%, transparent);
 }
 
-.note-generating-label,
+.note-processing-progress-label,
 .text-shimmer {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   background: linear-gradient(
     90deg,
     var(--muted-foreground) 0%,
@@ -6477,12 +6494,107 @@ input:focus-visible,
   animation-duration: 1.2s;
 }
 
+.note-processing-progress-track {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklch, var(--muted-foreground) 13%, transparent);
+}
+
+.note-processing-progress-track::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -42%;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklch, var(--warm-strong) 78%, transparent) 45%,
+    color-mix(in oklch, var(--warm-strong) 94%, var(--foreground)) 50%,
+    color-mix(in oklch, var(--warm-strong) 78%, transparent) 55%,
+    transparent 100%
+  );
+  animation: note-processing-track-sweep 1.6s var(--ease-in-out) infinite;
+}
+
+.note-processing-progress-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.note-processing-progress-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  color: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
+  font-size: var(--fs-xs);
+  line-height: 1;
+}
+
+.note-processing-progress-step[data-state="done"],
+.note-processing-progress-step[data-state="active"] {
+  color: var(--warm-strong);
+}
+
+.note-processing-progress-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: currentColor;
+  opacity: 0.45;
+}
+
+.note-processing-progress-step[data-state="done"]
+  .note-processing-progress-dot {
+  opacity: 0.72;
+}
+
+.note-processing-progress-step[data-state="active"]
+  .note-processing-progress-dot {
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in oklch, currentColor 16%, transparent);
+}
+
+.note-processing-progress-step-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @keyframes note-text-shimmer {
   0% {
     background-position: 150% 0;
   }
   100% {
     background-position: -50% 0;
+  }
+}
+
+@keyframes note-processing-track-sweep {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .note-processing-progress-track::before {
+    left: 0;
+    width: 100%;
+    animation: none;
   }
 }
 
