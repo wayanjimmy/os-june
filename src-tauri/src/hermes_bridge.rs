@@ -1331,37 +1331,76 @@ pub async fn ensure_hermes_bridge_session(
             "Hermes session ID is required.",
         ));
     }
-    let mut body = serde_json::json!({ "id": session_id });
-    if let Some(title) = request
+    let title = request
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        body["title"] = serde_json::Value::String(title.to_string());
-    }
-    if let Some(model) = request
+        .map(ToString::to_string);
+    let model = request
         .model
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let unchanged = || {
+        serde_json::json!({
+            "object": "hermes.session.ensure",
+            "id": session_id,
+            "created": false,
+            "updated": false
+        })
+    };
+
+    // Hermes dashboard v0.17 no longer creates sessions over REST. The live
+    // session is created through the gateway; REST is only a best-effort title
+    // update for the sidebar/session browser.
+    let Some(title) = title else {
+        return Ok(unchanged());
+    };
+    let patch_body = serde_json::json!({ "title": title.clone() });
+    match hermes_api_json(
+        &bridge,
+        reqwest::Method::PATCH,
+        &format!("/api/sessions/{}", urlencoding::encode(session_id)),
+        Some(patch_body),
+    )
+    .await
     {
-        body["model"] = serde_json::Value::String(model.to_string());
-    }
-    match hermes_api_json(&bridge, reqwest::Method::POST, "/api/sessions", Some(body)).await {
-        Ok(value) => Ok(value),
-        Err(error)
-            if error.code == "hermes_bridge_api_failed"
-                && error.message.starts_with("Hermes API returned 409") =>
-        {
-            Ok(serde_json::json!({
-                "object": "hermes.session.ensure",
-                "id": session_id,
-                "created": false
-            }))
+        Ok(value) => return Ok(value),
+        Err(error) if hermes_api_status(&error, 404) || hermes_api_status(&error, 405) => {
+            let mut legacy_body = serde_json::json!({ "id": session_id, "title": title });
+            if let Some(model) = model {
+                legacy_body["model"] = serde_json::Value::String(model);
+            }
+            match hermes_api_json(
+                &bridge,
+                reqwest::Method::POST,
+                "/api/sessions",
+                Some(legacy_body),
+            )
+            .await
+            {
+                Ok(value) => Ok(value),
+                Err(error)
+                    if hermes_api_status(&error, 404)
+                        || hermes_api_status(&error, 405)
+                        || hermes_api_status(&error, 409) =>
+                {
+                    Ok(unchanged())
+                }
+                Err(error) => Err(error),
+            }
         }
         Err(error) => Err(error),
     }
+}
+
+fn hermes_api_status(error: &AppError, status_code: u16) -> bool {
+    error.code == "hermes_bridge_api_failed"
+        && error
+            .message
+            .starts_with(&format!("Hermes API returned {status_code}"))
 }
 
 #[tauri::command]
