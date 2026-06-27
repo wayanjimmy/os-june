@@ -5,7 +5,7 @@ use axum::{Json, extract::State, http::HeaderMap};
 use scribe_domain::{WebFetchResult, WebSearchProvider, WebSearchResults};
 use scribe_services::{WebFetchParams, WebSearchParams};
 use serde::Deserialize;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::{Host, Url};
 
 /// Venice clamps `limit` to its own bounds; we mirror them so an out-of-range
@@ -80,7 +80,17 @@ pub(crate) async fn fetch(
     }
     validation::validate_text_len("url", &url, validation::MAX_WEB_URL_CHARS)?;
     let url = match validate_public_http_url(&url) {
-        Ok(canonical_url) => canonical_url,
+        Ok(FetchUrlTarget::Literal { canonical_url }) => canonical_url,
+        Ok(FetchUrlTarget::HttpsDomain {
+            canonical_url,
+            domain,
+            port,
+        }) => {
+            if !domain_resolves_to_public_ips(&domain, port).await {
+                return Err(ApiError::bad_request("url_must_be_public_http"));
+            }
+            canonical_url
+        }
         Err(FetchUrlValidationError::NonHttp) => {
             return Err(ApiError::bad_request("url_must_be_http"));
         }
@@ -115,21 +125,85 @@ enum FetchUrlValidationError {
     NonPublicHost,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FetchUrlTarget {
+    Literal {
+        canonical_url: String,
+    },
+    HttpsDomain {
+        canonical_url: String,
+        domain: String,
+        port: u16,
+    },
+}
+
 /// Only public http(s) URLs reach the upstream scraper. Literal IPs are checked
-/// locally. Domain names are rejected because the upstream scraper receives and
-/// resolves only the original URL, so an API-side DNS preflight cannot bind the
-/// address that is ultimately fetched.
-fn validate_public_http_url(url: &str) -> Result<String, FetchUrlValidationError> {
+/// locally. HTTPS domain names get a DNS preflight and are forwarded only in
+/// parsed/canonical form; HTTP domain names are rejected because the upstream
+/// provider resolves the host itself and HTTP has no TLS hostname binding.
+fn validate_public_http_url(url: &str) -> Result<FetchUrlTarget, FetchUrlValidationError> {
     let parsed = Url::parse(url).map_err(|_| FetchUrlValidationError::NonHttp)?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(FetchUrlValidationError::NonHttp);
     }
 
     match parsed.host() {
-        Some(Host::Ipv4(addr)) if is_public_ipv4(addr) => Ok(parsed.to_string()),
-        Some(Host::Ipv6(addr)) if is_public_ipv6(addr) => Ok(parsed.to_string()),
+        Some(Host::Domain(domain)) if parsed.scheme() == "https" && is_public_domain(domain) => {
+            let port = parsed
+                .port_or_known_default()
+                .ok_or(FetchUrlValidationError::NonPublicHost)?;
+            Ok(FetchUrlTarget::HttpsDomain {
+                canonical_url: parsed.to_string(),
+                domain: domain.to_string(),
+                port,
+            })
+        }
+        Some(Host::Ipv4(addr)) if is_public_ipv4(addr) => Ok(FetchUrlTarget::Literal {
+            canonical_url: parsed.to_string(),
+        }),
+        Some(Host::Ipv6(addr)) if is_public_ipv6(addr) => Ok(FetchUrlTarget::Literal {
+            canonical_url: parsed.to_string(),
+        }),
         Some(_) | None => Err(FetchUrlValidationError::NonPublicHost),
     }
+}
+
+async fn domain_resolves_to_public_ips(domain: &str, port: u16) -> bool {
+    tokio::net::lookup_host((domain, port))
+        .await
+        .is_ok_and(|addrs| {
+            let ips: Vec<IpAddr> = addrs.map(|addr| addr.ip()).collect();
+            resolved_ips_are_public(&ips)
+        })
+}
+
+fn resolved_ips_are_public(ips: &[IpAddr]) -> bool {
+    !ips.is_empty() && ips.iter().copied().all(is_public_ip)
+}
+
+fn is_public_domain(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty()
+        || has_terminal_label(&domain, "localhost")
+        || has_terminal_label(&domain, "local")
+        || has_terminal_label(&domain, "localdomain")
+        || has_terminal_label(&domain, "internal")
+    {
+        return false;
+    }
+
+    // Avoid numeric-only hostnames that some HTTP stacks interpret as
+    // alternate IPv4 forms.
+    !domain
+        .split('.')
+        .all(|label| label.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn has_terminal_label(domain: &str, label: &str) -> bool {
+    domain == label
+        || domain
+            .strip_suffix(label)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 fn is_public_ipv4(addr: Ipv4Addr) -> bool {
@@ -233,27 +307,45 @@ fn is_benchmarking_ipv6(segments: [u16; 8]) -> bool {
     segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0
 }
 
+fn is_public_ip(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(addr) => is_public_ipv4(addr),
+        IpAddr::V6(addr) => is_public_ipv6(addr),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FetchUrlValidationError, validate_public_http_url};
+    use super::{
+        FetchUrlTarget, FetchUrlValidationError, resolved_ips_are_public, validate_public_http_url,
+    };
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn accepts_public_http_and_https_literal_ips() {
         assert_eq!(
             validate_public_http_url("https://93.184.216.34/post"),
-            Ok("https://93.184.216.34/post".to_string())
+            Ok(FetchUrlTarget::Literal {
+                canonical_url: "https://93.184.216.34/post".to_string()
+            })
         );
         assert_eq!(
             validate_public_http_url("https://[2606:2800:220:1:248:1893:25c8:1946]/post"),
-            Ok("https://[2606:2800:220:1:248:1893:25c8:1946]/post".to_string())
+            Ok(FetchUrlTarget::Literal {
+                canonical_url: "https://[2606:2800:220:1:248:1893:25c8:1946]/post".to_string()
+            })
         );
         assert_eq!(
             validate_public_http_url("http://[64:ff9b::5db8:d822]/post"),
-            Ok("http://[64:ff9b::5db8:d822]/post".to_string())
+            Ok(FetchUrlTarget::Literal {
+                canonical_url: "http://[64:ff9b::5db8:d822]/post".to_string()
+            })
         );
         assert_eq!(
             validate_public_http_url("http://[2002:5db8:d822::]/post"),
-            Ok("http://[2002:5db8:d822::]/post".to_string())
+            Ok(FetchUrlTarget::Literal {
+                canonical_url: "http://[2002:5db8:d822::]/post".to_string()
+            })
         );
     }
 
@@ -261,19 +353,44 @@ mod tests {
     fn canonicalizes_public_literal_urls_before_forwarding() {
         assert_eq!(
             validate_public_http_url("http://93.184.216.34\\@169.254.169.254/"),
-            Ok("http://93.184.216.34/@169.254.169.254/".to_string())
+            Ok(FetchUrlTarget::Literal {
+                canonical_url: "http://93.184.216.34/@169.254.169.254/".to_string()
+            })
         );
     }
 
     #[test]
-    fn rejects_domain_fetch_targets() {
+    fn accepts_https_domain_fetch_targets_for_dns_preflight() {
+        assert_eq!(
+            validate_public_http_url("https://example.com"),
+            Ok(FetchUrlTarget::HttpsDomain {
+                canonical_url: "https://example.com/".to_string(),
+                domain: "example.com".to_string(),
+                port: 443,
+            })
+        );
+        assert_eq!(
+            validate_public_http_url("HTTPS://Example.com/page"),
+            Ok(FetchUrlTarget::HttpsDomain {
+                canonical_url: "https://example.com/page".to_string(),
+                domain: "example.com".to_string(),
+                port: 443,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_non_https_and_local_domain_fetch_targets() {
         for url in [
-            "https://example.com",
-            "HTTP://Example.com/page",
+            "http://example.com",
             "http://localhost",
+            "https://localhost",
             "http://foo.localhost/path",
+            "https://foo.localhost/path",
             "http://service.local/path",
+            "https://service.local/path",
             "http://service.internal/path",
+            "https://service.internal/path",
         ] {
             assert_eq!(
                 validate_public_http_url(url),
@@ -353,5 +470,22 @@ mod tests {
                 "{url} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn requires_every_resolved_domain_ip_to_be_public() {
+        assert!(resolved_ips_are_public(&[IpAddr::V4(Ipv4Addr::new(
+            93, 184, 216, 34
+        ))]));
+        assert!(!resolved_ips_are_public(&[IpAddr::V4(Ipv4Addr::new(
+            192, 0, 0, 8
+        ))]));
+        assert!(!resolved_ips_are_public(&[IpAddr::V6(
+            "64:ff9b:1::a9fe:a9fe".parse::<Ipv6Addr>().unwrap()
+        )]));
+        assert!(!resolved_ips_are_public(&[
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ]));
     }
 }
