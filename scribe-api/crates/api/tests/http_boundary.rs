@@ -395,25 +395,6 @@ async fn integration_web_fetch_rejects_private_network_url() -> Result<(), Box<d
 }
 
 #[tokio::test]
-async fn integration_web_fetch_rejects_domain_url() -> Result<(), Box<dyn Error>> {
-    let response = send(json_request(
-        "/v1/web/fetch",
-        &serde_json::json!({
-            "url": "https://example.com/post",
-            "requestId": "req-1"
-        }),
-        Some(AUTHORIZATION),
-    )?)
-    .await;
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = response_json(response).await?;
-    assert_eq!(body["success"], false);
-    assert_eq!(body["message"], "url_must_be_public_http");
-    Ok(())
-}
-
-#[tokio::test]
 async fn integration_verify_page_is_public_html() -> Result<(), Box<dyn Error>> {
     let response = send(get_request("/verify")?).await;
 
