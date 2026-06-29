@@ -67,8 +67,8 @@ const signedOutAccount: AccountStatus = {
 type ListenHandler = (event: { payload: string }) => void;
 
 // What check_recording_source_readiness returns after the capture-helper
-// probe: a passing probe leaves the system permissionState at "unknown" and
-// signals the grant via ready; a denial flips both.
+// probe: a passing probe reports the system source as granted; a denial
+// flips both ready and permissionState.
 function systemAudioReadiness(granted: boolean): RecordingSourceReadinessDto {
   return {
     sourceMode: "microphonePlusSystem",
@@ -86,13 +86,26 @@ function systemAudioReadiness(granted: boolean): RecordingSourceReadinessDto {
         source: "system",
         required: true,
         ready: granted,
-        permissionState: granted ? "unknown" : "denied",
+        permissionState: granted ? "granted" : "denied",
         deviceAvailable: granted,
         captureAvailable: granted,
         recoveryAction: "openSystemAudioSettings",
       },
     ],
   };
+}
+
+function systemAudioCaptureUnavailableReadiness(): RecordingSourceReadinessDto {
+  const readiness = systemAudioReadiness(false);
+  const system = readiness.sources.find((source) => source.source === "system");
+  if (system) {
+    system.permissionState = "granted";
+    system.deviceAvailable = true;
+    system.captureAvailable = false;
+    system.recoveryAction = "restartApp";
+    system.message = "Failed to create audio format for system tap.";
+  }
+  return readiness;
 }
 
 function shortcut(label: string) {
@@ -627,6 +640,28 @@ describe("OnboardingFlow", () => {
       grantPermissions();
 
       await screen.findByText("Needs macOS 14.2 or later.");
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled(),
+      );
+    } finally {
+      restoreNavigator();
+    }
+  });
+
+  it("does not show System Settings copy when system audio permission is granted but capture is unavailable", async () => {
+    const restoreNavigator = stubMacNavigatorPlatform();
+    mocks.checkRecordingSourceReadiness.mockResolvedValue(
+      systemAudioCaptureUnavailableReadiness(),
+    );
+    try {
+      await renderFlow();
+      grantPermissions();
+
+      expect(
+        screen.queryByText(
+          "Turned off in System Settings. Flip the toggle and June will notice.",
+        ),
+      ).not.toBeInTheDocument();
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled(),
       );

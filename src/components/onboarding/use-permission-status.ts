@@ -84,10 +84,15 @@ export function useSystemAudioStatus(active: boolean): {
         );
         if (!system || system.permissionState === "unsupported") {
           setStatus("unsupported");
+        } else if (system.permissionState === "granted") {
+          setStatus("granted");
+        } else if (
+          system.permissionState === "denied" ||
+          system.permissionState === "restricted"
+        ) {
+          setStatus("denied");
         } else {
-          // The probe leaves permissionState "unknown" on success; ready is
-          // the granted signal.
-          setStatus(system.ready ? "granted" : "denied");
+          setStatus(system.ready ? "granted" : "unknown");
         }
       })
       .catch(() => {
