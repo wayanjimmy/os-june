@@ -508,6 +508,11 @@ export type HermesSessionInfo = {
   is_active?: boolean;
   status?: string;
   source?: string;
+  kind?: string | null;
+  session_type?: string | null;
+  sessionType?: string | null;
+  subagent_id?: string | null;
+  subagentId?: string | null;
   user_id?: string;
   model?: string;
   title?: string;
@@ -519,6 +524,7 @@ export type HermesSessionInfo = {
   message_count?: number;
   tool_call_count?: number;
   parent_session_id?: string | null;
+  parentSessionId?: string | null;
   last_active?: string;
   lastActive?: string;
   preview?: string;

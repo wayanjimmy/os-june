@@ -5847,6 +5847,10 @@ export function AgentWorkspace({
   // history fetch that fills the new conversation in) must land at the bottom
   // instantly; only turns arriving while the user is already reading glide.
   const settledScrollSelectionRef = useRef<string>();
+  const transcriptShouldStickToBottomRef = useRef(true);
+  const transcriptProgrammaticScrollRef = useRef(false);
+  const transcriptProgrammaticScrollTimeoutRef = useRef<number | undefined>();
+  const transcriptLastScrollTopRef = useRef(0);
 
   // History for the selected conversation has landed: a session gets an entry
   // in hermesSessionMessages (even an empty one) once its fetch resolves;
@@ -5864,14 +5868,64 @@ export function AgentWorkspace({
     hermesSessionsLoading && !hermesSessionsHydrated;
 
   useEffect(() => {
+    if (heroMode) return;
+    const scroller = agentScrollRef.current;
+    if (!scroller) return;
+    const clearProgrammaticScroll = () => {
+      transcriptProgrammaticScrollRef.current = false;
+      if (transcriptProgrammaticScrollTimeoutRef.current !== undefined) {
+        window.clearTimeout(transcriptProgrammaticScrollTimeoutRef.current);
+        transcriptProgrammaticScrollTimeoutRef.current = undefined;
+      }
+    };
+    const updateStickiness = () => {
+      const previousScrollTop = transcriptLastScrollTopRef.current;
+      transcriptLastScrollTopRef.current = scroller.scrollTop;
+      if (transcriptProgrammaticScrollRef.current) {
+        if (scroller.scrollTop < previousScrollTop) {
+          clearProgrammaticScroll();
+          transcriptShouldStickToBottomRef.current =
+            isAgentTranscriptNearBottom(scroller);
+          return;
+        }
+        transcriptShouldStickToBottomRef.current = true;
+        if (isAgentTranscriptNearBottom(scroller)) clearProgrammaticScroll();
+        return;
+      }
+      transcriptShouldStickToBottomRef.current =
+        isAgentTranscriptNearBottom(scroller);
+    };
+    const updateFromUserScroll = () => {
+      clearProgrammaticScroll();
+      window.requestAnimationFrame(updateStickiness);
+    };
+    updateStickiness();
+    scroller.addEventListener("scroll", updateStickiness, { passive: true });
+    scroller.addEventListener("wheel", updateFromUserScroll, {
+      passive: true,
+    });
+    scroller.addEventListener("touchmove", updateFromUserScroll, {
+      passive: true,
+    });
+    return () => {
+      scroller.removeEventListener("scroll", updateStickiness);
+      scroller.removeEventListener("wheel", updateFromUserScroll);
+      scroller.removeEventListener("touchmove", updateFromUserScroll);
+      clearProgrammaticScroll();
+    };
+  }, [heroMode, selectedHermesSessionId, selectedTaskId]);
+
+  useEffect(() => {
     // The conversation scrolls in .agent-scroll, which sits below the sticky
     // breadcrumb so the scrollbar can't ride up over the bar — drive that
     // scroller to the bottom as turns arrive.
     const scroller = listRef.current?.closest(".agent-scroll");
     if (!(scroller instanceof HTMLElement)) return;
-    if (typeof scroller.scrollTo !== "function") return; // jsdom has no scrollTo
     const selectionKey = `${selectedHermesSessionId ?? ""}:${selectedTaskId ?? ""}`;
     const settled = settledScrollSelectionRef.current === selectionKey;
+    if (!settled) {
+      transcriptShouldStickToBottomRef.current = true;
+    }
     if (selectedHistoryLoaded || renderedTurnsSignature > 0) {
       // The settling run itself still scrolls with the pre-write snapshot, so
       // the history fill after a switch lands instantly; everything after it
@@ -5882,10 +5936,28 @@ export function AgentWorkspace({
       // before this one settles re-lands instantly instead of gliding.
       settledScrollSelectionRef.current = undefined;
     }
+    if (settled && !transcriptShouldStickToBottomRef.current) return;
+    if (typeof scroller.scrollTo !== "function") return; // jsdom has no scrollTo
+    if (settled) {
+      transcriptLastScrollTopRef.current = scroller.scrollTop;
+      transcriptProgrammaticScrollRef.current = true;
+      if (transcriptProgrammaticScrollTimeoutRef.current !== undefined) {
+        window.clearTimeout(transcriptProgrammaticScrollTimeoutRef.current);
+      }
+      transcriptProgrammaticScrollTimeoutRef.current = window.setTimeout(() => {
+        transcriptProgrammaticScrollRef.current = false;
+        transcriptShouldStickToBottomRef.current =
+          isAgentTranscriptNearBottom(scroller);
+        transcriptProgrammaticScrollTimeoutRef.current = undefined;
+      }, 800);
+    } else {
+      transcriptProgrammaticScrollRef.current = false;
+    }
     scroller.scrollTo({
       top: scroller.scrollHeight,
       behavior: settled ? "smooth" : "auto",
     });
+    transcriptShouldStickToBottomRef.current = true;
   }, [
     renderedTurnsSignature,
     selectedHermesSessionId,
@@ -8685,6 +8757,15 @@ function chatTurnsSignature(turns: AgentChatTurn[]) {
         0,
       ),
     0,
+  );
+}
+
+const AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX = 48;
+
+function isAgentTranscriptNearBottom(scroller: HTMLElement) {
+  return (
+    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
+    AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX
   );
 }
 
