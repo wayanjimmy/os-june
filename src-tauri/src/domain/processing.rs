@@ -1464,6 +1464,11 @@ fn user_facing_transcription_failure_message(code: &str, message: &str) -> Strin
         return "No speech detected. Try speaking louder or moving closer to the microphone."
             .to_string();
     }
+    if normalized_message.contains("metering_provider_failed")
+        || normalized_code.contains("metering")
+    {
+        return "Billing is temporarily unavailable. Please try again in a moment.".to_string();
+    }
     if normalized_message.contains("upstream_provider_failed")
         || normalized_code.contains("upstream")
     {
@@ -2053,6 +2058,13 @@ mod tests {
                 "upstream_provider_failed"
             ),
             "The transcription provider could not process this audio."
+        );
+        assert_eq!(
+            user_facing_transcription_failure_message(
+                "june_request_failed",
+                "metering_provider_failed"
+            ),
+            "Billing is temporarily unavailable. Please try again in a moment."
         );
     }
 

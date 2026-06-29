@@ -164,7 +164,15 @@ pub(crate) async fn submit(
         .await
         .map_err(|error| match error {
             DomainError::InvalidInput { reason } => ApiError::bad_request(reason),
-            _ => ApiError::Upstream,
+            // A billing/metering outage must keep its distinct 503 even on this
+            // direct DomainError -> ApiError path (issue delivery never goes
+            // through ServiceError). Exhaustive match so a new DomainError
+            // variant forces a deliberate mapping instead of silently
+            // collapsing into upstream_provider_failed.
+            DomainError::MeteringProvider => ApiError::Metering,
+            DomainError::UpstreamProvider
+            | DomainError::ModelNotPriced
+            | DomainError::InsufficientCredits => ApiError::Upstream,
         })?;
     Ok(Json(ApiResponse::ok(IssueReportResponse {
         received: true,
