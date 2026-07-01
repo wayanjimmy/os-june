@@ -55,6 +55,7 @@ import {
   type AgentSessionsChangedDetail,
 } from "../agent/AgentWorkspace";
 import { CategoryIcon } from "../agent/composer/CategoryIcon";
+import { JuneWordmark } from "../brand/JuneWordmark";
 import type { ReportCategory } from "../agent/composer/reportCategory";
 import {
   AGENT_DELETE_SESSION_EVENT,
@@ -1006,19 +1007,7 @@ export function Sidebar({
       {inSettings ? null : (
         <header className="sidebar-header">
           <a className="sidebar-brand" href="#" aria-label="June">
-            <img
-              className="sidebar-brand-img light"
-              src="/os-june-light.svg"
-              alt=""
-              height={16}
-            />
-            <img
-              className="sidebar-brand-img dark"
-              src="/os-june-dark.svg"
-              alt=""
-              height={16}
-            />
-            <span style={{ position: "absolute", left: -9999 }}>June</span>
+            <JuneWordmark className="sidebar-brand-mark" />
           </a>
           {recordingStatus ? (
             <SidebarRecordingIndicator
