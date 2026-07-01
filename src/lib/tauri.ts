@@ -178,6 +178,7 @@ export type ProviderModelSettingsDto = {
   transcriptionModel: string;
   generationModel: string;
   imageModel: string;
+  veniceApiKeyConfigured: boolean;
 };
 
 export type GeneratedImageDto = {
@@ -1528,6 +1529,16 @@ export async function setVeniceModel(mode: ProviderModelMode, modelId: string) {
   return invoke<ProviderModelSettingsDto>("set_venice_model", {
     request: { mode, modelId },
   });
+}
+
+export async function setVeniceApiKey(apiKey: string) {
+  return invoke<ProviderModelSettingsDto>("set_venice_api_key", {
+    request: { apiKey },
+  });
+}
+
+export async function clearVeniceApiKey() {
+  return invoke<ProviderModelSettingsDto>("clear_venice_api_key");
 }
 
 // Generates an image from a prompt via the June API. `model` is optional; the

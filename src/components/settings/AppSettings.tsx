@@ -19,9 +19,11 @@ import {
   providerModelSettings,
   juneOpenCommunityPage,
   juneOpenVerifyPage,
+  clearVeniceApiKey,
   setDictationLanguage,
   setDictationMicrophone,
   setDictationShortcut,
+  setVeniceApiKey,
   setVeniceModel,
 } from "../../lib/tauri";
 import { LANGUAGE_OPTIONS, languageLabel } from "../../lib/dictation-languages";
@@ -189,6 +191,7 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   generationModel: "zai-org-glm-5-2",
   // Mirrors DEFAULT_IMAGE_MODEL in the Rust providers module.
   imageModel: DEFAULT_IMAGE_MODEL,
+  veniceApiKeyConfigured: false,
 };
 
 const MIC_TEST_DURATION_SECONDS = 5;
@@ -319,6 +322,8 @@ export function AppSettings({
   const [reconcileVersion, setReconcileVersion] = useState<string>();
   const [pickerMode, setPickerMode] = useState<ProviderModelMode>();
   const [modelSearch, setModelSearch] = useState("");
+  const [veniceApiKeyDraft, setVeniceApiKeyDraft] = useState("");
+  const [showMoreModelOptions, setShowMoreModelOptions] = useState(false);
   const [internalTab, setInternalTab] = useState<SettingsTab>("general");
   const [micPopoverPlacement, setMicPopoverPlacement] =
     useState<SelectPopoverPlacement>("align-selected");
@@ -764,6 +769,33 @@ export function AppSettings({
             ? "Image model updated."
             : "Text model updated.",
       );
+    } catch (error) {
+      setStatus(messageFromError(error));
+    }
+  }
+
+  async function saveVeniceApiKey() {
+    const apiKey = veniceApiKeyDraft.trim();
+    if (!apiKey) {
+      setStatus("Enter a Venice API key before saving.");
+      return;
+    }
+    try {
+      const next = await setVeniceApiKey(apiKey);
+      setProviderSettings(next);
+      setVeniceApiKeyDraft("");
+      setStatus("Venice API key saved.");
+    } catch (error) {
+      setStatus(messageFromError(error));
+    }
+  }
+
+  async function removeVeniceApiKey() {
+    try {
+      const next = await clearVeniceApiKey();
+      setProviderSettings(next);
+      setVeniceApiKeyDraft("");
+      setStatus("Venice API key removed.");
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -1261,6 +1293,35 @@ export function AppSettings({
                     options={generationOptions}
                     onOpen={() => openModelPicker("generation")}
                   />
+                  <button
+                    type="button"
+                    className="settings-row settings-more-options-trigger"
+                    aria-expanded={showMoreModelOptions}
+                    aria-controls="models-more-options"
+                    onClick={() => setShowMoreModelOptions((open) => !open)}
+                  >
+                    <span className="settings-row-info">
+                      <span className="settings-row-title">More options</span>
+                      <span className="settings-row-description">
+                        Advanced model settings.
+                      </span>
+                    </span>
+                    <IconChevronDownSmall
+                      className="settings-more-options-chevron"
+                      size={14}
+                      aria-hidden
+                    />
+                  </button>
+                  {showMoreModelOptions ? (
+                    <VeniceApiKeyRow
+                      id="models-more-options"
+                      configured={providerSettings.veniceApiKeyConfigured}
+                      value={veniceApiKeyDraft}
+                      onValueChange={setVeniceApiKeyDraft}
+                      onSave={() => void saveVeniceApiKey()}
+                      onRemove={() => void removeVeniceApiKey()}
+                    />
+                  ) : null}
                 </div>
               </div>
             </section>
@@ -1696,6 +1757,72 @@ function ModelRow({
             <ModelMeta model={model} />
           </span>
         </button>
+      </div>
+    </div>
+  );
+}
+
+function VeniceApiKeyRow({
+  id,
+  configured,
+  value,
+  onValueChange,
+  onSave,
+  onRemove,
+}: {
+  id?: string;
+  configured: boolean;
+  value: string;
+  onValueChange: (value: string) => void;
+  onSave: () => void;
+  onRemove: () => void;
+}) {
+  const canSave = value.trim().length > 0;
+  return (
+    <div id={id} className="settings-row settings-row-venice-key">
+      <div className="settings-row-info">
+        <h3 className="settings-row-title">Venice API key</h3>
+        <p className="settings-row-description">
+          Use your own key for Venice models. Stored locally and sent only for
+          Venice requests.
+        </p>
+        {configured ? (
+          <p className="settings-row-description settings-row-substatus">
+            Key saved.
+          </p>
+        ) : null}
+      </div>
+      <div className="settings-row-control settings-secret-control">
+        <input
+          className="settings-secret-input"
+          type="password"
+          value={value}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={configured ? "Saved key hidden" : "Venice API key"}
+          aria-label="Venice API key"
+          onChange={(event) => onValueChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && canSave) onSave();
+          }}
+        />
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={!canSave}
+          onClick={onSave}
+        >
+          Save
+        </button>
+        {configured ? (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onRemove}
+          >
+            Remove
+          </button>
+        ) : null}
       </div>
     </div>
   );

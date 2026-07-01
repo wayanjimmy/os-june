@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   providerModelSettings: vi.fn(),
   listVeniceModels: vi.fn(),
   setVeniceModel: vi.fn(),
+  setVeniceApiKey: vi.fn(),
+  clearVeniceApiKey: vi.fn(),
   openPrivacySettings: vi.fn(),
   setDictationShortcut: vi.fn(),
   setDictationMicrophone: vi.fn(),
@@ -69,6 +71,8 @@ vi.mock("../lib/tauri", () => ({
   providerModelSettings: mocks.providerModelSettings,
   listVeniceModels: mocks.listVeniceModels,
   setVeniceModel: mocks.setVeniceModel,
+  setVeniceApiKey: mocks.setVeniceApiKey,
+  clearVeniceApiKey: mocks.clearVeniceApiKey,
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationShortcut: mocks.setDictationShortcut,
   setDictationMicrophone: mocks.setDictationMicrophone,
@@ -193,6 +197,7 @@ describe("AppSettings", () => {
         transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
         generationModel: "zai-org-glm-5-2",
         imageModel: "venice-sd35",
+        veniceApiKeyConfigured: false,
       },
     });
     mocks.listVeniceModels.mockImplementation(async (mode) => ({
@@ -327,7 +332,22 @@ describe("AppSettings", () => {
       transcriptionModel: mode === "transcription" ? modelId : "nvidia/parakeet-tdt-0.6b-v3",
       generationModel: mode === "generation" ? modelId : "zai-org-glm-5-2",
       imageModel: mode === "image" ? modelId : "venice-sd35",
+      veniceApiKeyConfigured: false,
     }));
+    mocks.setVeniceApiKey.mockResolvedValue({
+      transcriptionProvider: "venice",
+      transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+      generationModel: "zai-org-glm-5-2",
+      imageModel: "venice-sd35",
+      veniceApiKeyConfigured: true,
+    });
+    mocks.clearVeniceApiKey.mockResolvedValue({
+      transcriptionProvider: "venice",
+      transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+      generationModel: "zai-org-glm-5-2",
+      imageModel: "venice-sd35",
+      veniceApiKeyConfigured: false,
+    });
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.openPrivacySettings.mockResolvedValue(undefined);
     mocks.osAccountsLogin.mockResolvedValue(signedInAccount);
@@ -1612,6 +1632,44 @@ describe("AppSettings", () => {
     } finally {
       window.removeEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, modelChanged);
     }
+  });
+
+  it("saves and removes a Venice API key without displaying it", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole("tab", { name: "Models" }));
+
+    // The Venice API key lives behind "More options" so the average user never
+    // has to reason about it. It should be hidden until the row is expanded.
+    expect(screen.queryByLabelText("Venice API key")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /More options/ }));
+
+    const input = await screen.findByLabelText("Venice API key");
+    await user.type(input, "  vc_test_key  ");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(mocks.setVeniceApiKey).toHaveBeenCalledWith("vc_test_key");
+    expect(await screen.findByText("Key saved.")).toBeInTheDocument();
+    expect(input).toHaveValue("");
+    expect(screen.queryByDisplayValue("vc_test_key")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(mocks.clearVeniceApiKey).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByText("Key saved.")).not.toBeInTheDocument(),
+    );
   });
 
   it("defaults the model picker to curated suggestions", async () => {

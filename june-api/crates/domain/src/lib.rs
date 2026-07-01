@@ -100,6 +100,11 @@ impl TokenUsage {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProviderCredentials {
+    pub venice_api_key: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Authorization {
@@ -165,6 +170,7 @@ pub struct TranscriptionRequest {
     pub context: Option<String>,
     pub language: Option<String>,
     pub model: ModelId,
+    pub provider_credentials: ProviderCredentials,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +183,7 @@ pub struct GenerationRequest {
     pub existing_generated_note: Option<String>,
     pub model: ModelId,
     pub system_prompt: String,
+    pub provider_credentials: ProviderCredentials,
 }
 
 #[derive(Clone, Debug)]
@@ -186,12 +193,14 @@ pub struct CleanupRequest {
     pub style: String,
     pub model: ModelId,
     pub system_prompt: String,
+    pub provider_credentials: ProviderCredentials,
 }
 
 #[derive(Clone, Debug)]
 pub struct AgentChatRequest {
     pub body: serde_json::Value,
     pub model: ModelId,
+    pub provider_credentials: ProviderCredentials,
 }
 
 /// What an image generator needs: a prompt, the model, and optional pixel
@@ -236,6 +245,7 @@ pub struct WebSearchRequest {
     /// `None` lets the provider apply its default.
     pub limit: Option<u32>,
     pub provider: WebSearchProvider,
+    pub provider_credentials: ProviderCredentials,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,6 +271,7 @@ pub struct WebSearchResult {
 #[derive(Clone, Debug)]
 pub struct WebFetchRequest {
     pub url: String,
+    pub provider_credentials: ProviderCredentials,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
