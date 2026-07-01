@@ -15,8 +15,24 @@ pub(crate) const MAX_ISSUE_DESCRIPTION_CHARS: usize = 20_000;
 pub(crate) const MAX_ISSUE_DIAGNOSIS_CHARS: usize = 50_000;
 pub(crate) const MAX_ISSUE_ATTACHMENTS: usize = 20;
 pub(crate) const MAX_ISSUE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
-pub(crate) const MAX_AGENT_STRING_CHARS: usize = 100_000;
-pub(crate) const MAX_AGENT_TOTAL_STRING_CHARS: usize = 240_000;
+// Abuse ceilings for an agent request body, NOT the model's context window.
+// The model enforces its own window; these only stop a runaway/malicious
+// request from reaching it. They must sit with real HEADROOM above the largest
+// advertised model window so a legitimate in-window input is never rejected here
+// before the model sees it, and stay CONSISTENT with the Tauri provider proxy's
+// body cap (`JUNE_PROVIDER_PROXY_MAX_BODY_BYTES`) — otherwise the stricter gate
+// wins and an in-window upload fails anyway (JUN-169 review). The largest text
+// model is 256k tokens (Kimi K2.6, config.toml) ≈ 1.15M chars at a conservative
+// ~4.5 chars/token, so the cap is 1.5M — ~30% headroom above it, leaving room
+// for the system prompt and tool schemas on top of a near-window user input.
+// Per-string equals the aggregate because a single pasted document or file-read
+// may legitimately fill the whole allowance. JUN-169: the old 240k aggregate
+// (~60-68k tokens) rejected a single ~67k-token upload that GLM 5.2's 200k
+// window holds easily, and the proxy rebranded that rejection as a "maximum
+// context length" overflow, dead-ending the session on turn one.
+// Tune with cost/abuse in mind — a larger cap allows larger (costlier) requests.
+pub(crate) const MAX_AGENT_STRING_CHARS: usize = 1_500_000;
+pub(crate) const MAX_AGENT_TOTAL_STRING_CHARS: usize = 1_500_000;
 pub(crate) const MAX_AGENT_JSON_DEPTH: usize = 16;
 pub(crate) const MAX_AGENT_OUTPUT_TOKENS: u64 = 32_768;
 /// Venice caps a search query at 400 characters.

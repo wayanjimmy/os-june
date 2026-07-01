@@ -44,7 +44,16 @@ const HERMES_IMAGE_PREVIEW_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const HERMES_TEXT_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const HERMES_SKILL_MAX_BYTES: usize = 512 * 1024;
 const JUNE_PROVIDER_PROXY_MAX_HEADER_BYTES: usize = 32 * 1024;
-const JUNE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 512 * 1024;
+// Must sit ABOVE june-api's aggregate request-string cap
+// (`MAX_AGENT_TOTAL_STRING_CHARS`, 1.5M chars) counted in BYTES, or this proxy
+// rejects an in-window upload before june-api's larger cap can allow it (JUN-169
+// review). Chars vs bytes: 1.5M chars is up to ~3M bytes for 2-byte UTF-8, so
+// 3 MiB keeps the proxy from becoming the stricter gate. This is a 127.0.0.1
+// loopback proxy for a single-user desktop, so the memory/DoS surface of the
+// larger buffer is minimal. A body over this cap is genuinely beyond any model
+// window and degrades to the context-overflow notice (recognizable wording in
+// `read_http_request`).
+const JUNE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 const JUNE_CONTEXT_MCP_SERVER_NAME: &str = "june_context";
 const JUNE_CONTEXT_MCP_DIR_NAME: &str = "hermes-mcp";
 const JUNE_CONTEXT_MCP_SCRIPT_NAME: &str = "june_context_mcp.py";
@@ -6373,9 +6382,16 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Htt
         })
         .unwrap_or(0);
     if content_length > JUNE_PROVIDER_PROXY_MAX_BODY_BYTES {
+        // The handler turns this into a 400 for the client. Phrase it as a
+        // context overflow (JUN-169): the wording carries the tokens Hermes'
+        // overflow patterns match ("maximum context length") and the frontend
+        // classifier keys on (`prompt_too_long`), so an over-cap body degrades
+        // into the recoverable context-overflow notice instead of a raw
+        // transport error that re-wedges or dead-ends the session.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "HTTP body is too large",
+            "prompt_too_long: the request body exceeds the model's maximum \
+             context length. Reduce the length of the messages and retry.",
         ));
     }
     let mut body = buffer[header_end..].to_vec();
@@ -6408,10 +6424,26 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Htt
 /// ("context length", "maximum context"); everything else in the envelope
 /// passes through untouched. Returns `None` for every other body, including
 /// non-JSON.
+///
+/// JUN-169 note — do NOT try to "fix" the single-turn dead-end here by dropping
+/// the trigger phrases for one-message requests: a bare `prompt_too_long` is
+/// exactly what re-wedges the session (the agent retries the same oversized
+/// prompt forever), which is the bug this rewrite exists to prevent. When a
+/// single oversized turn genuinely exceeds the window there is nothing to
+/// compress, so the agent legitimately ends with a terminal "Cannot compress
+/// further." That terminal error is owned by the frontend, which folds it into
+/// a context-overflow notice (see `isContextOverflowMessage` /
+/// `contextOverflowNotice`) instead of leaving a raw dead-end. Prevention lives
+/// upstream (the raised request-size cap in june-api's `validation.rs` so an
+/// in-window input is never rejected in the first place), not in this rewrite.
 fn translate_context_overflow_error(body: &[u8]) -> Option<serde_json::Value> {
     let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let message = value.get("message")?.as_str()?;
-    if !message.contains("prompt_too_long") {
+    // Both of june-api's size rejections are hard "too big" limits the agent
+    // must not retry as-is: `prompt_too_long` (aggregate string cap) and
+    // `string_too_long` (a single oversized string). Normalize both to the
+    // recognized-overflow wording so neither re-wedges the session (JUN-169).
+    if !message.contains("prompt_too_long") && !message.contains("string_too_long") {
         return None;
     }
     value["message"] = serde_json::Value::String(
@@ -6931,10 +6963,25 @@ mod tests {
     }
 
     #[test]
+    fn string_too_long_rejection_translates_to_a_recognized_overflow() {
+        // A single oversized string is a hard size limit too (JUN-169 review):
+        // left bare, `string_too_long` is unrecognized by the agent and wedges
+        // the session, so it must normalize to the same overflow wording.
+        let body =
+            br#"{"data":null,"success":false,"error_code":2001,"message":"string_too_long"}"#;
+
+        let rewritten = translate_context_overflow_error(body).expect("translated");
+
+        let message = rewritten["message"].as_str().expect("message");
+        assert!(message.contains("maximum context"));
+        assert!(message.contains("context length"));
+        assert!(message.starts_with("prompt_too_long"));
+        assert_eq!(rewritten["error_code"], 2001);
+    }
+
+    #[test]
     fn unrelated_error_bodies_pass_through_untranslated() {
         for body in [
-            br#"{"data":null,"success":false,"error_code":2001,"message":"string_too_long"}"#
-                .as_slice(),
             br#"{"error":{"message":"rate limited"}}"#.as_slice(),
             b"not json at all".as_slice(),
             br#"{"message":42}"#.as_slice(),
