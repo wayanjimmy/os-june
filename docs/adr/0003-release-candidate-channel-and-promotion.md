@@ -131,10 +131,20 @@ version-bump PR being merged first.
   older stable to users; recover from a bad stable by releasing forward.
 - **Promote does a second full macOS build + notarize.** Slower than re-tagging,
   in exchange for a clean stable version string from tested source.
-- **The version-bump PR is bookkeeping.** Merging `release: vX.Y.Z` advances
-  `main`'s version files so the next RC's Q9 gate and the next changelog anchor
-  work. Windows and the stable release no longer depend on it, so it can merge in
-  parallel.
+- **The version bump is bookkeeping, committed straight to `main`.** The release
+  bot is on `main`'s branch-protection bypass list, so promote commits
+  `release: vX.Y.Z` directly (no PR to merge), advancing the version files so the
+  next RC's Q9 gate and the next changelog anchor work. It runs only after the
+  stable release is published, so a build failure never leaves `main` bumped
+  without a matching release. If the push loses a race with a concurrent commit
+  to `main`, promote re-fetches and replays the deterministic bump onto the new
+  tip (a few attempts) rather than failing after the release is already published
+  and forcing a full rebuild rerun.
+- **Release announcements are delegated to the GitHub Slack app.** Rather than a
+  webhook step in the workflows, a channel subscribes with
+  `/github subscribe open-software-network/os-june-releases releases`. This
+  covers stable (each is a freshly published `vX.Y.Z`); RC iterations reuse the
+  fixed `rc` tag and are edited in place, so they do not reliably post.
 - **Post-RC commits merged during an RC cycle are not in that release.** They ship
   in a later release built from a future RC. Because the changelog anchors on the
   latest `release: v...` first-parent commit, such commits can fall between two

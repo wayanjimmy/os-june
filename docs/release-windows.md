@@ -51,11 +51,12 @@ GitHub Actions -> rc-desktop-release -> Run workflow (base-version X.Y.Z, rc-num
 GitHub Actions -> promote-desktop-release -> Run workflow (rc-version X.Y.Z-rc.N)
 ```
 
-Promote owns the clean semver `X.Y.Z`, the `release: vX.Y.Z` bump PR to `main`,
-the stable release creation, macOS assets, and initial `latest.json`. It also
-records the source commit in a `stable-build.json` asset on the `vX.Y.Z` release.
-The Windows workflow reads that commit and rebuilds the same tree, so it does NOT
-depend on the version PR being merged and can run as soon as promote finishes.
+Promote owns the clean semver `X.Y.Z`, the `release: vX.Y.Z` bump committed
+directly to `main` by the release bot, the stable release creation, macOS assets,
+and initial `latest.json`. It also records the source commit in a
+`stable-build.json` asset on the `vX.Y.Z` release. The Windows workflow reads that
+commit and rebuilds the same tree, so it does not depend on the bump and can run
+as soon as promote finishes.
 
 Once promote has published `vX.Y.Z`, run:
 

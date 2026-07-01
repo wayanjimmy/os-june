@@ -98,14 +98,29 @@ ships the same source you tested with a clean version string. It then:
   recording the source commit (so the Windows build reuses the same tree);
 - generates the changelog (first-parent commits since the previous `release: v...`)
   and embeds it in both the GitHub release notes and `latest.json`;
-- opens a `release: vX.Y.Z` PR bumping the version files on `main`.
+- commits `release: vX.Y.Z` directly to `main` (the release bot is on the
+  branch-protection bypass list), advancing the version files so the next RC's
+  gate and the next changelog can anchor on it. No PR to merge.
 
-### 4. Merge the version PR
+### 4. Cut the Windows release
 
-Merge the `release: vX.Y.Z` PR so `main`'s version files advance and the next
-changelog can anchor on it. The Windows release does not depend on this merge
-(it rebuilds from the commit recorded in `stable-build.json`), so it can run in
-parallel.
+The version bump lands on `main` automatically, so there is nothing to merge.
+The Windows release rebuilds from the commit recorded in `stable-build.json`, so
+it does not depend on the bump and can run as soon as promote finishes (see
+`release-windows.md`).
+
+## Release notifications
+
+Stable releases are announced in Slack by the org's GitHub Slack app. Subscribe a
+channel once with:
+
+```text
+/github subscribe open-software-network/os-june-releases releases
+```
+
+It posts when a `vX.Y.Z` stable release is published. RC builds reuse the fixed
+`rc` release tag and are edited in place rather than re-published, so they do not
+reliably trigger a Slack post; watch the `rc` release page for candidates.
 
 The app polls:
 
