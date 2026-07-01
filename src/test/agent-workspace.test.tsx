@@ -215,13 +215,13 @@ describe("AgentWorkspace", () => {
     // Feature 14: the artifact store is a process-wide singleton; drop the
     // session rows these tests touch so one test's artifacts don't leak into
     // the next.
-    for (const id of ["session-1", "session-2", "runtime-session-2"]) {
+    for (const id of ["session-1", "session-2", "runtime-session-1", "runtime-session-2"]) {
       hermesArtifactStore.clearSession(id);
     }
     // Feature 04: the pending-action store is the same kind of process-wide
     // singleton. Clear these tests' session ids so a prior test's "Needs you"
     // rows (now keyed by the durable stored id) don't leak into the next.
-    for (const id of ["session-1", "session-2", "runtime-session-2"]) {
+    for (const id of ["session-1", "session-2", "runtime-session-1", "runtime-session-2"]) {
       pendingActionStore.resolveSession(id);
     }
     window.sessionStorage.clear();
@@ -684,6 +684,45 @@ describe("AgentWorkspace", () => {
 
     expect(screen.getByText("Bug report")).toBeInTheDocument();
     expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.create", expect.anything());
+  });
+
+  it("seeds a report chip while the current session is still running", async () => {
+    const user = userEvent.setup();
+    let resolveSubmit: (() => void) | undefined;
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      if (method === "prompt.submit") {
+        return new Promise((resolve) => {
+          resolveSubmit = () => resolve({});
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox"), "keep working");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByRole("button", { name: "Stop June" })).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_NEW_SESSION_EVENT, {
+          detail: { category: "feedback" },
+        }),
+      );
+    });
+
+    expect(await screen.findByText("Feedback")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start session" })).toBeDisabled();
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.create", expect.anything());
+
+    await act(async () => {
+      resolveSubmit?.();
+    });
   });
 
   it("wraps a submitted issue report for June and waits for explicit send", async () => {
