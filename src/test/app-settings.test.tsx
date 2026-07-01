@@ -654,7 +654,7 @@ describe("AppSettings", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Sign out" }));
-    expect(mocks.osAccountsLogout).toHaveBeenCalledOnce();
+    expect(mocks.osAccountsLogout).toHaveBeenCalledWith({ clearBrowserSession: true });
     expect(signedOut).toHaveBeenCalledWith({
       signedIn: false,
       configured: signedInAccount.configured,
