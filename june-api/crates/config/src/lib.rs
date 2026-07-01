@@ -457,7 +457,16 @@ fn default_pricing() -> BTreeMap<String, ModelPriceConfig> {
             input_credits_per_million_tokens: 850,
             output_credits_per_million_tokens: 4_660,
             context_tokens: 256_000,
-            capabilities: &["supportsFunctionCalling"],
+            // Kimi K2.6 is natively multimodal (Venice `supportsVision`), so it
+            // is the image-input fallback the frontend switches to when an image
+            // is attached to a non-vision model. Declare vision here too so that
+            // fallback still resolves when the live Venice catalog can't be
+            // reached at boot and only these built-in defaults are available.
+            capabilities: &[
+                "supportsFunctionCalling",
+                "supportsVision",
+                "supportsMultipleImages",
+            ],
         },
         TextModelFallback {
             id: "zai-org-glm-5-1",
@@ -797,6 +806,67 @@ mod tests {
         config.upstreams.openai.api_key = "sk-test".to_string();
         config.upstreams.venice.api_key = "venice-test".to_string();
         config
+    }
+
+    #[test]
+    fn default_kimi_declares_vision_but_glm_does_not() {
+        // Kimi K2.6 is the image-input fallback the app switches to, so it must
+        // read as vision-capable even from these built-in defaults, before the
+        // live Venice catalog loads (JUN-165). The non-vision GLM defaults must
+        // not claim vision, or the fallback could land on one of them.
+        let config = AppConfig::default();
+        let declares_vision = |id: &str| {
+            config
+                .pricing
+                .get(id)
+                .is_some_and(|model| model.capabilities.iter().any(|c| c == "supportsVision"))
+        };
+        assert!(
+            declares_vision("kimi-k2-6"),
+            "kimi-k2-6 default capabilities should declare supportsVision"
+        );
+        assert!(
+            config.pricing.contains_key("zai-org-glm-5-2"),
+            "zai-org-glm-5-2 should be present in default pricing"
+        );
+        assert!(
+            !declares_vision("zai-org-glm-5-2"),
+            "GLM 5.2 default must not claim vision"
+        );
+    }
+
+    #[test]
+    fn packaged_config_toml_keeps_kimi_vision_in_sync() {
+        // config.toml overrides default_pricing() via Figment and ships in the
+        // Docker image, so it is what `/models` serves when the live Venice
+        // catalog is unreachable. It must agree that Kimi is a vision model, or
+        // the image-attach fallback breaks in the packaged build (JUN-165).
+        use figment::{
+            Figment,
+            providers::{Format, Serialized, Toml},
+        };
+        let toml_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.toml");
+        let config = Figment::new()
+            .merge(Serialized::defaults(AppConfig::default()))
+            .merge(Toml::file(toml_path))
+            .extract::<AppConfig>()
+            .unwrap_or_default();
+        // A TOML-only model proves config.toml actually merged, so a failed
+        // load can't make the vision assertion below pass on the default alone.
+        assert!(
+            config
+                .pricing
+                .contains_key("nvidia-nemotron-3-nano-30b-a3b"),
+            "packaged config.toml did not merge"
+        );
+        let kimi_declares_vision = config
+            .pricing
+            .get("kimi-k2-6")
+            .is_some_and(|model| model.capabilities.iter().any(|c| c == "supportsVision"));
+        assert!(
+            kimi_declares_vision,
+            "packaged config.toml must declare supportsVision for kimi-k2-6"
+        );
     }
 
     #[test]

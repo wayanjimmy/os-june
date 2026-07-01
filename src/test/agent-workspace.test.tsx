@@ -5779,21 +5779,24 @@ describe("AgentWorkspace", () => {
       await screen.findByText("GLM 5.2 can't read images."),
     ).toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: "Switch to a vision model" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Switch to Qwen VL" }));
 
     await waitFor(() =>
-      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "qwen-vl"),
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith(
+        "generation",
+        "qwen-vl",
+      ),
     );
     // The switch picks the image-capable model and keeps the dropped image.
     expect(screen.getByText("screenshot.png")).toBeInTheDocument();
   });
 
-  it("switches to the first eligible vision model when several qualify", async () => {
-    // The banner action is a one-tap fix: with several image-capable models it
-    // switches straight to the first eligible one rather than opening the
-    // generic (non-vision-scoped) picker.
+  it("prefers the suggested vision model over the first eligible one (JUN-165)", async () => {
+    // The banner action is a one-tap fix, and with several image-capable models
+    // it prefers a curated suggested pick (Kimi K2.6) rather than the
+    // alphabetically-first vision model — otherwise it lands on an arbitrary
+    // model like Claude Fable 5. Qwen VL is listed first here to prove the
+    // preference overrides list order; no non-vision-scoped picker is opened.
     mocks.listAgentTasks.mockResolvedValue({ items: [] });
     mocks.listHermesSessions.mockResolvedValue([]);
     mocks.listVeniceModels.mockResolvedValue({
@@ -5821,8 +5824,8 @@ describe("AgentWorkspace", () => {
         },
         {
           provider: "venice",
-          id: "gpt-vision",
-          name: "GPT Vision",
+          id: "kimi-k2-6",
+          name: "Kimi K2.6",
           modelType: "text",
           privacy: "private",
           traits: [],
@@ -5848,11 +5851,15 @@ describe("AgentWorkspace", () => {
     });
     expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", { name: "Switch to a vision model" }),
+      screen.getByRole("button", { name: "Switch to Kimi K2.6" }),
     );
-    // Lands on the first eligible vision model (Qwen VL), no picker dialog.
+    // Lands on the suggested vision model (Kimi), not first-listed Qwen VL, and
+    // no picker dialog opens.
     await waitFor(() =>
-      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "qwen-vl"),
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith(
+        "generation",
+        "kimi-k2-6",
+      ),
     );
     expect(
       screen.queryByRole("dialog", { name: "Choose text model" }),
@@ -5937,7 +5944,7 @@ describe("AgentWorkspace", () => {
 
     expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Switch to a vision model" }),
+      screen.queryByRole("button", { name: /^Switch to / }),
     ).not.toBeInTheDocument();
   });
 
