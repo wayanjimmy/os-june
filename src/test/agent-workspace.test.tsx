@@ -6960,25 +6960,39 @@ describe("AgentWorkspace", () => {
     }
   });
 
-  it("launches a session immediately from a run shortcut", async () => {
+  it("prefills the composer from a hero shortcut instead of auto-submitting", async () => {
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
       JSON.stringify({ createdAt: Date.now() }),
     );
     // rand() of 0 keeps the rotating hero suggestions in curated pool order,
-    // so the leading window (incl. "Catch up on recent files") is what renders.
+    // so the leading window (incl. "Recap my notes") is what renders.
     const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
       render(<AgentWorkspace />);
       const user = userEvent.setup();
 
-      await user.click(await screen.findByRole("button", { name: /Catch up on recent files/ }));
+      await user.click(await screen.findByRole("button", { name: /Recap my notes/ }));
+
+      // The click only stages the prompt: nothing may be submitted (and no
+      // tokens spent) until the person sends it themselves.
+      await waitFor(() =>
+        expect(screen.getByRole("textbox")).toHaveTextContent(/action items still open/),
+      );
+      expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+
+      // Staging a prompt counts as "composer has content": the chip row bows
+      // out so a second click can't stage over the draft.
+      const chips = document.querySelector(".agent-hero-chips");
+      expect(chips).toHaveAttribute("data-hidden", "true");
+
+      await user.click(screen.getByRole("button", { name: "Start session" }));
 
       await waitFor(() =>
         expect(mocks.gatewayRequest).toHaveBeenCalledWith(
           "prompt.submit",
           expect.objectContaining({
-            text: expect.stringContaining("changed in the last week"),
+            text: expect.stringContaining("action items still open"),
           }),
         ),
       );
@@ -7165,7 +7179,11 @@ describe("AgentWorkspace", () => {
       await user.click(await screen.findByRole("button", { name: /Research a topic/ }));
 
       const composer = screen.getByRole("textbox");
-      await waitFor(() => expect(composer.textContent ?? "").toContain("Research <topic>"));
+      await waitFor(() =>
+        expect(composer.textContent ?? "").toContain("Research a topic and write a short summary"),
+      );
+      // The <placeholder> brackets are authoring syntax; they must never render.
+      expect(composer.textContent ?? "").not.toContain("<");
       expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
     } finally {
       randomSpy.mockRestore();

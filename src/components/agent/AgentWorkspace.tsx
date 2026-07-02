@@ -39,14 +39,15 @@ import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal
 import { IconFiles } from "central-icons/IconFiles";
 import { IconFileSparkle } from "central-icons/IconFileSparkle";
 import { IconFileText } from "central-icons/IconFileText";
+import { IconEmail1Sparkle } from "central-icons/IconEmail1Sparkle";
 import { IconGauge } from "central-icons/IconGauge";
 import { IconGhost2 } from "central-icons/IconGhost2";
 import { IconHeartBeat } from "central-icons/IconHeartBeat";
-import { IconHistory } from "central-icons/IconHistory";
-import { IconListBullets } from "central-icons/IconListBullets";
 import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
+import { IconNotes } from "central-icons/IconNotes";
+import { IconPageTextSearch } from "central-icons/IconPageTextSearch";
 import { IconPencil } from "central-icons/IconPencil";
 import { IconPieChart1 } from "central-icons/IconPieChart1";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
@@ -248,7 +249,11 @@ import {
 } from "../../lib/agent-composer-slash-commands";
 import { generateChatImage } from "../../lib/chat-image-generation";
 import { IMAGE_GENERATION_ENABLED } from "../../lib/feature-flags";
-import { ComposerEditor, type ComposerEditorHandle } from "./composer/ComposerEditor";
+import {
+  ComposerEditor,
+  type ComposerEditorHandle,
+  stripPlaceholder,
+} from "./composer/ComposerEditor";
 import { CategoryIcon } from "./composer/CategoryIcon";
 import { FileTypeIcon, fileTypeIconComponent } from "./FileTypeIcon";
 import {
@@ -556,20 +561,26 @@ type AgentShortcut = {
   description: string;
   prompt: string;
   /**
-   * "run" submits the prompt immediately; "prefill" drops it into the
-   * composer for the user to finish (selecting the <placeholder> if there is
-   * one); "attach" prefills and opens the file picker.
+   * "prefill" drops the prompt into the composer for the user to finish; the
+   * first `<placeholder>` token arrives as its bare phrase, selected for
+   * overtyping — the angle brackets are authoring syntax and never reach the
+   * composer. "attach" prefills and
+   * opens the file picker. There is deliberately no action that submits on
+   * click: every preset lands in the composer first, so the person sees
+   * exactly what will run — and approves the spend — before it costs tokens.
    */
-  action: "run" | "prefill" | "attach";
+  action: "prefill" | "attach";
 };
 
 /**
  * Suggestion pool for the new-session hero. Shown HERO_SHORTCUT_COUNT at a
  * time and reshuffled on each visit, so the entry point stays a handful of
  * fresh ideas instead of a wall of ten cards. Pool order matters: the leading
- * window is the curated first-impression mix (an instant run, a prefill, an
- * attach flow, and a health check) that shows when the shuffle is identity
- * (e.g. in tests with Math.random mocked to 0).
+ * window is the curated first-impression mix (a note-native ready-to-send
+ * prompt, a placeholder prefill, an attach flow) that shows when the shuffle
+ * is identity (e.g. in tests with Math.random mocked to 0). At least one
+ * chip in that window should be something only June can do — recapping your
+ * own notes — not a generic computer chore.
  *
  * Every suggestion must succeed inside the default write-jail: reads are
  * broad, but writes land only in the agent workspace. Don't add shortcuts
@@ -579,20 +590,21 @@ type AgentShortcut = {
  */
 const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
-    key: "recent-files",
-    icon: <IconHistory size={18} />,
-    title: "Catch up on recent files",
-    description: "A quick rundown of what's new across your folders.",
+    key: "recap-notes",
+    icon: <IconNotes size={18} />,
+    title: "Recap my notes",
+    description: "What happened, what got decided, what's still open.",
     prompt:
-      "Look through my Desktop, Documents, and Downloads folders for files added or changed in the last week and give me a quick rundown of what's new, grouped by what they seem to be for. Don't move or change anything.",
-    action: "run",
+      "Look through my recent meeting notes and give me a quick recap: what happened, what got decided, and any action items still open. Keep it brief.",
+    action: "prefill",
   },
   {
     key: "research",
     icon: <IconDeepSearch size={18} />,
     title: "Research a topic",
     description: "Get a short, sourced write-up on anything.",
-    prompt: "Research <topic> and write a short summary of what you find, with sources.",
+    prompt:
+      "Research <a topic> and write a short summary (a few paragraphs) of what you find, with sources.",
     action: "prefill",
   },
   {
@@ -606,18 +618,28 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "health-check",
     icon: <IconHeartBeat size={18} />,
-    title: "Check my computer's health",
+    title: "Check my Mac's health",
     description: "Disk, memory, and login items that need attention.",
     prompt:
       "Give my computer a quick health check: free disk space, memory pressure, login items, and anything else worth flagging. Summarize what looks fine and what needs attention.",
-    action: "run",
+    action: "prefill",
+  },
+  {
+    key: "draft-follow-up",
+    icon: <IconEmail1Sparkle size={18} />,
+    title: "Draft a follow-up",
+    description: "Turn your latest meeting note into a follow-up message.",
+    prompt:
+      "From my most recent meeting note, draft a short follow-up message covering the decisions and next steps.",
+    action: "prefill",
   },
   {
     key: "find-file",
     icon: <IconMagnifyingGlass size={18} />,
     title: "Find a file",
     description: "Describe what you remember; June tracks it down.",
-    prompt: "Find <a file I half-remember> on my computer and tell me where it is.",
+    prompt:
+      "Find <a file I half-remember> on my computer and tell me where it is. If several candidates match, list them with paths and dates.",
     action: "prefill",
   },
   {
@@ -630,20 +652,12 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     action: "attach",
   },
   {
-    key: "extract-text",
-    icon: <IconFileText size={18} />,
-    title: "Extract text from a file",
-    description: "Pull clean text out of a PDF, image, or scan.",
-    prompt: "Extract all the text from the attached file and clean it up into tidy Markdown.",
-    action: "attach",
-  },
-  {
-    key: "plan-project",
-    icon: <IconListBullets size={18} />,
-    title: "Plan a project",
-    description: "Turn a vague goal into concrete first steps.",
+    key: "search-notes",
+    icon: <IconPageTextSearch size={18} />,
+    title: "Search my notes",
+    description: "Find where something came up across your meetings.",
     prompt:
-      "Help me plan <a project>: break it into concrete steps, flag the risks, and suggest what to tackle first.",
+      "Search my notes and transcripts for <what I'm trying to remember> and show me where it came up.",
     action: "prefill",
   },
 ];
@@ -3650,9 +3664,9 @@ export function AgentWorkspace({
       ? reviewableIssueReportsRef.current[reportFollowUpSessionId]
       : undefined;
     const submittedDraftKey = composerDraftKeyRef.current;
-    // A typed hero submit plays the same teardown as a run shortcut: greeting
-    // up, suggestions down during the session-create latency. Without it they
-    // sit frozen through the wait and then vanish in a single frame when the
+    // A hero submit plays the teardown transition: greeting up, suggestions
+    // down during the session-create latency. Without it they sit frozen
+    // through the wait and then vanish in a single frame when the
     // conversation takes over.
     if (heroMode) setHeroLeaving(true);
     setSubmitting(true);
@@ -5803,46 +5817,10 @@ export function AgentWorkspace({
     }
   }
 
-  // Run shortcuts fire the session directly — the prompt never touches the
-  // composer, so there's no flash of text + send button before the submit.
-  // The hero plays its exit transition during the session-create latency.
-  async function launchShortcutSession(prompt: string) {
-    if (submitting || importingFiles) return;
-    setHeroLeaving(true);
-    dispatchAgentSessionStatus({
-      prompt,
-      title: titleFromPrompt(prompt),
-      status: "starting",
-      summary: "Starting June.",
-    });
-    setSubmitting(true);
-    try {
-      await submitHermesSession(prompt);
-      setError(null);
-    } catch (err) {
-      // Bring the hero back and park the prompt in the composer so the user
-      // can see what would have run and retry it.
-      if (composerEditorRef.current?.isEmpty() ?? true) {
-        composerEditorRef.current?.setContent(prompt);
-      }
-      setError(messageFromError(err));
-      dispatchAgentSessionStatus({
-        prompt,
-        title: titleFromPrompt(prompt),
-        status: "failed",
-        summary: messageFromError(err),
-      });
-    } finally {
-      setSubmitting(false);
-      setHeroLeaving(false);
-    }
-  }
-
+  // Shortcuts never submit on click — they stage the prompt in the composer
+  // so the person reads what will run and sends it themselves. The click is
+  // free; only the explicit send spends tokens.
   function runShortcut(shortcut: AgentShortcut) {
-    if (shortcut.action === "run") {
-      void launchShortcutSession(shortcut.prompt);
-      return;
-    }
     if (shortcut.action === "attach") {
       rememberComposerDraft(composerDraftKeyRef.current, shortcut.prompt, null);
       composerEditorRef.current?.setContent(shortcut.prompt);
@@ -5854,7 +5832,11 @@ export function AgentWorkspace({
     composerEditorRef.current?.setContent(shortcut.prompt, null, {
       selectPlaceholder: true,
     });
-    rememberComposerDraft(composerDraftKeyRef.current, shortcut.prompt, null);
+    rememberComposerDraft(
+      composerDraftKeyRef.current,
+      stripPlaceholder(shortcut.prompt)?.text ?? shortcut.prompt,
+      null,
+    );
   }
 
   async function cancelTask(taskId: string) {
@@ -7434,9 +7416,15 @@ export function AgentWorkspace({
           {composer}
           {activePanel === "chat" ? (
             <div className="agent-hero-suggestions">
+              {/* The chips bow out while the composer holds a draft: staging a
+                  chip runs setContent, which replaces the whole composer
+                  document, so a click here would clobber what the person
+                  typed. Once they're typing, the suggestions have done their
+                  job. They return when the field is cleared. */}
               <div
                 className="agent-hero-chips"
                 data-phase={heroChipPhase}
+                data-hidden={draft.trim() ? "true" : undefined}
                 onMouseEnter={() => {
                   heroChipsHoverRef.current = true;
                 }}
