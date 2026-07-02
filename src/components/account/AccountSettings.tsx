@@ -223,7 +223,9 @@ export function BillingSettingsSection({
       throw error;
     }
     setBillingStatus(MAX_UPGRADE_WAITING_STATUS);
-    void onRefresh();
+    // No separate refresh: the poll's first tick refreshes immediately, and a
+    // parallel request could resolve out of order and overwrite the poll's
+    // fresher snapshot with a stale pre-grant one.
     void pollForMaxGrant(onRefresh, baselineCredits).then((landed) => {
       setBillingStatus(landed ? MAX_UPGRADE_READY_STATUS : MAX_UPGRADE_SLOW_STATUS);
     });

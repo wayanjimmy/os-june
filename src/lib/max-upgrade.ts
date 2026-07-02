@@ -40,7 +40,12 @@ export type MaxGrantPollOptions = {
  * change PATCH resolves before the webhook grants the new credits, so
  * surfaces poll briefly instead of parking on a stale balance. Resolves true
  * once the grant is visible (the last `refresh` has already pushed the fresh
- * snapshot to the caller's state), false on timeout. */
+ * snapshot to the caller's state), false on timeout.
+ *
+ * The returned promise ALWAYS resolves, never rejects: callers chain their
+ * cleanup (clearing waiting panels and statuses) on the resolution, so a
+ * rejection would pin those surfaces forever. A refresh that throws on one
+ * tick is a transient miss and the poll keeps going until the deadline. */
 export async function pollForMaxGrant(
   refresh: () => Promise<AccountStatus | undefined>,
   baselineCredits: number,
@@ -49,10 +54,20 @@ export async function pollForMaxGrant(
   const intervalMs = options.intervalMs ?? MAX_GRANT_POLL_INTERVAL_MS;
   const timeoutMs = options.timeoutMs ?? MAX_GRANT_POLL_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
+  let lastRefreshError: unknown;
   for (;;) {
-    const next = await refresh();
-    if (maxGrantLanded(next, baselineCredits)) return true;
-    if (Date.now() + intervalMs > deadline) return false;
+    try {
+      const next = await refresh();
+      if (maxGrantLanded(next, baselineCredits)) return true;
+    } catch (error) {
+      lastRefreshError = error;
+    }
+    if (Date.now() + intervalMs > deadline) {
+      if (lastRefreshError !== undefined) {
+        console.debug("[max-upgrade] grant poll timed out with refresh failures", lastRefreshError);
+      }
+      return false;
+    }
     await sleep(intervalMs);
   }
 }

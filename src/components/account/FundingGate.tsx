@@ -152,7 +152,9 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
       throw error;
     }
     setAwaitingGrant(true);
-    void onRefresh();
+    // No separate refresh here: the poll's first tick refreshes immediately,
+    // and a parallel request could resolve out of order and overwrite the
+    // poll's fresher snapshot with a stale pre-grant one.
     void pollForMaxGrant(onRefresh, baselineCredits).then(() => {
       // Landed: the poll's refresh already lifted the gate. Timed out: drop
       // back to the prompt state; the periodic refresh keeps reconciling.

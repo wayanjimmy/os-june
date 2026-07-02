@@ -101,4 +101,76 @@ describe("pollForMaxGrant", () => {
     expect(landed).toBe(true);
     expect(refresh).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps polling through a refresh that rejects, then completes on the grant", async () => {
+    const refresh = vi
+      .fn<() => Promise<AccountStatus | undefined>>()
+      // A refresh that throws (instead of resolving undefined) is a
+      // transient miss, not a reason to abort the poll.
+      .mockRejectedValueOnce(new Error("network wobble"))
+      .mockResolvedValue(account("max", 50_000));
+    const cleanup = vi.fn();
+
+    const landed = await pollForMaxGrant(refresh, 0, { intervalMs: 5, timeoutMs: 1000 }).then(
+      (result) => {
+        cleanup();
+        return result;
+      },
+    );
+
+    expect(landed).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    // The caller's cleanup chain ran; nothing rejected.
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("always resolves so caller cleanup runs even when every refresh rejects", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      const refresh = vi
+        .fn<() => Promise<AccountStatus | undefined>>()
+        .mockRejectedValue(new Error("accounts unreachable"));
+      const cleanup = vi.fn();
+
+      // Mirrors the component chains (.then(() => setAwaitingGrant(false))):
+      // a rejection here would pin the waiting panels forever.
+      const landed = await pollForMaxGrant(refresh, 0, { intervalMs: 5, timeoutMs: 30 }).then(
+        (result) => {
+          cleanup();
+          return result;
+        },
+      );
+
+      expect(landed).toBe(false);
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(refresh.mock.calls.length).toBeGreaterThanOrEqual(2);
+      // Persistent failure leaves a debug trail instead of a rejection.
+      expect(debug).toHaveBeenCalled();
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it("issues refreshes strictly one at a time, never in parallel", async () => {
+    // The poll is the single refresh path after an upgrade; overlapping
+    // requests could resolve out of order and let a stale pre-grant snapshot
+    // overwrite a fresh Max one. Serialized awaits make that impossible.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let call = 0;
+    const refresh = vi.fn(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      call += 1;
+      return call >= 3 ? account("max", 50_000) : account("max", -120);
+    });
+
+    const landed = await pollForMaxGrant(refresh, -120, { intervalMs: 5, timeoutMs: 1000 });
+
+    expect(landed).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(1);
+  });
 });

@@ -549,7 +549,9 @@ export function App() {
     // The PATCH resolves before the webhook grants the credits: show interim
     // feedback and poll briefly until the new balance lands.
     showBillingNotice(MAX_UPGRADE_WAITING_STATUS);
-    void refreshAccount();
+    // No separate refresh: the poll's first tick refreshes immediately, and a
+    // parallel request could resolve out of order and overwrite the poll's
+    // fresher snapshot with a stale pre-grant one.
     void pollForMaxGrant(refreshAccount, baselineCredits).then((landed) => {
       showBillingNotice(landed ? MAX_UPGRADE_READY_STATUS : MAX_UPGRADE_SLOW_STATUS, 8000);
     });

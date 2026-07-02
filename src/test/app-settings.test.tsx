@@ -907,7 +907,10 @@ describe("AppSettings", () => {
     expect(
       await screen.findByText("You are on Max now. Your new credits are ready."),
     ).toBeInTheDocument();
-    await waitFor(() => expect(onAccountRefresh).toHaveBeenCalled());
+    // Single ordered refresh path: the poll's immediate tick is the only
+    // refresh, so a stale parallel response can never overwrite the granted
+    // Max snapshot.
+    await waitFor(() => expect(onAccountRefresh).toHaveBeenCalledTimes(1));
   });
 
   it("shows a pending confirm state and blocks double-fires while the change is in flight", async () => {

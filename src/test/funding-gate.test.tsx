@@ -181,7 +181,10 @@ describe("FundingGate", () => {
       screen.getByText("Your upgrade went through. Your new credits are on the way."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Top up credits")).toBeNull();
-    expect(onRefresh).toHaveBeenCalled();
+    // Single ordered refresh path: only the poll's immediate tick runs, never
+    // a parallel fire-and-forget refresh that could resolve out of order and
+    // overwrite the poll's fresher snapshot with a stale pre-grant one.
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
   });
 
   it("cancelling the upgrade confirm never charges", async () => {
