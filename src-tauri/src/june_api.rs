@@ -19,7 +19,11 @@ use std::{
 // docker-compose.production.yml). NOT .network — that hostname has no DNS
 // record, and the v0.0.3 DMG shipped pointing at it.
 const DEFAULT_JUNE_API_URL: &str = "https://june-api.opensoftware.co";
-const DEFAULT_DICTATION_CLEANUP_MODEL: &str = "nvidia-nemotron-3-nano-30b-a3b";
+// GLM 5.2 over Nemotron Nano: benchmarked ~2-4s vs ~0.8s per utterance, but it
+// reliably keeps unnumbered items as prose and expands contractions in the
+// formal style, which the nano model skips. Slow outliers degrade gracefully:
+// past DICTATION_CLEANUP_TIMEOUT_MS the raw transcript is inserted as-is.
+const DEFAULT_DICTATION_CLEANUP_MODEL: &str = "zai-org-glm-5-2";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(600);
 const AGENT_HTTP_TIMEOUT: Duration = Duration::from_secs(600);
 const AGENT_PROXY_MAX_MESSAGES: usize = 64;
