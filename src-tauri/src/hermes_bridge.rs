@@ -38,6 +38,7 @@ const HERMES_SOURCE_TARBALL_URL: &str =
     "https://github.com/NousResearch/hermes-agent/archive/2bd1977d8fad185c9b4be47884f7e87f1add0ce3.tar.gz";
 const HERMES_SOURCE_TARBALL_SHA256: &str =
     "7a9bd367066183898831c2760f269368ab54b458a1d1b51d14ef1f484dd490cc";
+const BUNDLED_HERMES_SKILLS_RESOURCE_DIR: &str = "native/hermes-skills";
 const FILESYSTEM_MAX_DEPTH: usize = 2;
 const FILESYSTEM_MAX_ENTRIES_PER_DIR: usize = 80;
 const HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES: usize = 50 * 1024 * 1024;
@@ -851,6 +852,7 @@ async fn start_hermes_bridge_inner(
     let june_web_mcp = sync_june_web_mcp(app, &command)?;
     let june_image_mcp = sync_june_image_mcp(app, &hermes_home, &command)?;
     sync_hermes_config(
+        app,
         &hermes_home,
         provider_proxy.port,
         &provider_proxy.token,
@@ -1152,17 +1154,17 @@ pub fn update_hermes_bridge_skill(
     let path = match resolve_hermes_skill_file_in_root(&skills_root, &request.name) {
         Ok(path) => path,
         Err(error) if error.code == "hermes_skill_not_found" => {
-            // Skills loaded from `~/.agents/skills` live outside the managed
-            // root and are read-only in June: the agent loads them, but the
-            // editor never writes them. Surface that instead of "not found".
-            let externals: Vec<(PathBuf, bool)> = external_skill_dirs()
+            // Skills loaded from external roots live outside the managed root
+            // and are read-only in June: the agent loads them, but the editor
+            // never writes them. Surface that instead of "not found".
+            let externals: Vec<(PathBuf, bool)> = external_skill_dirs(&app)
                 .into_iter()
                 .map(|dir| (dir, true))
                 .collect();
             if resolve_skill_in_roots(&externals, &request.name).is_ok() {
                 return Err(AppError::new(
                     "hermes_skill_read_only",
-                    "This skill loads from ~/.agents/skills and is read-only in June. Edit it on disk.",
+                    "This skill loads from a read-only skill directory.",
                 ));
             }
             return Err(error);
@@ -1713,7 +1715,7 @@ fn skill_search_roots(app: &AppHandle) -> Result<Vec<(PathBuf, bool)>, AppError>
     if managed.is_dir() {
         roots.push((managed, false));
     }
-    for dir in external_skill_dirs() {
+    for dir in external_skill_dirs(app) {
         roots.push((dir, true));
     }
     Ok(roots)
@@ -6289,12 +6291,33 @@ fn default_python_command() -> &'static str {
 }
 
 fn sync_hermes_config(
+    app: &AppHandle,
     hermes_home: &std::path::Path,
     provider_proxy_port: u16,
     provider_proxy_token: &str,
     june_context_mcp: &JuneContextMcpConfig,
     june_web_mcp: &JuneWebMcpConfig,
     june_image_mcp: &JuneImageMcpConfig,
+) -> Result<(), AppError> {
+    sync_hermes_config_with_external_dirs(
+        hermes_home,
+        provider_proxy_port,
+        provider_proxy_token,
+        june_context_mcp,
+        june_web_mcp,
+        june_image_mcp,
+        &external_skill_dirs(app),
+    )
+}
+
+fn sync_hermes_config_with_external_dirs(
+    hermes_home: &std::path::Path,
+    provider_proxy_port: u16,
+    provider_proxy_token: &str,
+    june_context_mcp: &JuneContextMcpConfig,
+    june_web_mcp: &JuneWebMcpConfig,
+    june_image_mcp: &JuneImageMcpConfig,
+    external_skill_dirs: &[PathBuf],
 ) -> Result<(), AppError> {
     let model = crate::providers::generation_model();
     let base_url = format!("http://127.0.0.1:{provider_proxy_port}/v1");
@@ -6303,7 +6326,7 @@ fn sync_hermes_config(
         &base_url,
         provider_proxy_token,
         &CRON_SANDBOXED_TOOLSETS.join(", "),
-        &external_skill_dirs(),
+        external_skill_dirs,
         Some(june_context_mcp),
         Some(june_web_mcp),
         Some(june_image_mcp),
@@ -6516,13 +6539,12 @@ fn render_image_mcp_entry(
     )
 }
 
-/// User-global skill directories Hermes loads in addition to its built-in
-/// `$HERMES_HOME/skills`. June advertises the conventional `~/.agents/skills`
-/// folder (where the `skills` CLI installs) when it exists, so a user or team
-/// can drop skills there and have every agent session pick them up. The
-/// Seatbelt write-jail only grants writes under the app's own roots, so these
-/// external skills load read-only. A missing folder is a silent no-op.
-fn external_skill_dirs() -> Vec<PathBuf> {
+/// External skill directories Hermes loads in addition to its built-in
+/// `$HERMES_HOME/skills`. User-global `~/.agents/skills` entries stay first so
+/// user/team skills can shadow app-bundled skills when names collide. The
+/// bundled resource directory is read-only and ships June-owned skills that
+/// should be available without a Hermes runtime bump.
+fn external_skill_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for home in home_dir_candidates() {
         let candidate = home.join(".agents").join("skills");
@@ -6530,7 +6552,29 @@ fn external_skill_dirs() -> Vec<PathBuf> {
             dirs.push(candidate);
         }
     }
+    for candidate in bundled_skill_dirs(app) {
+        if candidate.is_dir() && !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
     dirs
+}
+
+fn bundled_skill_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        dirs.push(bundled_skill_resource_dir(&resource_dir));
+    }
+    dirs.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("hermes-skills"),
+    );
+    dirs
+}
+
+fn bundled_skill_resource_dir(resource_dir: &Path) -> PathBuf {
+    resource_dir.join(BUNDLED_HERMES_SKILLS_RESOURCE_DIR)
 }
 
 /// Writes the June persona to `SOUL.md` in the June-managed Hermes home.
@@ -8524,6 +8568,16 @@ mcp_servers:
     }
 
     #[test]
+    fn bundled_skill_resource_dir_points_at_native_hermes_skills() {
+        assert_eq!(
+            bundled_skill_resource_dir(Path::new("resources")),
+            PathBuf::from("resources")
+                .join("native")
+                .join("hermes-skills")
+        );
+    }
+
+    #[test]
     fn render_hermes_config_emits_empty_external_dirs_when_none() {
         let config = render_hermes_config(
             "glm",
@@ -8896,8 +8950,16 @@ mcp_servers:
         let mcp = test_june_context_mcp_config();
         let web = test_june_web_mcp_config();
         let image = test_june_image_mcp_config();
-        sync_hermes_config(home.path(), 4242, "proxy-token", &mcp, &web, &image)
-            .expect("sync config");
+        sync_hermes_config_with_external_dirs(
+            home.path(),
+            4242,
+            "proxy-token",
+            &mcp,
+            &web,
+            &image,
+            &[],
+        )
+        .expect("sync config");
 
         let config = std::fs::read_to_string(home.path().join("config.yaml")).expect("read config");
         assert!(config.contains("platform_toolsets:"));

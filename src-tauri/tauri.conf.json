@@ -126,7 +126,8 @@
       "icons/icon.png"
     ],
     "resources": {
-      "../.tauri-hermes/hermes": "native/hermes"
+      "../.tauri-hermes/hermes": "native/hermes",
+      "resources/hermes-skills": "native/hermes-skills"
     }
   }
 }
