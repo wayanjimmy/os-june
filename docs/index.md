@@ -18,6 +18,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0006](adr/0006-embed-hermes-sandboxed-runtime.md) — embed the pinned Hermes runtime as sandboxed child processes
 - [adr/0007](adr/0007-model-capability-source-of-truth.md) — model capabilities come from the live Venice catalog, not marketing traits
 - [adr/0008](adr/0008-image-generation-and-editing-tools.md) — image generation/editing: `/image` fast path + LLM tools, via Venice
+- [adr/0009](adr/0009-hermes-config-shared-ownership-merge.md) — config.yaml is shared with the Hermes dashboard; June deep-merges on spawn, never overwrites
 
 ## Enforceable rules (spec/)
 
@@ -40,6 +41,7 @@ Per-repo config the engineering skills read before acting (see the
 ## Subsystems
 
 - [hermes-architecture.md](hermes-architecture.md) — the agent runtime: bridge, gateway, control plane, sessions, models
+- [hermes-gateway-gotchas.md](hermes-gateway-gotchas.md) — integration gotchas: restart discipline, config contract, MCP OAuth, event types, upstream tool-schema quirks
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [june-api-prd.md](june-api-prd.md) — June API: upstream proxy + OS Accounts authorize/charge (the canonical backend spec)
 - [configuration.md](configuration.md) — env + config reference (desktop client + June API)

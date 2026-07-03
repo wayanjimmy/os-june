@@ -5,7 +5,10 @@ For *why* it is embedded and sandboxed, see
 [ADR-0006](adr/0006-embed-hermes-sandboxed-runtime.md). For the code-level
 contract of the typed event seam, `src/lib/hermes-control-plane/README.md` is
 the best entry point. For bumping the pinned runtime, see
-[hermes-upgrade-checklist.md](hermes-upgrade-checklist.md).
+[hermes-upgrade-checklist.md](hermes-upgrade-checklist.md). For the sharp
+edges of the integration (restart discipline, the config.yaml contract, MCP
+OAuth, event types), see
+[hermes-gateway-gotchas.md](hermes-gateway-gotchas.md).
 
 ## Layers
 

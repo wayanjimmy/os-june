@@ -28,21 +28,42 @@ import type { HermesMcpAuthStatus, HermesMcpServerInfo } from "./schemas";
 // OAuth applicability
 // ---------------------------------------------------------------------------
 
+/** True when a status/test message reads as "this server needs an OAuth
+ * sign-in" — Hermes' probe reports e.g. "MCP OAuth for 'x': non-interactive
+ * environment and no cached tokens found. Run `hermes mcp login x`
+ * interactively first." Deliberately tight: only an explicitly OAuth-shaped
+ * message qualifies, so a generic 401 on a bearer-auth server never grows a
+ * browser sign-in that cannot help it. */
+export function oauthNeedFromMessage(message: string | undefined): boolean {
+  if (!message) return false;
+  return /\boauth\b/i.test(message) || /\bmcp login\b/i.test(message);
+}
+
 /** True when a server authenticates through an OAuth browser sign-in, so the
  * OAuth status + actions apply to it. A `bearer`/`none` HTTP server or a stdio
  * server is excluded: it has no browser sign-in to run. We treat an
  * `http-oauth` transport as authoritative, and also any server that reports a
  * real auth STATUS other than "not-required" (a server Hermes flagged as
  * needing a login), so the flow still appears if upstream labels the transport
- * plain `http` but reports an oauth-shaped auth status. */
+ * plain `http` but reports an oauth-shaped auth status. Two more fallbacks for
+ * a listing that labels the transport plain `http` AND reports no auth status:
+ * the config's own oauth marker (the `auth: "oauth"` the server was created
+ * with, or an `oauth` block), and an OAuth-shaped connection-status message —
+ * both mean the interactive browser sign-in applies. */
 export function usesOauth(server: HermesMcpServerInfo): boolean {
   if (server.transport === "http-oauth") return true;
   if (server.transport === "stdio") return false;
-  return (
+  if (
     server.auth === "authenticated" ||
     server.auth === "unauthenticated" ||
     server.auth === "expired"
-  );
+  ) {
+    return true;
+  }
+  const record = asRecord(server.raw);
+  const rawAuth = typeof record?.auth === "string" ? record.auth.toLowerCase() : undefined;
+  if (rawAuth === "oauth" || asRecord(record?.oauth) !== undefined) return true;
+  return oauthNeedFromMessage(server.statusMessage);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +147,7 @@ const STATE_META: Readonly<Record<McpOauthStatus, McpOauthStatusMeta>> = Object.
   unknown: {
     state: "unknown",
     label: "Sign-in status unknown",
-    blurb: "Hermes did not report this server's sign-in status.",
+    blurb: "The sign-in status was not reported. Sign in to refresh it.",
     tone: "neutral",
     action: "sign-in",
     actionLabel: "Sign in",

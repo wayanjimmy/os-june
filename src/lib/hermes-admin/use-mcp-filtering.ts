@@ -25,6 +25,7 @@ import { useCallback, useState } from "react";
 import { HermesAdminError } from "./errors";
 import { toolsConfigPath, buildToolPolicyBlock } from "./mcp-filtering-view";
 import type { ToolPolicyDraft } from "./mcp-filtering-view";
+import type { McpEditWrite } from "./mcp-servers-view";
 import {
   useMcpServersController,
   type McpServersEngine,
@@ -49,6 +50,27 @@ export type McpFilteringState = McpServersState & {
    * set). Preserves every unrelated server field and unrelated config.
    */
   saveToolPolicy: (serverName: string, draft: ToolPolicyDraft) => Promise<SaveToolPolicyResult>;
+  /** The server name whose connection-field edit is in flight, or undefined. */
+  editingServer?: string;
+  /** The safe message from the last failed edit, or undefined. */
+  editError?: string;
+  /**
+   * Applies an edit's scoped writes — only the changed connection leaves under
+   * `mcp_servers.<name>` (built by `planServerEdit`) — through the REST config
+   * path, so secret env/headers and the tool policy are preserved. Resolves true
+   * on success (and refreshes the list), false on failure (with `editError`
+   * set). An empty write list is a no-op success. The writes are applied to
+   * ONE fetched config tree and persisted with a single PUT, so a multi-field
+   * edit lands atomically: every leaf applies or none does.
+   */
+  editServer: (serverName: string, writes: McpEditWrite[]) => Promise<boolean>;
+  /** Clears the last edit error. The dialog host calls this when OPENING the
+   * edit form, so a failure from another server's edit never renders inside a
+   * freshly opened dialog. */
+  clearEditError: () => void;
+  /** Clears the last tool-policy save error (same staleness rule as
+   * {@link clearEditError}, for the Tools dialog). */
+  clearSaveError: () => void;
 };
 
 /**
@@ -61,6 +83,8 @@ export function useMcpFilteringController(engine: McpServersEngine | null): McpF
   const servers = useMcpServersController(engine);
   const [savingServer, setSavingServer] = useState<string>();
   const [saveError, setSaveError] = useState<string>();
+  const [editingServer, setEditingServer] = useState<string>();
+  const [editError, setEditError] = useState<string>();
 
   const saveToolPolicy = useCallback(
     async (serverName: string, draft: ToolPolicyDraft): Promise<SaveToolPolicyResult> => {
@@ -96,7 +120,55 @@ export function useMcpFilteringController(engine: McpServersEngine | null): McpF
     [engine, servers],
   );
 
-  return { ...servers, savingServer, saveError, saveToolPolicy };
+  const editServer = useCallback(
+    async (serverName: string, writes: McpEditWrite[]): Promise<boolean> => {
+      if (!engine) return false;
+      // No changed leaves -> nothing to write. Report success so the dialog
+      // closes cleanly without a spurious "restart required" banner.
+      if (writes.length === 0) return true;
+      setEditingServer(serverName);
+      setEditError(undefined);
+      try {
+        // ONE batched read-modify-write: every changed leaf is applied to the
+        // SAME fetched config tree and persisted with a single PUT, so a
+        // multi-field edit (command AND args) can never land half-applied,
+        // while every untouched leaf under mcp_servers.<name> (secret
+        // env/headers, the tools policy) is preserved.
+        await engine.client.config.applyWritesAtSegments(writes);
+        // The edit lands in config.yaml now, but Hermes rebuilds the server
+        // connection + tool inventory at gateway start, so June advances the
+        // cache/lifecycle with the gateway-restart `mcp.edit` mutation (which
+        // raises the "Saved <name>. Restart..." notice and flips the banner),
+        // then refreshes the list.
+        engine.cache.afterMutation("mcp.edit", serverName);
+        engine.lifecycle.noteMutation("mcp.edit");
+        setEditingServer(undefined);
+        servers.refresh();
+        return true;
+      } catch (error) {
+        const adminError = HermesAdminError.from("PUT /api/config", error);
+        setEditError(adminError.safeMessage);
+        setEditingServer(undefined);
+        return false;
+      }
+    },
+    [engine, servers],
+  );
+
+  const clearEditError = useCallback(() => setEditError(undefined), []);
+  const clearSaveError = useCallback(() => setSaveError(undefined), []);
+
+  return {
+    ...servers,
+    savingServer,
+    saveError,
+    saveToolPolicy,
+    editingServer,
+    editError,
+    editServer,
+    clearEditError,
+    clearSaveError,
+  };
 }
 
 /**

@@ -977,14 +977,33 @@ struct JuneWebMcpConfig {
 #[tauri::command]
 pub async fn stop_hermes_bridge(
     bridge: State<'_, HermesBridge>,
+    mode: Option<String>,
 ) -> Result<HermesBridgeStatus, AppError> {
-    stop_hermes_bridge_inner(&bridge)?;
-    Ok(HermesBridgeStatus {
-        running: false,
-        connection: None,
-        connections: Vec::new(),
-        message: Some("Hermes bridge stopped.".to_string()),
-    })
+    // A mode-scoped stop kills ONLY that runtime (the MCP page's restart flow
+    // targets one mode and must not silently take down a live session in the
+    // other mode); no mode keeps the historical stop-everything behavior.
+    let Some(mode) = mode.as_deref() else {
+        stop_hermes_bridge_inner(&bridge)?;
+        return Ok(HermesBridgeStatus {
+            running: false,
+            connection: None,
+            connections: Vec::new(),
+            message: Some("Hermes bridge stopped.".to_string()),
+        });
+    };
+    let full_mode = match mode {
+        "unrestricted" => true,
+        "sandboxed" => false,
+        other => {
+            return Err(AppError::new(
+                "hermes_admin_invalid_mode",
+                format!("Unknown Hermes admin mode \"{other}\"."),
+            ));
+        }
+    };
+    stop_hermes_mode(&bridge, full_mode)?;
+    let connections = live_connections(&bridge)?;
+    Ok(status_for(connections, None))
 }
 
 #[tauri::command]
@@ -2718,10 +2737,21 @@ pub async fn hermes_admin_request(
 
 /// How long June waits for the `hermes mcp login` CLI to finish before
 /// returning. The browser sign-in is the USER's to complete; June never blocks
-/// indefinitely on it. A generous window covers the common "click approve"
-/// round-trip, after which June reports `timed_out` and the UI keeps showing the
-/// waiting state, refreshing status on its own.
-const MCP_OAUTH_LOGIN_TIMEOUT: Duration = Duration::from_secs(150);
+/// indefinitely on it. Matches Hermes' own OAuth flow timeout (300s): the kill
+/// on timeout also kills the CLI's localhost callback listener, so cutting the
+/// window shorter than Hermes' own would abort a slow-but-valid first sign-in
+/// (account picker, 2FA). After it, June reports `timed_out` and the UI keeps
+/// showing the waiting state, refreshing status on its own.
+const MCP_OAUTH_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The line Hermes' OAuth redirect handler prints after it opens the system
+/// browser itself (`tools/mcp_oauth.py`, `_redirect_handler`, pinned runtime).
+/// June skips its own browser-open when this marker is present so the user
+/// does not get two tabs racing the same OAuth state. The match is prose and
+/// version-specific by nature: if a future runtime rewords it the check goes
+/// false and the WORST CASE is a harmless duplicate tab — re-verify on a pin
+/// bump (docs/hermes-upgrade-checklist.md).
+const HERMES_BROWSER_OPENED_MARKER: &str = "Browser opened automatically";
 
 /// A name a CLI argument is allowed to be: the same slug the TS validator
 /// enforces (`/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`). This is defense in depth —
@@ -2742,23 +2772,43 @@ fn is_safe_mcp_server_name(name: &str) -> bool {
 }
 
 /// Builds the `hermes mcp login <server> [--profile <p>]` command, isolated to
-/// the connection's home/token, non-interactive, in the connection's mode. Pure
-/// (no spawn) so a test can assert the exact argument vector and that the server
-/// name is a discrete argument rather than shell-interpolated.
+/// the connection's home/token, in the connection's mode. Pure (no spawn) so a
+/// test can assert the exact argument vector and that the server name is a
+/// discrete argument rather than shell-interpolated.
+///
+/// Hermes gates its OAuth login on `sys.stdin.isatty()` and refuses with
+/// "non-interactive environment and no cached tokens found" when spawned with a
+/// piped/null stdin — the pinned runtime has no URL-printing fallback before
+/// that gate. On macOS the CLI is therefore wrapped in
+/// `/usr/bin/script -q /dev/null <cmd> ...`, which lends it a real PTY: the
+/// gate passes and Hermes runs its own flow (prints the authorization URL,
+/// which June still parses out of the output, opens the browser, and captures
+/// the localhost callback itself). `script` merges the child's stderr into the
+/// PTY stream and propagates its exit status.
 fn build_hermes_mcp_login_command(
     connection: &HermesBridgeConnection,
     server: &str,
     profile: Option<&str>,
 ) -> Command {
     let hermes_home = PathBuf::from(&connection.hermes_home);
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut wrapped = Command::new("/usr/bin/script");
+        wrapped.args(["-q", "/dev/null", &connection.command]);
+        wrapped
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut cmd = Command::new(&connection.command);
     cmd.args(["mcp", "login", server]);
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
     apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
-    // Non-interactive: the CLI must print the authorization URL and not block on
-    // a terminal prompt June cannot answer. June opens the URL in the browser.
+    // Off macOS there is no PTY wrapper: keep the explicit non-interactive
+    // marker so a future Hermes that honors it prints the URL instead of
+    // blocking on a prompt June cannot answer. On macOS the PTY carries the
+    // interactive intent, so the contradictory marker is omitted.
+    #[cfg(not(target_os = "macos"))]
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(&hermes_home);
     cmd.stdin(Stdio::null());
@@ -2846,6 +2896,101 @@ fn query_key_is_sensitive(key: &str) -> bool {
     )
 }
 
+/// Strips ANSI escape sequences (CSI color codes, OSC titles, two-character
+/// escapes) and non-printing control characters from CLI output. Under the
+/// login PTY the CLI emits color codes, carriage returns, and end-of-input
+/// markers (^D) that must never reach the webview as mojibake. Keeps newlines
+/// and tabs so line structure survives for the summarizer.
+fn strip_ansi_and_controls(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                // CSI: `ESC [` params, terminated by a byte in @..~
+                Some('[') => {
+                    chars.next();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: `ESC ]` payload, terminated by BEL or ST (`ESC \`)
+                Some(']') => {
+                    chars.next();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '\u{07}' {
+                            break;
+                        }
+                        if next == '\u{1b}' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Two-character escape (ESC + one byte)
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+        } else if c == '\n' || c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+        // Other control characters (\r, ^D, NUL, BEL) are dropped.
+    }
+    out
+}
+
+/// Reduces a login transcript to the line that matters: Hermes' success line
+/// when the login succeeded, the first failure line when it failed, otherwise
+/// the whole cleaned text capped so a mid-flow prompt (the auth URL plus paste
+/// instructions) cannot flood the sign-in panel. Expects ANSI-stripped input.
+fn summarize_login_output(cleaned: &str, ok: bool) -> String {
+    let lines: Vec<&str> = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if ok {
+        if let Some(line) = lines.iter().rev().find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("authenticated") || lower.contains("authorized")
+        }) {
+            return (*line).to_string();
+        }
+    } else if let Some(line) = lines.iter().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        [
+            "authentication failed",
+            "no oauth token",
+            "error",
+            "fail",
+            "cancelled",
+            "canceled",
+            "denied",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    }) {
+        return (*line).to_string();
+    }
+    let joined = lines.join(" ");
+    const CAP: usize = 280;
+    if joined.chars().count() > CAP {
+        let mut capped: String = joined.chars().take(CAP).collect();
+        capped.push_str("...");
+        capped
+    } else {
+        joined
+    }
+}
+
 /// Redacts a free-text CLI line for return to June. The CLI may echo a
 /// `Bearer <token>`, a `?token=<value>`, or a long credential-shaped run; this
 /// masks all three so the message that reaches the webview never carries a
@@ -2897,18 +3042,41 @@ fn redact_cli_word(word: &str) -> String {
     word.to_string()
 }
 
-/// Classifies success from CLI exit + output without ever inspecting a token.
-/// A zero exit, or output that states authorization completed, counts as
-/// success; otherwise it is a non-success (the caller may have timed out waiting
-/// for the browser step). Pure so a test pins the signal parsing.
+/// Classifies a `hermes mcp login` outcome from its exit status AND output,
+/// without ever inspecting a token. Hermes' CLI exits 0 even when it prints
+/// "Authentication failed" (it reports the error and returns), so failure
+/// markers in the output always win — and a zero exit alone proves nothing, so
+/// success additionally requires Hermes' explicit success line ("Authenticated
+/// — N tool(s) available" / "Authenticated (server reported no tools)").
+/// Prefers a false negative (the user re-tests and sees the truth) over a
+/// false success that raises a restart notification with no token stored.
+/// Pure so a test pins the signal parsing.
 fn mcp_login_succeeded(exit_success: bool, output: &str) -> bool {
-    if exit_success {
-        return true;
-    }
     let lower = output.to_ascii_lowercase();
-    (lower.contains("authorized") || lower.contains("logged in") || lower.contains("success"))
-        && !lower.contains("fail")
-        && !lower.contains("error")
+    const FAILURE_MARKERS: [&str; 7] = [
+        "authentication failed",
+        "no oauth token was obtained",
+        "error",
+        "fail",
+        "cancelled",
+        "canceled",
+        "denied",
+    ];
+    if FAILURE_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return false;
+    }
+    // The negated auth words contain the positive ones ("unauthenticated"
+    // contains "authenticated"); strip them before the positive check.
+    let positive = lower
+        .replace("unauthenticated", "")
+        .replace("unauthorized", "")
+        .replace("not authenticated", "")
+        .replace("not authorized", "");
+    let explicit_success = positive.contains("authenticated")
+        || positive.contains("authorized")
+        || positive.contains("logged in")
+        || positive.contains("success");
+    exit_success && explicit_success
 }
 
 /// Runs the MCP OAuth sign-in for one server: `hermes mcp login <server>` in the
@@ -2978,19 +3146,31 @@ pub async fn hermes_mcp_oauth_login(
         )
     })??;
 
-    let combined = format!("{}\n{}", join.stdout, join.stderr);
+    // Strip the PTY's ANSI color codes and control characters FIRST: a reset
+    // code glued onto a URL would defeat extraction, and raw escapes render as
+    // mojibake in the webview.
+    let combined = strip_ansi_and_controls(&format!("{}\n{}", join.stdout, join.stderr));
     let auth_url = extract_authorization_url(&combined);
     // Open the authorization URL in the OS browser so the user can complete the
     // sign-in. macOS only; on other platforms June surfaces the URL for a manual
-    // open. The URL is a navigation target, not a credential, but it is still
-    // redacted before display on the TS side.
+    // open. Skipped when Hermes already opened it itself (it prints "Browser
+    // opened automatically" under the PTY), so the user does not get a second
+    // tab racing the same OAuth state. The URL is a navigation target, not a
+    // credential, but it is still redacted before display on the TS side.
+    let hermes_opened_browser = combined.contains(HERMES_BROWSER_OPENED_MARKER);
     if let Some(url) = auth_url.as_deref() {
-        open_url_in_browser(url);
+        if !hermes_opened_browser {
+            open_url_in_browser(url);
+        }
     }
 
+    let ok = mcp_login_succeeded(join.exit_success, &combined);
     Ok(HermesMcpOauthLoginResult {
-        ok: mcp_login_succeeded(join.exit_success, &combined),
-        message: redact_cli_message(&combined),
+        ok,
+        // The message is the ONE line that matters (success line / failure
+        // line), not the whole transcript, then redacted so no secret-shaped
+        // value crosses into the renderer.
+        message: redact_cli_message(&summarize_login_output(&combined, ok)),
         // The browser was opened above with the real URL; the copy returned to
         // the webview has any secret-shaped query values redacted so a token can
         // never cross into the renderer through this result.
@@ -5896,8 +6076,55 @@ fn sync_hermes_config(
         Some(june_context_mcp),
         Some(june_web_mcp),
     );
-    std::fs::write(hermes_home.join("config.yaml"), config)
+    let config_path = hermes_home.join("config.yaml");
+    // MERGE over the existing config, never replace it: the jailed dashboard
+    // persists admin changes (user-added MCP servers, tool filters, OAuth
+    // client names, skill config) into this same file, and a plain overwrite
+    // wiped them on every June spawn. June's rendered keys still win — the
+    // provider proxy port/token legitimately change per spawn — but every key
+    // June does not render survives.
+    let merged = merge_hermes_config(&config_path, &config);
+    std::fs::write(config_path, merged)
         .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))
+}
+
+/// Deep-merges June's freshly rendered config over the existing `config.yaml`,
+/// returning the YAML to write. June's leaves win on conflict; mappings merge
+/// recursively, so a user-added `mcp_servers.<name>` entry (and its `oauth` /
+/// `tools` blocks, or `skills.config` values) survives while June's
+/// `june_context` / `june_web` entries and the per-spawn model proxy settings
+/// refresh. A missing or unparsable existing file falls back to the rendered
+/// config alone, matching the previous overwrite behavior.
+fn merge_hermes_config(existing_path: &std::path::Path, rendered: &str) -> String {
+    let Ok(existing_text) = std::fs::read_to_string(existing_path) else {
+        return rendered.to_string();
+    };
+    let Ok(existing) = serde_yaml::from_str::<serde_yaml::Value>(&existing_text) else {
+        return rendered.to_string();
+    };
+    let Ok(overlay) = serde_yaml::from_str::<serde_yaml::Value>(rendered) else {
+        return rendered.to_string();
+    };
+    let merged = deep_merge_yaml(existing, overlay);
+    serde_yaml::to_string(&merged).unwrap_or_else(|_| rendered.to_string())
+}
+
+/// Recursive overlay merge: mappings merge key by key (overlay wins on leaf
+/// conflicts); any non-mapping overlay value replaces the base outright.
+fn deep_merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde_yaml::Value {
+    match (base, overlay) {
+        (serde_yaml::Value::Mapping(mut base_map), serde_yaml::Value::Mapping(overlay_map)) => {
+            for (key, overlay_value) in overlay_map {
+                let merged = match base_map.remove(&key) {
+                    Some(base_value) => deep_merge_yaml(base_value, overlay_value),
+                    None => overlay_value,
+                };
+                base_map.insert(key, merged);
+            }
+            serde_yaml::Value::Mapping(base_map)
+        }
+        (_, overlay) => overlay,
+    }
 }
 
 /// Renders the `config.yaml` June owns for every Hermes spawn. Pure so the
@@ -6752,8 +6979,31 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(program, "/usr/local/bin/hermes");
-        assert_eq!(args, vec!["mcp", "login", "linear", "--profile", "work"]);
+        // On macOS the CLI runs under `script -q /dev/null` so Hermes' OAuth
+        // login sees a real PTY (its gate is `sys.stdin.isatty()`); the hermes
+        // command becomes the first argument. Elsewhere it runs directly.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(program, "/usr/bin/script");
+            assert_eq!(
+                args,
+                vec![
+                    "-q",
+                    "/dev/null",
+                    "/usr/local/bin/hermes",
+                    "mcp",
+                    "login",
+                    "linear",
+                    "--profile",
+                    "work"
+                ]
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(program, "/usr/local/bin/hermes");
+            assert_eq!(args, vec!["mcp", "login", "linear", "--profile", "work"]);
+        }
     }
 
     #[test]
@@ -6764,6 +7014,19 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            args,
+            vec![
+                "-q",
+                "/dev/null",
+                "/usr/local/bin/hermes",
+                "mcp",
+                "login",
+                "linear"
+            ]
+        );
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(args, vec!["mcp", "login", "linear"]);
     }
 
@@ -6937,10 +7200,73 @@ mod tests {
 
     #[test]
     fn classifies_login_success_from_exit_and_output() {
-        assert!(mcp_login_succeeded(true, ""));
-        assert!(mcp_login_succeeded(false, "Successfully authorized linear"));
+        // Success requires BOTH a clean exit AND Hermes' explicit success line.
+        assert!(mcp_login_succeeded(
+            true,
+            "Authenticated — 5 tool(s) available"
+        ));
+        assert!(mcp_login_succeeded(
+            true,
+            "Authenticated (server reported no tools)"
+        ));
+        // A zero exit alone proves nothing: Hermes exits 0 on failure too.
+        assert!(!mcp_login_succeeded(true, ""));
+        assert!(!mcp_login_succeeded(true, "Starting OAuth flow for 'x'..."));
+        // Success text without a clean exit is not success either.
+        assert!(!mcp_login_succeeded(
+            false,
+            "Successfully authorized linear"
+        ));
         assert!(!mcp_login_succeeded(false, "error: authorization failed"));
         assert!(!mcp_login_succeeded(false, "waiting for browser"));
+        // Failure markers beat a zero exit, whatever else the output says.
+        assert!(!mcp_login_succeeded(
+            true,
+            "Starting OAuth flow for 'Todoist'... Authentication failed: MCP OAuth for 'Todoist'"
+        ));
+        assert!(!mcp_login_succeeded(
+            true,
+            "Server responded, but no OAuth token was obtained"
+        ));
+        assert!(!mcp_login_succeeded(
+            true,
+            "Authenticated — 3 tool(s) available\nerror: token store write failed"
+        ));
+        assert!(!mcp_login_succeeded(true, "Sign-in cancelled by the user"));
+        assert!(!mcp_login_succeeded(true, "Access denied by the provider"));
+        // The negated auth words never read as the positive marker.
+        assert!(!mcp_login_succeeded(true, "status: unauthenticated"));
+        assert!(!mcp_login_succeeded(true, "401 unauthorized"));
+    }
+
+    #[test]
+    fn strips_ansi_and_control_characters_from_pty_output() {
+        // CSI color codes, an OSC title, a two-char escape, ^D, NUL, and \r.
+        let raw = "\u{4}\u{0}\u{1b}[2mStarting\u{1b}[0m flow\r\n\u{1b}]0;title\u{7}Authenticated \u{1b}M— 5 tool(s)";
+        let cleaned = strip_ansi_and_controls(raw);
+        assert_eq!(cleaned, "Starting flow\nAuthenticated — 5 tool(s)");
+    }
+
+    #[test]
+    fn summarizes_login_output_to_the_line_that_matters() {
+        let transcript = "Starting OAuth flow for 'todoist'...\nMCP OAuth: authorization required. Open this URL in your browser:\nhttps://todoist.com/oauth/authorize?client_id=abc\n(Browser opened automatically.)\nAuthenticated — 12 tool(s) available";
+        // Success: the success line only, not the URL / paste noise.
+        assert_eq!(
+            summarize_login_output(transcript, true),
+            "Authenticated — 12 tool(s) available"
+        );
+        // Failure: the first failure line.
+        let failed =
+            "Starting OAuth flow for 'todoist'...\nAuthentication failed: MCP OAuth for 'todoist'";
+        assert_eq!(
+            summarize_login_output(failed, false),
+            "Authentication failed: MCP OAuth for 'todoist'"
+        );
+        // No marker (timed out mid-flow): capped, never the full flood.
+        let long = "word ".repeat(200);
+        let summary = summarize_login_output(&long, false);
+        assert!(summary.chars().count() <= 283);
+        assert!(summary.ends_with("..."));
     }
 
     fn request_with_authorization(value: &str) -> HttpRequest {
@@ -7108,6 +7434,87 @@ mod tests {
         } else {
             assert_eq!(command, PathBuf::from("venv").join("bin").join("hermes"));
         }
+    }
+
+    #[test]
+    fn merge_hermes_config_preserves_dashboard_persisted_entries() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config_path = home.path().join("config.yaml");
+        // What the jailed dashboard persisted across the last run: a user MCP
+        // server (with its oauth client name and tool filter) and skill config,
+        // alongside June's own entries from the previous spawn.
+        std::fs::write(
+            &config_path,
+            r#"model:
+  default: "old-model"
+  api_key: "old-token"
+skills:
+  external_dirs: []
+  config:
+    my-skill:
+      api_base: "https://example.com"
+mcp_servers:
+  june_context:
+    command: "/old/python"
+  todoist:
+    url: "https://ai.todoist.net/mcp"
+    auth: "oauth"
+    oauth:
+      client_name: "June"
+    tools:
+      include:
+        - "get_tasks"
+"#,
+        )
+        .expect("seed config");
+
+        let rendered = render_hermes_config(
+            "new-model",
+            "http://127.0.0.1:9/v1",
+            "new-token",
+            "web",
+            &[],
+            Some(&test_june_context_mcp_config()),
+            None,
+        );
+        let merged = merge_hermes_config(&config_path, &rendered);
+        let value: serde_yaml::Value = serde_yaml::from_str(&merged).expect("merged parses");
+
+        // June's per-spawn keys won...
+        assert_eq!(value["model"]["api_key"], "new-token");
+        assert_eq!(value["model"]["default"], "new-model");
+        assert_ne!(
+            value["mcp_servers"]["june_context"]["command"],
+            "/old/python"
+        );
+        // ...and everything the dashboard persisted survived.
+        assert_eq!(
+            value["mcp_servers"]["todoist"]["url"],
+            "https://ai.todoist.net/mcp"
+        );
+        assert_eq!(
+            value["mcp_servers"]["todoist"]["oauth"]["client_name"],
+            "June"
+        );
+        assert_eq!(
+            value["mcp_servers"]["todoist"]["tools"]["include"][0],
+            "get_tasks"
+        );
+        assert_eq!(
+            value["skills"]["config"]["my-skill"]["api_base"],
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn merge_hermes_config_falls_back_to_rendered_when_existing_is_missing_or_bad() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let missing = home.path().join("config.yaml");
+        let rendered = "model:\n  default: \"m\"\n";
+        assert_eq!(merge_hermes_config(&missing, rendered), rendered);
+
+        std::fs::write(&missing, ": not yaml : [").expect("seed corrupt");
+        assert_eq!(merge_hermes_config(&missing, rendered), rendered);
     }
 
     #[test]

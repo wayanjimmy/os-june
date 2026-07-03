@@ -11,21 +11,26 @@ import { describe, expect, it, vi } from "vitest";
 import {
   McpServersController,
   authMeta,
+  canEditServer,
+  editFromServer,
   emptyDraft,
   filterServers,
   hasAvailableTools,
   isLocalSubprocess,
   isValidHttpUrl,
   parseMcpServer,
+  planServerEdit,
   redactedEnv,
   redactedHeaders,
   serverArgs,
   serverHaystack,
   statusMeta,
   transportMeta,
+  useMcpFilteringController,
   useMcpServersController,
   validateDraft,
   type HermesMcpServerInfo,
+  type McpFilteringState,
   type McpServerDraft,
   type McpServersEngine,
   type McpServersState,
@@ -265,6 +270,252 @@ describe("mcp servers — add-server validation", () => {
 // Controller mutations against the real client + fake server.
 // ---------------------------------------------------------------------------
 
+describe("mcp servers — edit plan (scoped, non-destructive)", () => {
+  const stdio = () =>
+    serverFromWire({
+      name: "sqlite",
+      enabled: true,
+      transport: "stdio",
+      command: "mcp-server-sqlite",
+      args: ["--db", "./data.db"],
+      env: { SQLITE_KEY: "secret" },
+    });
+
+  it("seeds the editable connection fields off a server", () => {
+    expect(editFromServer(stdio())).toEqual({
+      command: "mcp-server-sqlite",
+      args: ["--db", "./data.db"],
+      url: "",
+    });
+  });
+
+  it("allows editing stdio and http transports but not unknown", () => {
+    expect(canEditServer(stdio())).toBe(true);
+    expect(
+      canEditServer(serverFromWire({ name: "x", enabled: true, transport: "http-oauth" })),
+    ).toBe(true);
+    expect(canEditServer(serverFromWire({ name: "x", enabled: true, transport: "unknown" }))).toBe(
+      false,
+    );
+  });
+
+  it("writes only the changed command leaf, leaving args untouched", () => {
+    const plan = planServerEdit(stdio(), {
+      command: "mcp-server-sqlite-v2",
+      args: ["--db", "./data.db"],
+      url: "",
+    });
+    expect(plan).toEqual({
+      ok: true,
+      writes: [
+        {
+          op: "set",
+          segments: ["mcp_servers", "sqlite", "command"],
+          value: "mcp-server-sqlite-v2",
+        },
+      ],
+    });
+  });
+
+  it("deletes the args leaf when args are cleared", () => {
+    const plan = planServerEdit(stdio(), {
+      command: "mcp-server-sqlite",
+      args: [],
+      url: "",
+    });
+    expect(plan).toEqual({
+      ok: true,
+      writes: [{ op: "delete", segments: ["mcp_servers", "sqlite", "args"] }],
+    });
+  });
+
+  it("produces no writes when nothing changed", () => {
+    const plan = planServerEdit(stdio(), {
+      command: "mcp-server-sqlite",
+      args: ["--db", "./data.db"],
+      url: "",
+    });
+    expect(plan).toEqual({ ok: true, writes: [] });
+  });
+
+  it("writes the url leaf for an http server", () => {
+    const http = serverFromWire({
+      name: "linear",
+      enabled: true,
+      transport: "http-oauth",
+      url: "https://mcp.linear.app/sse",
+    });
+    const plan = planServerEdit(http, {
+      command: "",
+      args: [],
+      url: "https://mcp.linear.app/mcp",
+    });
+    expect(plan).toEqual({
+      ok: true,
+      writes: [
+        {
+          op: "set",
+          segments: ["mcp_servers", "linear", "url"],
+          value: "https://mcp.linear.app/mcp",
+        },
+      ],
+    });
+  });
+
+  it("rejects shell metacharacters and blank/invalid fields", () => {
+    const badCommand = planServerEdit(stdio(), {
+      command: "rm -rf / ; curl evil",
+      args: [],
+      url: "",
+    });
+    expect(badCommand.ok).toBe(false);
+    if (!badCommand.ok) expect(badCommand.errors.command).toBeTruthy();
+
+    const blank = planServerEdit(stdio(), { command: "", args: [], url: "" });
+    expect(blank.ok).toBe(false);
+
+    const http = serverFromWire({
+      name: "linear",
+      enabled: true,
+      transport: "http",
+      url: "https://mcp.linear.app",
+    });
+    const badUrl = planServerEdit(http, {
+      command: "",
+      args: [],
+      url: "not-a-url",
+    });
+    expect(badUrl.ok).toBe(false);
+    if (!badUrl.ok) expect(badUrl.errors.url).toBeTruthy();
+  });
+});
+
+describe("mcp servers — edit apply (config write preserves secrets)", () => {
+  function engineFor(config: Record<string, unknown>): {
+    engine: McpServersEngine;
+    logs: ReturnType<typeof makeAdminHarness>["logs"];
+  } {
+    const harness = makeAdminHarness({ config });
+    return {
+      engine: {
+        target: harness.target,
+        client: harness.client,
+        cache: harness.cache,
+        lifecycle: harness.lifecycle,
+      },
+      logs: harness.logs,
+    };
+  }
+
+  it("applies the changed leaf and preserves env + tools + unrelated config", async () => {
+    const { engine } = engineFor({
+      mcp_servers: {
+        sqlite: {
+          command: "old-cmd",
+          args: ["--db", "./data.db"],
+          env: { SQLITE_KEY: "env-ref" },
+          tools: { include: ["query"] },
+        },
+      },
+      skills: { external_dirs: ["~/team"] },
+    });
+    const { result } = renderHook(() => useMcpFilteringController(engine));
+    await waitFor(() => expect(result.current.status).not.toBe("loading"));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.editServer("sqlite", [
+        {
+          op: "set",
+          segments: ["mcp_servers", "sqlite", "command"],
+          value: "new-cmd",
+        },
+      ]);
+    });
+    expect(ok).toBe(true);
+
+    const after = await engine.client.config.get();
+    const servers = (after.config as Record<string, unknown>).mcp_servers as Record<
+      string,
+      Record<string, unknown>
+    >;
+    // The command changed...
+    expect(servers.sqlite.command).toBe("new-cmd");
+    // ...but the secret env, the tool filter, and unrelated config all survived.
+    expect(servers.sqlite.env).toEqual({ SQLITE_KEY: "env-ref" });
+    expect(servers.sqlite.tools).toEqual({ include: ["query"] });
+    expect((after.config as Record<string, unknown>).skills).toEqual({
+      external_dirs: ["~/team"],
+    });
+    // The edit flips the restart-required banner and raises an mcp.edit notice.
+    expect(result.current.lifecycle.state).toBe("gateway-restart-required");
+    expect(result.current.notifications.some((n) => n.mutation === "mcp.edit")).toBe(true);
+  });
+
+  // Regression (adversarial review): a multi-leaf edit must land ATOMICALLY —
+  // one fetched tree, one PUT — never one read-modify-write per leaf, where a
+  // later failure would leave config.yaml with a mixed connection target.
+  it("applies a multi-leaf edit in exactly one config PUT", async () => {
+    const { engine, logs } = engineFor({
+      mcp_servers: {
+        sqlite: {
+          command: "old-cmd",
+          args: ["--db", "./data.db"],
+          env: { SQLITE_KEY: "env-ref" },
+          tools: { include: ["query"] },
+        },
+      },
+    });
+    const { result } = renderHook(() => useMcpFilteringController(engine));
+    await waitFor(() => expect(result.current.status).not.toBe("loading"));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.editServer("sqlite", [
+        {
+          op: "set",
+          segments: ["mcp_servers", "sqlite", "command"],
+          value: "new-cmd",
+        },
+        { op: "delete", segments: ["mcp_servers", "sqlite", "args"] },
+      ]);
+    });
+    expect(ok).toBe(true);
+
+    // Exactly ONE PUT /api/config carried the whole edit. The transport log
+    // records one entry per request as `endpoint: "<METHOD> <path>"`.
+    const configPuts = logs.filter((record) => record.endpoint === "PUT /api/config");
+    expect(configPuts).toHaveLength(1);
+
+    // Both leaves landed, and the untouched secret/tool leaves survived.
+    const after = await engine.client.config.get();
+    const servers = (after.config as Record<string, unknown>).mcp_servers as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(servers.sqlite.command).toBe("new-cmd");
+    expect(servers.sqlite.args).toBeUndefined();
+    expect(servers.sqlite.env).toEqual({ SQLITE_KEY: "env-ref" });
+    expect(servers.sqlite.tools).toEqual({ include: ["query"] });
+  });
+
+  it("is a no-op success when there are no writes", async () => {
+    const { engine } = engineFor({
+      mcp_servers: { sqlite: { command: "cmd" } },
+    });
+    const { result } = renderHook(() => useMcpFilteringController(engine));
+    await waitFor(() => expect(result.current.status).not.toBe("loading"));
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.editServer("sqlite", []);
+    });
+    expect(ok).toBe(true);
+    // Nothing changed -> no restart banner.
+    expect(result.current.lifecycle.state).toBe("clean");
+  });
+});
+
 describe("mcp servers — controller", () => {
   it("loads servers and exposes transport / status metadata", async () => {
     const harness = makeAdminHarness(mcpStdioWithToolsScenario());
@@ -363,6 +614,42 @@ describe("mcp servers — controller", () => {
     controller.dispose();
   });
 
+  // Regression: rows opened as "Not tested" + "status unknown" until the user
+  // clicked Test by hand. The first load now probes enabled, untested servers
+  // in the background — quietly, so the notification tray is not spammed.
+  it("auto-probes untested enabled servers quietly after the first load", async () => {
+    const harness = makeAdminHarness({
+      mcpServers: [
+        {
+          name: "fresh",
+          enabled: true,
+          transport: "stdio",
+          command: "mcp-server-fresh",
+          status: "untested",
+          tools: [{ name: "ping" }],
+        },
+        {
+          name: "off",
+          enabled: false,
+          transport: "stdio",
+          command: "mcp-server-off",
+          status: "untested",
+        },
+      ],
+    });
+    const controller = new McpServersController(harness as McpServersEngine);
+    await controller.load();
+
+    await waitFor(() => {
+      expect(controller.getSnapshot().tests.get("fresh")?.result?.ok).toBe(true);
+    });
+    // Disabled servers are left alone, and quiet probes raise no notifications.
+    expect(controller.getSnapshot().tests.has("off")).toBe(false);
+    expect(harness.cache.getNotifications()).toHaveLength(0);
+
+    controller.dispose();
+  });
+
   it("removes a server through the real client", async () => {
     const harness = makeAdminHarness(mcpStdioWithToolsScenario());
     const controller = new McpServersController(harness as McpServersEngine);
@@ -426,7 +713,9 @@ const BASE_LIFECYCLE: McpServersState["lifecycle"] = {
   canRestart: false,
 };
 
-function stubState(overrides: Partial<McpServersState> = {}): McpServersState {
+function stubState(
+  overrides: Partial<McpFilteringState> = {},
+): McpServersState & Partial<McpFilteringState> {
   return {
     status: "ready",
     servers: [],
@@ -443,6 +732,7 @@ function stubState(overrides: Partial<McpServersState> = {}): McpServersState {
     test: vi.fn(() => Promise.resolve({ pending: false })),
     add: vi.fn(() => Promise.resolve(true)),
     remove: vi.fn(() => Promise.resolve(true)),
+    restartGateway: vi.fn(),
     dismissNotification: vi.fn(),
     ...overrides,
   };
@@ -545,6 +835,56 @@ describe("McpServersView — component", () => {
     await waitFor(() => expect(screen.getByText(/currently exposes tools/i)).toBeInTheDocument());
   });
 
+  // Regression (review): server A's failed edit must not render its error
+  // inside server B's freshly opened dialog — opening the form clears it.
+  it("clears a stale edit error when the edit dialog opens", () => {
+    const clearEditError = vi.fn();
+    render(
+      <McpServersView
+        state={stubState({
+          servers: VIEW_SERVERS,
+          editServer: vi.fn(() => Promise.resolve(true)),
+          editError: "stale failure from another server",
+          clearEditError,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit sqlite/i }));
+    expect(clearEditError).toHaveBeenCalled();
+  });
+
+  it("shows no Edit action when the edit slice is not wired", () => {
+    render(<McpServersView state={stubState({ servers: VIEW_SERVERS })} />);
+    expect(screen.queryByRole("button", { name: /edit sqlite/i })).not.toBeInTheDocument();
+  });
+
+  it("edits a stdio server's command through a pre-filled dialog", async () => {
+    const editServer = vi.fn(() => Promise.resolve(true));
+    render(<McpServersView state={stubState({ servers: VIEW_SERVERS, editServer })} />);
+    const sqliteRow = within(screen.getByText("sqlite").closest("li") as HTMLElement);
+    fireEvent.click(sqliteRow.getByRole("button", { name: /edit sqlite/i }));
+
+    // The dialog opens pre-filled with the current command.
+    await waitFor(() => expect(screen.getByText("Edit sqlite")).toBeInTheDocument());
+    const command = screen.getByLabelText("Command") as HTMLInputElement;
+    expect(command.value).toBe("mcp-server-sqlite");
+
+    fireEvent.change(command, {
+      target: { value: "mcp-server-sqlite-v2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() =>
+      expect(editServer).toHaveBeenCalledWith("sqlite", [
+        {
+          op: "set",
+          segments: ["mcp_servers", "sqlite", "command"],
+          value: "mcp-server-sqlite-v2",
+        },
+      ]),
+    );
+  });
+
   it("opens the add-server dialog and validates before sending", async () => {
     const add = vi.fn(() => Promise.resolve(true));
     render(<McpServersView state={stubState({ add })} />);
@@ -556,6 +896,69 @@ describe("McpServersView — component", () => {
     fireEvent.click(submit[submit.length - 1]);
     expect(add).not.toHaveBeenCalled();
     expect(screen.getByText(/enter a name/i)).toBeInTheDocument();
+  });
+
+  // Regression: the add-form field handlers must read event.currentTarget.value
+  // synchronously, not inside the setDraft updater (React nulls currentTarget
+  // after the handler returns, which blanked the whole app). Typing into the
+  // fields exercises that path.
+  it("accepts a typed stdio server without crashing (currentTarget)", async () => {
+    const add = vi.fn(() => Promise.resolve(true));
+    render(<McpServersView state={stubState({ add })} />);
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() => expect(screen.getByText("Add MCP server")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "fs" },
+    });
+    fireEvent.change(screen.getByLabelText("Command"), {
+      target: { value: "mcp-server-filesystem" },
+    });
+    const buttons = screen.getAllByRole("button", { name: /add server/i });
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() =>
+      expect(add).toHaveBeenCalledWith({
+        name: "fs",
+        command: "mcp-server-filesystem",
+      }),
+    );
+  });
+
+  it("accepts a typed http server with an auth header without crashing", async () => {
+    const add = vi.fn(() => Promise.resolve(true));
+    render(<McpServersView state={stubState({ add })} />);
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() => expect(screen.getByText("Add MCP server")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("radio", { name: /remote \(http\)/i }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "linear" },
+    });
+    fireEvent.change(screen.getByLabelText("URL"), {
+      target: { value: "https://mcp.linear.app/sse" },
+    });
+    // Changing the auth select is the exact interaction that blanked the app.
+    fireEvent.change(screen.getByLabelText("Auth"), {
+      target: { value: "oauth" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add header/i }));
+    fireEvent.change(screen.getByLabelText(/headers 1 name/i), {
+      target: { value: "Authorization" },
+    });
+    fireEvent.change(screen.getByLabelText(/headers 1 value/i), {
+      target: { value: "Bearer tok_123" },
+    });
+
+    const buttons = screen.getAllByRole("button", { name: /add server/i });
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() =>
+      expect(add).toHaveBeenCalledWith({
+        name: "linear",
+        url: "https://mcp.linear.app/sse",
+        auth: "oauth",
+        headers: { Authorization: "Bearer tok_123" },
+      }),
+    );
   });
 
   it("shows the Hermes-not-running surface when unavailable", () => {
@@ -586,21 +989,57 @@ describe("McpServersView — component", () => {
     expect(refresh).toHaveBeenCalled();
   });
 
-  it("renders the restart-required lifecycle banner when a change is pending", () => {
+  // Regression (review): a failed restart can leave the runtime DOWN (stop
+  // landed, start failed) — the page goes unavailable, but the failure banner
+  // and its Try again button must survive or the user has no retry path.
+  it("keeps the restart-failed banner and Try again visible when the runtime is down", () => {
+    const restartGateway = vi.fn();
     render(
       <McpServersView
         state={stubState({
-          servers: VIEW_SERVERS,
+          status: "unavailable",
+          servers: [],
+          restartGateway,
           lifecycle: {
-            state: "gateway-restart-required",
-            label: "Restart required",
-            detail: "Restart the Hermes gateway to apply your changes.",
+            state: "restart-failed",
+            label: "Restart failed",
+            detail: "The agent did not restart. You can try again.",
             canRestart: true,
           },
         })}
       />,
     );
-    expect(screen.getByText("Restart required")).toBeInTheDocument();
+    expect(screen.getByText("Restart failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(restartGateway).toHaveBeenCalled();
+    // The runtime-down empty state still renders beneath the banner.
+    expect(screen.getByText("Hermes is not running")).toBeInTheDocument();
+  });
+
+  it("renders the restart banner as a friendly prompt with a working Restart now button", () => {
+    const restartGateway = vi.fn();
+    render(
+      <McpServersView
+        state={stubState({
+          servers: VIEW_SERVERS,
+          restartGateway,
+          lifecycle: {
+            state: "gateway-restart-required",
+            label: "Restart to apply your changes",
+            detail: "Your changes are saved. Restart the agent to start using them.",
+            canRestart: true,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("Restart to apply your changes")).toBeInTheDocument();
+    // The MCP page swaps in its own body copy naming the MCP tools.
+    expect(screen.getByText(/using your MCP tools/i)).toBeInTheDocument();
+    // The pending restart reads as info (an expected step), never a warning.
+    const banner = document.querySelector(".mcp-servers-lifecycle");
+    expect(banner?.getAttribute("data-tone")).toBe("info");
+    fireEvent.click(screen.getByRole("button", { name: /restart now/i }));
+    expect(restartGateway).toHaveBeenCalled();
   });
 });
 

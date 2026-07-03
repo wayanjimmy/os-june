@@ -4,6 +4,7 @@ import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconCircleX } from "central-icons/IconCircleX";
 import { IconCloud } from "central-icons/IconCloud";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
+import { IconEditSmall1 } from "central-icons/IconEditSmall1";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
 import { IconArrowUpRight } from "central-icons/IconArrowUpRight";
 import { IconFilter2 } from "central-icons/IconFilter2";
@@ -17,14 +18,18 @@ import { useEffect, useId, useMemo, useState } from "react";
 import {
   ALLOWLIST_RECOMMENDATION,
   authMeta,
+  canEditServer,
   classifyServerRisk,
+  editFromServer,
   enableConfirmationFor,
   filterServers,
   hasAvailableTools,
   inlineSecurityLabels,
   isLocalSubprocess,
+  oauthNeedFromMessage,
   oauthStateFor,
   oauthStatusMeta,
+  planServerEdit,
   redactedEnv,
   redactedHeaders,
   securityLabelsFor,
@@ -38,6 +43,7 @@ import {
   validateDraft,
   type HermesAdminMode,
   type HermesMcpServerInfo,
+  type McpEditWrite,
   type McpFilteringState,
   type McpOauthLoginState,
   type McpOauthState,
@@ -46,7 +52,12 @@ import {
   type McpTestState,
   type ToolPolicyDraft,
 } from "../../lib/hermes-admin";
-import { hermesBridgeStatus, type HermesBridgeStatus } from "../../lib/tauri";
+import {
+  hermesBridgeStatus,
+  startHermesBridge,
+  stopHermesBridge,
+  type HermesBridgeStatus,
+} from "../../lib/tauri";
 import { AdminNotifications } from "./AdminNotifications";
 import { McpToolsDialog } from "./McpToolsDialog";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
@@ -75,6 +86,15 @@ type McpServersSectionProps = {
 export function McpServersSection({ mode = "sandboxed" }: McpServersSectionProps) {
   const [bridge, setBridge] = useState<HermesBridgeStatus>();
   const [bridgeError, setBridgeError] = useState<string>();
+  // The native runtime restart. June owns the Hermes process, so applying MCP
+  // changes stops and respawns it through the bridge; Hermes' own HTTP restart
+  // endpoint would kill the server answering the request and hand the new
+  // gateway a port/token June no longer knows. The fresh bridge status rebuilds
+  // the engine, so the page reloads clean with the changes applied.
+  const [restart, setRestart] = useState<{
+    phase: "idle" | "running" | "failed";
+    error?: string;
+  }>({ phase: "idle" });
 
   useEffect(() => {
     let cancelled = false;
@@ -96,6 +116,34 @@ export function McpServersSection({ mode = "sandboxed" }: McpServersSectionProps
   const serversState = useMcpFilteringController(engine);
   const oauthState = useMcpOauthController(engine);
 
+  async function restartRuntime() {
+    if (restart.phase === "running") return;
+    setRestart({ phase: "running" });
+    try {
+      // Scope the stop to THIS page's runtime: stopping everything would
+      // silently kill a live session in the other mode and leave it stopped.
+      await stopHermesBridge(mode);
+      const status = await startHermesBridge(undefined, mode === "unrestricted");
+      setBridge(status);
+      setRestart({ phase: "idle" });
+    } catch (error) {
+      // Reality may have changed under us (the stop landed, the start
+      // failed): re-read the bridge status so the engine is rebuilt against
+      // what is ACTUALLY running and never keeps calling a stopped runtime.
+      // If even the status read fails, drop to the unavailable state rather
+      // than keep a dead connection.
+      try {
+        setBridge(await hermesBridgeStatus());
+      } catch {
+        setBridge(undefined);
+      }
+      setRestart({
+        phase: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   const state: McpFilteringState =
     engine === null && bridgeError
       ? {
@@ -106,24 +154,62 @@ export function McpServersSection({ mode = "sandboxed" }: McpServersSectionProps
         }
       : serversState;
 
-  return <McpServersView state={state} oauth={oauthState} mode={mode} />;
+  // Overlay the native restart onto the engine state: the banner's button
+  // drives the bridge restart, and while it runs (or after it fails) the
+  // banner shows the restart lifecycle instead of the engine snapshot.
+  const withRestart: McpFilteringState = {
+    ...state,
+    restartGateway: () => void restartRuntime(),
+    lifecycle:
+      restart.phase === "running"
+        ? {
+            state: "restart-in-progress",
+            label: "Restarting",
+            detail: "Applying your changes. This can take a moment.",
+            canRestart: false,
+          }
+        : restart.phase === "failed"
+          ? {
+              state: "restart-failed",
+              label: "Restart failed",
+              detail: restart.error ?? "The agent did not restart. You can try again.",
+              error: restart.error,
+              canRestart: true,
+            }
+          : state.lifecycle,
+  };
+
+  return <McpServersView state={withRestart} oauth={oauthState} mode={mode} />;
 }
 
 /**
  * The render-only view, split out so component tests can drive it with a stubbed
  * {@link McpServersState} (no Tauri, no network) and assert search / add / test /
- * toggle / delete wiring. Owns only the local search + dialog state.
+ * toggle / edit / delete wiring. Owns only the local search + dialog state.
  */
 export function McpServersView({
   state,
   oauth,
   mode = "sandboxed",
 }: {
-  /** The servers state, optionally with the spec-16 tool-filtering slice. The
-   * filtering fields are optional so a component test can drive the list with a
-   * bare {@link McpServersState}; the Tools panel save no-ops without them. */
+  /** The servers state, optionally with the spec-16 tool-filtering slice and the
+   * connection-field edit slice. Those fields are optional so a component test
+   * can drive the list with a bare {@link McpServersState}; the Tools panel save
+   * no-ops and the Edit action is hidden without them. */
   state: McpServersState &
-    Partial<Pick<McpFilteringState, "savingServer" | "saveError" | "saveToolPolicy">>;
+    Partial<
+      Pick<
+        McpFilteringState,
+        | "savingServer"
+        | "saveError"
+        | "saveToolPolicy"
+        | "editingServer"
+        | "editError"
+        | "editServer"
+        | "clearEditError"
+        | "clearSaveError"
+      >
+    >;
   /** The OAuth sign-in slice. Optional so a component test can drive the list
    * without it; the empty controller state is used when absent. */
   oauth?: McpOauthState;
@@ -132,6 +218,8 @@ export function McpServersView({
   const [query, setQuery] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [toDelete, setToDelete] = useState<HermesMcpServerInfo | undefined>();
+  // The server whose connection-field edit dialog is open, or undefined.
+  const [toEdit, setToEdit] = useState<HermesMcpServerInfo | undefined>();
   // A high-risk server enable is gated behind a confirmation. This holds the
   // server awaiting a confirmed enable; a disable or a low-risk enable applies
   // straight away.
@@ -168,7 +256,7 @@ export function McpServersView({
       </h2>
       <p className="settings-group-description">
         Connect Model Context Protocol servers so future sessions can use their tools. Changes apply
-        after the Hermes gateway restarts.{" "}
+        after a restart.{" "}
         <ModeNote mode={state.mode ?? mode} profile={state.profile} show={!isUnavailable} />
       </p>
 
@@ -254,7 +342,20 @@ export function McpServersView({
                   onSignIn={oauth ? () => oauth.signIn(server.name) : undefined}
                   onToggle={(enabled) => handleToggle(server, enabled)}
                   onTest={() => void state.test(server.name)}
-                  onTools={() => setToolsFor(server)}
+                  onEdit={
+                    state.editServer && canEditServer(server)
+                      ? () => {
+                          // Never show another server's stale edit failure in
+                          // a freshly opened form.
+                          state.clearEditError?.();
+                          setToEdit(server);
+                        }
+                      : undefined
+                  }
+                  onTools={() => {
+                    state.clearSaveError?.();
+                    setToolsFor(server);
+                  }}
                   onDelete={() => setToDelete(server)}
                 />
               ))}
@@ -272,6 +373,17 @@ export function McpServersView({
           const ok = await state.add(payload);
           if (ok) setAddOpen(false);
           return ok;
+        }}
+      />
+
+      <EditServerDialog
+        server={toEdit}
+        saving={Boolean(toEdit) && state.editingServer === toEdit?.name}
+        saveError={state.editError}
+        onClose={() => setToEdit(undefined)}
+        onSave={async (writes) => {
+          if (!toEdit || !state.editServer) return false;
+          return state.editServer(toEdit.name, writes);
         }}
       />
 
@@ -330,22 +442,42 @@ function ModeNote({
  * this surfaces the restart state once a change is pending. */
 function LifecycleBanner({ state }: { state: McpServersState }) {
   const snapshot = state.lifecycle;
-  if (state.status === "unavailable") return null;
+  // A failed restart must stay visible (with its Try again button) even when
+  // the runtime is down: that is exactly the state a failed restart leaves,
+  // and hiding the banner would strand the user with no retry affordance.
+  if (state.status === "unavailable" && snapshot.state !== "restart-failed") return null;
   if (snapshot.state === "clean") return null;
+  // A pending restart is a normal, expected step (info tone with an action),
+  // not a warning: the user saved a change and just needs to apply it. Only a
+  // failed restart reads as destructive.
   const tone =
     snapshot.state === "restart-failed"
       ? "destructive"
-      : snapshot.state === "gateway-restart-required" ||
-          snapshot.state === "active-session-should-restart"
+      : snapshot.state === "active-session-should-restart"
         ? "warning"
         : "info";
   return (
     <div className="mcp-servers-lifecycle" data-tone={tone} role="status">
-      <span className="mcp-servers-lifecycle-eyebrow">
-        <IconCircleInfo size={15} ariaHidden />
-        {snapshot.label}
-      </span>
-      <span className="mcp-servers-lifecycle-body">{snapshot.detail}</span>
+      <div className="mcp-servers-lifecycle-main">
+        <span className="mcp-servers-lifecycle-eyebrow">
+          <IconCircleInfo size={15} ariaHidden />
+          {snapshot.label}
+        </span>
+        <span className="mcp-servers-lifecycle-body">
+          {snapshot.state === "gateway-restart-required"
+            ? "Your changes are saved. Restart to start using your MCP tools."
+            : snapshot.detail}
+        </span>
+      </div>
+      {snapshot.canRestart ? (
+        <button
+          type="button"
+          className="mcp-servers-lifecycle-restart"
+          onClick={state.restartGateway}
+        >
+          {snapshot.state === "restart-failed" ? "Try again" : "Restart now"}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -362,6 +494,7 @@ function ServerRow({
   onSignIn,
   onToggle,
   onTest,
+  onEdit,
   onTools,
   onDelete,
 }: {
@@ -372,6 +505,9 @@ function ServerRow({
   onSignIn?: () => void;
   onToggle: (enabled: boolean) => void;
   onTest: () => void;
+  /** Opens the connection-field edit dialog. Absent when the surface has no
+   * edit slice wired or the transport has nothing safe to edit. */
+  onEdit?: () => void;
   onTools: () => void;
   onDelete: () => void;
 }) {
@@ -384,7 +520,10 @@ function ServerRow({
   const local = isLocalSubprocess(server);
   const labelId = `mcp-server-${cssId(server.name)}`;
   const tools = test?.result?.tools ?? server.tools ?? [];
-  const oauth = usesOauth(server);
+  // OAuth applies when the server is oauth-shaped, or when the last connection
+  // probe said so (Hermes' "run `hermes mcp login <name>` interactively" error)
+  // — the sign-in panel below IS that interactive login, run via the browser.
+  const oauth = usesOauth(server) || oauthNeedFromMessage(test?.result?.message ?? test?.error);
   const securityLabels = inlineSecurityLabels(securityLabelsFor(server));
   const risk = classifyServerRisk(server);
   // Recommend an allowlist only after the server has tested successfully, so the
@@ -394,107 +533,132 @@ function ServerRow({
 
   return (
     <li className="mcp-server-row" data-enabled={server.enabled}>
-      <div className="mcp-server-main">
-        <div className="mcp-server-headline">
-          <span className="mcp-server-name" id={labelId}>
-            {server.name}
-          </span>
-          <span className="mcp-server-transport" data-risk={transport.risk}>
-            {transport.label}
-          </span>
-          <span className="mcp-server-risk" data-risk={transport.risk}>
-            <IconShield size={12} ariaHidden />
-            {transport.riskLabel}
-          </span>
-          {server.auth !== "not-required" ? (
-            <span className="mcp-server-auth" data-tone={auth.tone}>
-              {auth.label}
+      <div className="mcp-server-top">
+        <div className="mcp-server-main">
+          <div className="mcp-server-headline">
+            <span className="mcp-server-name" id={labelId}>
+              {server.name}
             </span>
-          ) : null}
-        </div>
-
-        <p className="mcp-server-target" title={server.command ?? server.url}>
-          {server.transport === "stdio"
-            ? formatCommand(server.command, args)
-            : (server.url ?? "No URL configured.")}
-        </p>
-
-        <p className="mcp-server-blurb">{transport.blurb}</p>
-
-        <SecurityLabels labels={securityLabels} />
-
-        {risk.tier === "high" ? (
-          <p className="mcp-server-risk-note" data-tier="high" role="note">
-            <IconExclamationCircle size={13} ariaHidden />
-            {risk.reasons[0]?.detail ?? "This server can take high-impact actions."}
-          </p>
-        ) : null}
-
-        {risk.tier === "high" && testedOk ? (
-          <p className="mcp-server-allowlist-note" role="note">
-            <IconShield size={13} ariaHidden />
-            {ALLOWLIST_RECOMMENDATION}
-          </p>
-        ) : null}
-
-        <div className="mcp-server-meta">
-          <span className="mcp-server-status" data-tone={status.tone}>
-            <StatusIcon tone={status.tone} />
-            {status.label}
-          </span>
-          {server.statusMessage ? (
-            <span className="mcp-server-status-detail">{server.statusMessage}</span>
-          ) : null}
-        </div>
-
-        {env.length > 0 || headers.length > 0 ? (
-          <div className="mcp-server-secrets">
-            {env.length > 0 ? <SecretSummary label="Environment" count={env.length} /> : null}
-            {headers.length > 0 ? <SecretSummary label="Headers" count={headers.length} /> : null}
+            <span className="mcp-server-transport" data-risk={transport.risk}>
+              {transport.label}
+            </span>
+            <span className="mcp-server-risk" data-risk={transport.risk}>
+              <IconShield size={12} ariaHidden />
+              {transport.riskLabel}
+            </span>
+            {/* An "Auth unknown" pill is noise once a probe has proven the
+             * connection; the sign-in panel below carries the real status. */}
+            {server.auth !== "not-required" && !(server.auth === "unknown" && testedOk) ? (
+              <span className="mcp-server-auth" data-tone={auth.tone}>
+                {auth.label}
+              </span>
+            ) : null}
           </div>
-        ) : null}
 
-        <TestResult test={test} tools={tools} />
+          <p className="mcp-server-target" title={server.command ?? server.url}>
+            {server.transport === "stdio"
+              ? formatCommand(server.command, args)
+              : (server.url ?? "No URL configured.")}
+          </p>
 
-        {oauth ? <OauthStatus server={server} login={oauthLogin} onSignIn={onSignIn} /> : null}
-      </div>
+          <p className="mcp-server-blurb">{transport.blurb}</p>
 
-      <div className="mcp-server-actions">
-        <button type="button" className="mcp-server-test" disabled={test?.pending} onClick={onTest}>
-          {test?.pending ? "Testing" : "Test"}
-        </button>
-        <button
-          type="button"
-          className="mcp-server-tools"
-          aria-label={`Configure tools for ${server.name}`}
-          title="Configure tools"
-          onClick={onTools}
-        >
-          <IconFilter2 size={14} ariaHidden />
-          Tools
-        </button>
-        <button
-          type="button"
-          className="mcp-server-delete"
-          aria-label={`Delete ${server.name}`}
-          title="Delete server"
-          disabled={pending}
-          onClick={onDelete}
-        >
-          <IconTrashCan size={14} ariaHidden />
-        </button>
-        <span className="mcp-server-toggle">
-          <Switch
-            checked={server.enabled}
+          <SecurityLabels labels={securityLabels} />
+
+          {risk.tier === "high" ? (
+            <p className="mcp-server-risk-note" data-tier="high" role="note">
+              <IconExclamationCircle size={13} ariaHidden />
+              {risk.reasons[0]?.detail ?? "This server can take high-impact actions."}
+            </p>
+          ) : null}
+
+          {risk.tier === "high" && testedOk ? (
+            <p className="mcp-server-allowlist-note" role="note">
+              <IconShield size={13} ariaHidden />
+              {ALLOWLIST_RECOMMENDATION}
+            </p>
+          ) : null}
+
+          <div className="mcp-server-meta">
+            <span className="mcp-server-status" data-tone={status.tone}>
+              <StatusIcon tone={status.tone} />
+              {status.label}
+            </span>
+            {server.statusMessage ? (
+              <span className="mcp-server-status-detail">{server.statusMessage}</span>
+            ) : null}
+          </div>
+
+          {env.length > 0 || headers.length > 0 ? (
+            <div className="mcp-server-secrets">
+              {env.length > 0 ? <SecretSummary label="Environment" count={env.length} /> : null}
+              {headers.length > 0 ? <SecretSummary label="Headers" count={headers.length} /> : null}
+            </div>
+          ) : null}
+
+          <TestResult test={test} tools={tools} />
+        </div>
+
+        <div className="mcp-server-actions">
+          <button
+            type="button"
+            className="mcp-server-test"
+            disabled={test?.pending}
+            onClick={onTest}
+          >
+            {test?.pending ? "Testing" : "Test"}
+          </button>
+          {onEdit ? (
+            <button
+              type="button"
+              className="mcp-server-edit"
+              aria-label={`Edit ${server.name}`}
+              title="Edit connection"
+              disabled={pending}
+              onClick={onEdit}
+            >
+              <IconEditSmall1 size={14} ariaHidden />
+              Edit
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="mcp-server-tools"
+            aria-label={`Configure tools for ${server.name}`}
+            title="Configure tools"
+            onClick={onTools}
+          >
+            <IconFilter2 size={14} ariaHidden />
+            Tools
+          </button>
+          <button
+            type="button"
+            className="mcp-server-delete"
+            aria-label={`Delete ${server.name}`}
+            title="Delete server"
             disabled={pending}
-            aria-labelledby={labelId}
-            onCheckedChange={onToggle}
-          />
-          <span className="mcp-server-timing" aria-hidden>
-            {pending ? "Saving" : "Restart to apply"}
+            onClick={onDelete}
+          >
+            <IconTrashCan size={14} ariaHidden />
+          </button>
+          <span className="mcp-server-toggle">
+            <Switch
+              checked={server.enabled}
+              disabled={pending}
+              aria-labelledby={labelId}
+              onCheckedChange={onToggle}
+            />
+            <span className="mcp-server-timing" aria-hidden>
+              {pending ? "Saving" : "Restart to apply"}
+            </span>
           </span>
-        </span>
+        </div>
       </div>
+
+      {/* Below the main/actions columns so the sign-in panel spans the row. */}
+      {oauth ? (
+        <OauthStatus server={server} login={oauthLogin} testedOk={testedOk} onSignIn={onSignIn} />
+      ) : null}
     </li>
   );
 }
@@ -601,14 +765,30 @@ function StatusIcon({ tone }: { tone: "ok" | "error" | "neutral" }) {
 function OauthStatus({
   server,
   login,
+  testedOk,
   onSignIn,
 }: {
   server: HermesMcpServerInfo;
   login?: McpOauthLoginState;
+  /** True when the server's last test probe connected (or the listing says
+   * connected) — with cached tokens on disk that outranks an "unknown" status. */
+  testedOk?: boolean;
   onSignIn?: () => void;
 }) {
   const inFlight = login?.phase === "signing-in" || login?.phase === "waiting";
-  const meta = oauthStatusMeta(oauthStateFor(server, inFlight));
+  const baseState = oauthStateFor(server, inFlight);
+  // Fresher signals outrank a listing that reports no auth status (Hermes'
+  // GET does not carry token state for every transport): a sign-in that just
+  // completed, or a successful test probe (which needed the cached token to
+  // connect). A REPORTED needs-sign-in only yields to a completed login, not
+  // to a test - some servers list tools without auth.
+  const meta = oauthStatusMeta(
+    login?.phase === "done" && (baseState === "unknown" || baseState === "needs-sign-in")
+      ? "connected"
+      : testedOk && baseState === "unknown"
+        ? "connected"
+        : baseState,
+  );
   // The configure action is a setup step (client id/secret); a sign-in action
   // runs the browser flow. We only wire the sign-in here. Client-detail setup is
   // surfaced as guidance: this Hermes version configures client credentials in
@@ -827,7 +1007,12 @@ function AddServerDialog({
             autoComplete="off"
             spellCheck={false}
             aria-invalid={Boolean(errors.name)}
-            onChange={(event) => setDraft((d) => ({ ...d, name: event.currentTarget.value }))}
+            onChange={(event) => {
+              // Read the value synchronously: React nulls event.currentTarget
+              // once the handler returns, and the setDraft updater runs later.
+              const value = event.currentTarget.value;
+              setDraft((d) => ({ ...d, name: value }));
+            }}
           />
           {errors.name ? <p className="mcp-add-error">{errors.name}</p> : null}
         </fieldset>
@@ -873,12 +1058,10 @@ function AddServerDialog({
                 autoComplete="off"
                 spellCheck={false}
                 aria-invalid={Boolean(errors.command)}
-                onChange={(event) =>
-                  setDraft((d) => ({
-                    ...d,
-                    command: event.currentTarget.value,
-                  }))
-                }
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((d) => ({ ...d, command: value }));
+                }}
               />
               {errors.command ? <p className="mcp-add-error">{errors.command}</p> : null}
             </fieldset>
@@ -918,7 +1101,10 @@ function AddServerDialog({
                 autoComplete="off"
                 spellCheck={false}
                 aria-invalid={Boolean(errors.url)}
-                onChange={(event) => setDraft((d) => ({ ...d, url: event.currentTarget.value }))}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((d) => ({ ...d, url: value }));
+                }}
               />
               {errors.url ? <p className="mcp-add-error">{errors.url}</p> : null}
             </fieldset>
@@ -931,12 +1117,10 @@ function AddServerDialog({
                 id="mcp-add-auth"
                 className="mcp-add-input"
                 value={draft.auth}
-                onChange={(event) =>
-                  setDraft((d) => ({
-                    ...d,
-                    auth: event.currentTarget.value as McpServerDraft["auth"],
-                  }))
-                }
+                onChange={(event) => {
+                  const value = event.currentTarget.value as McpServerDraft["auth"];
+                  setDraft((d) => ({ ...d, auth: value }));
+                }}
               >
                 <option value="none">None</option>
                 <option value="bearer">Bearer token</option>
@@ -1140,6 +1324,166 @@ function PairEditor({
         {addLabel}
       </button>
     </fieldset>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Edit-server dialog (connection target only, non-destructive)
+// ---------------------------------------------------------------------------
+
+/**
+ * Edits an existing server's connection target: a stdio server's command + args,
+ * or an http(-oauth) server's URL. The write is scoped and non-destructive — the
+ * save applies only the leaves that changed under `mcp_servers.<name>` (via
+ * `planServerEdit`), so the server's secret env / headers, OAuth token, and tool
+ * filters are all preserved. Secrets are never shown or edited here (June cannot
+ * read them back), and the name / transport are fixed — changing either is a
+ * delete-and-re-add. Changes apply after the gateway restarts, like every other
+ * MCP mutation.
+ */
+function EditServerDialog({
+  server,
+  saving,
+  saveError,
+  onClose,
+  onSave,
+}: {
+  server?: HermesMcpServerInfo;
+  saving: boolean;
+  saveError?: string;
+  onClose: () => void;
+  onSave: (writes: McpEditWrite[]) => Promise<boolean>;
+}) {
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState<ArgRow[]>([]);
+  const [url, setUrl] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // Re-seed the form from the server each time a different one opens.
+  useEffect(() => {
+    if (!server) return;
+    const edit = editFromServer(server);
+    setCommand(edit.command);
+    setArgs(edit.args.map((value) => ({ id: newEditorRowId(), value })));
+    setUrl(edit.url);
+    setErrors({});
+  }, [server]);
+
+  const isStdio = server?.transport === "stdio";
+
+  async function handleSubmit() {
+    if (!server) return;
+    const plan = planServerEdit(server, {
+      command,
+      args: args.map((row) => row.value),
+      url,
+    });
+    if (!plan.ok) {
+      setErrors(plan.errors);
+      return;
+    }
+    setErrors({});
+    const ok = await onSave(plan.writes);
+    if (ok) onClose();
+  }
+
+  return (
+    <Dialog
+      open={Boolean(server)}
+      onClose={() => {
+        if (!saving) onClose();
+      }}
+      title={server ? `Edit ${server.name}` : "Edit server"}
+      description="Change the connection target. The server's secrets (environment variables, headers, and tokens) and tool filters are preserved. Changes apply after the Hermes gateway restarts."
+      width={560}
+      className="mcp-add-dialog"
+      footer={
+        <>
+          <button
+            type="button"
+            className="primary-action"
+            onClick={() => {
+              if (!saving) onClose();
+            }}
+            disabled={saving}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="primary-action primary-solid"
+            onClick={() => void handleSubmit()}
+            disabled={saving}
+          >
+            {saving ? "Saving" : "Save changes"}
+          </button>
+        </>
+      }
+    >
+      {server ? (
+        <div className="mcp-add-form">
+          <p className="mcp-add-note">
+            <IconShield size={13} ariaHidden />
+            To change a secret or the transport, delete this server and add it again.
+          </p>
+
+          {isStdio ? (
+            <>
+              <fieldset className="mcp-add-field">
+                <label className="mcp-add-label" htmlFor="mcp-edit-command">
+                  Command
+                </label>
+                <input
+                  id="mcp-edit-command"
+                  type="text"
+                  className="mcp-add-input"
+                  value={command}
+                  placeholder="mcp-server-filesystem"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-invalid={Boolean(errors.command)}
+                  onChange={(event) => setCommand(event.currentTarget.value)}
+                />
+                {errors.command ? <p className="mcp-add-error">{errors.command}</p> : null}
+              </fieldset>
+
+              <ListEditor
+                legend="Arguments"
+                addLabel="Add argument"
+                values={args}
+                errorPrefix="args"
+                errors={errors}
+                onChange={setArgs}
+              />
+            </>
+          ) : (
+            <fieldset className="mcp-add-field">
+              <label className="mcp-add-label" htmlFor="mcp-edit-url">
+                URL
+              </label>
+              <input
+                id="mcp-edit-url"
+                type="url"
+                className="mcp-add-input"
+                value={url}
+                placeholder="https://example.com/mcp"
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={Boolean(errors.url)}
+                onChange={(event) => setUrl(event.currentTarget.value)}
+              />
+              {errors.url ? <p className="mcp-add-error">{errors.url}</p> : null}
+            </fieldset>
+          )}
+
+          {saveError ? (
+            <p className="mcp-add-error" role="alert">
+              {saveError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </Dialog>
   );
 }
 
