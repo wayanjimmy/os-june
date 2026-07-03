@@ -101,12 +101,20 @@ scripts/fill-prompt.sh -a adversarial ...
 
 **Default dispatch** — one message, parallel general-purpose sub-agents, one
 per axis, each given its filled prompt verbatim (the templates already carry
-the read-only rules and output contracts).
+the read-only rules and output contracts). From Claude Code, run axis
+sub-agents on Opus (the Agent tool's `model` option); the session model
+aggregates and triages, it does not review. For a build with a
+cross-harness implementer (`with codex` / `with claude`), skip the
+orchestrating side's sub-agents entirely and dispatch every axis through
+the implementer harness's runner (single-harness convention; see
+docs/agents/collaboration.md).
 
-**Cross-harness dispatch** — prefer sending at least the adversarial axis to
-the *other* harness, so the review never comes from the model that wrote the
-change. One runner script per harness, same interface as `fill-prompt.sh`
-plus `-o <out>` and `--dry-run`:
+**Cross-harness dispatch** — for in-session (native) builds, prefer sending
+at least the adversarial axis to the *other* harness, so the review never
+comes from the model that wrote the change; builds with a cross-harness
+implementer instead route every axis to the implementer harness (the
+single-harness convention above). One runner script per harness, same
+interface as `fill-prompt.sh` plus `-o <out>` and `--dry-run`:
 
 - **→ Codex**: `scripts/run-codex.sh -a <axis> ...` — `codex exec` in an
   OS-level read-only sandbox; needs the `codex` CLI logged in, no plugin

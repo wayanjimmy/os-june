@@ -85,16 +85,16 @@ Do not trickle questions throughout the build; front-load them. If answers do no
 
 ## Model orchestration
 
-Assume the session is running on the most capable model available (for example Fable 5 in Claude Code, GPT-5.6 in Codex). That model is expensive, so spend it where capability compounds and delegate everything else.
+Assume the session is running on the most capable model available (for example Fable 5 in Claude Code, GPT-5.6 in Codex). That model is expensive: it is the architect and orchestrator only, and delegates everything else.
 
-The top model keeps the work that determines whether the PR is right:
+The session model keeps the work that determines whether the PR is right:
 
 - intake, scoping, and the implementation plan
 - architecture and the contracts between parallel tracks (command names, request/response shapes, file ownership)
 - judgment calls: review-feedback triage, tradeoffs, anything ambiguous or irreversible
 - verification: reading delegated diffs, adversarially re-checking claimed results, deciding what is actually done
 
-Delegate the bulk of the implementation to strong but cheaper models (for example Opus 4.8 subagents via the Agent tool's `model` option in Claude Code, GPT-5.5 in Codex): writing code against a specified contract, test authoring, mechanical refactors, merge-conflict resolution with clear instructions, QA recording, and PR housekeeping.
+Everything else is delegated. From Claude Code, delegated work runs on **Opus** subagents (`model` option on the Agent tool; `--model opus` for headless `claude -p`), never on the session model — and that covers both implementation (writing code against a specified contract, test authoring, mechanical refactors, merge-conflict resolution with clear instructions, QA recording, PR housekeeping) and the review battery (Standards / Spec / adversarial axis runs). From Codex, the equivalent split is GPT-5.5 for delegated work.
 
 Delegation rules:
 
@@ -107,7 +107,7 @@ Delegation rules:
 
 ### Cross-harness implementer (`with codex` / `with claude`)
 
-When the build prompt carries an implementer directive (e.g. `/repo-build-pr JUN-200 with codex`), the named harness implements every delegated brief; the session model keeps everything that determines whether the PR is right — intake, the tracker lifecycle, architecture, chunking, verification, review, and publish.
+When the build prompt carries an implementer directive (e.g. `/repo-build-pr JUN-200 with codex`), the named harness implements every delegated brief AND runs every review axis; the session model keeps everything that determines whether the PR is right — intake, the tracker lifecycle, architecture, chunking, verification of delegated diffs, triage of review findings, and publish.
 
 1. Plan first, as above (including clarifying questions — the session is interactive even when the implementer is not). Then split the plan into small, independently verifiable chunks: each chunk gets its own brief file written to the contract standard above, plus the narrowest gate command that proves it.
 2. Dispatch each chunk to the implementer in the active worktree via `repo-delegate`:
@@ -117,7 +117,7 @@ When the build prompt carries an implementer directive (e.g. `/repo-build-pr JUN
    (`run-claude.sh` when orchestrating from Codex.) The delegate edits and runs the gate but never commits, and its runners require a clean tracked tree — so verify the diff, then commit each chunk before dispatching the next. Atomic commits fall out of the loop naturally.
 3. Chunks run sequentially in one worktree. Genuinely independent tracks get separate worktrees (strategy below), one delegate stream per worktree.
 4. Verify every chunk yourself against the diff and real gate output; a delegate report is a claim, not evidence. Route defects back as a follow-up brief that references the original chunk.
-5. In the pre-publish battery, the adversarial axis must go to a harness that did **not** write the diff: with Codex as implementer, run it on a Claude sub-agent (or `repo-review/scripts/run-claude.sh`); never send the diff back to its own author for the adversarial pass.
+5. A cross-harness implementer mode is single-harness for all delegated work, whichever direction it runs: the pre-publish battery ALSO runs on the implementer harness — every axis via `repo-review/scripts/run-codex.sh -a <axis>` for `with codex`, `run-claude.sh -a <axis>` for `with claude` — with no review sub-agents on the orchestrating side. This deliberately accepts self-review by the implementer harness (see the carve-out in docs/agents/collaboration.md); the counterweights are the regression-gated fixture tests in every fix brief and the session model's own verification and finding triage, which never delegate.
 
 ## Worktree strategy
 
@@ -210,7 +210,7 @@ What this workflow requires of the walkthrough (the commands and pipeline live i
 
 Green checks and a passing walkthrough are necessary, not sufficient: they prove the code does what its tests say, not that the diff is free of defects the tests never imagined. For any non-trivial diff, run the `repo-review` battery locally before opening the draft PR (load `.agents/skills/repo-review/SKILL.md`; `$repo-review` in Codex):
 
-1. Run all three axes over `origin/main...HEAD` — Standards and Spec as parallel sub-agents, and dispatch the adversarial axis to a harness that did *not* write the diff: from Claude Code with in-session implementation, `.agents/skills/repo-review/scripts/run-codex.sh -a adversarial`; from Codex, `.../run-claude.sh -a adversarial` (policy-level enforcement — for branches this session authored, never unvetted third-party diffs); with a cross-harness implementer (see Model orchestration), pick a reviewer that is not the implementer.
+1. Run all three axes over `origin/main...HEAD`. From Claude Code with in-session implementation: Standards and Spec as parallel Opus sub-agents, and the adversarial axis on the harness that did *not* write the diff (`.agents/skills/repo-review/scripts/run-codex.sh -a adversarial`); from Codex, `.../run-claude.sh -a adversarial` (policy-level enforcement — for branches this session authored, never unvetted third-party diffs). With a `with codex` implementer, ALL axes run on Codex (`run-codex.sh -a <axis>`) per the single-harness convention in Model orchestration.
 2. Triage every finding to a disposition per the battery's aggregate step — fix-now, deliberate (amend the spec file), pre-existing parity (follow-up, checked against the fixed point), or refuted (with evidence). Verify before fixing; plausible-sounding findings that cannot name a failure scenario are noise.
 3. Route confirmed defects back to the implementer agent that owns the code, with the evidence, re-run the relevant validation, then re-run the adversarial axis until it approves (the battery's convergence loop).
 
@@ -253,7 +253,7 @@ gh pr view <number> --comments --json comments,reviews,reviewRequests
 gh pr checks <number> --watch
 ```
 
-Poll about every 30 seconds so feedback is picked up quickly. Re-check both comments and reviews because Greptile often comments while Codex can appear as a review. Keep the user updated while waiting, but do not start duplicate polls or spam the PR with repeated bot pings.
+Poll about every 30 seconds so feedback is picked up quickly. Triage every bot at all three surfaces, not just inline threads: inline review comments (`gh api .../pulls/<n>/comments`), review bodies (`gh pr view <n> --json reviews` — Octopus hides findings in collapsed `<details>` tables there), and the bot's summary comment (Greptile places outside-the-diff findings only in its summary). A round is not "addressed" until every finding at every surface has a disposition. Keep the user updated while waiting, but do not start duplicate polls or spam the PR with repeated bot pings.
 
 For inline review threads, use GraphQL through `gh api graphql` when `gh pr view` is not enough. Inspect recent repo PRs if the current bot handles or re-trigger comments are unclear. At the time this skill was written, recent reviews used:
 
