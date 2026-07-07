@@ -1,7 +1,8 @@
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconPaperclip1 } from "central-icons/IconPaperclip1";
-import { type DragEvent, useId, useMemo, useState } from "react";
+import { type ClipboardEvent, type DragEvent, useId, useMemo, useRef, useState } from "react";
 
+import { clipboardImageFiles } from "../../lib/clipboard-files";
 import { messageFromError } from "../../lib/errors";
 import { submitIssueReport } from "../../lib/tauri";
 import { DotSpinner } from "../DotSpinner";
@@ -51,6 +52,9 @@ export function ReportDialog({
   onSent,
 }: ReportDialogProps) {
   const [dropActive, setDropActive] = useState(false);
+  // Enter/leave fire for every child edge crossed; only depth zero means the
+  // pointer truly left the drop zone (otherwise the overlay flickers).
+  const dragDepthRef = useRef(0);
   const [submitting, setSubmitting] = useState(false);
   // Dropped-file imports resolve in the parent, and `importingFiles` only
   // reflects them a render later — count in-flight drops here too so a fast
@@ -79,21 +83,58 @@ export function ReportDialog({
 
   function handleDragOver(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
+    // The dialog is portaled but its JSX lives inside the composer form, so
+    // React bubbles these events to the composer's own drop/paste importers
+    // behind the modal — stop them here or attachments leak into the chat.
+    event.stopPropagation();
     event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDragEnter() {
+    dragDepthRef.current += 1;
     setDropActive(true);
+  }
+
+  function handleDragLeave() {
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDropActive(false);
+  }
+
+  function queueFileImport(files: File[]) {
+    setError(null);
+    setDropsPending((count) => count + 1);
+    void Promise.resolve(onDropFiles(files)).finally(() => setDropsPending((count) => count - 1));
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
     setDropActive(false);
     const files = Array.from(event.dataTransfer.files);
     if (!files.length) {
       setError("Drop files from Finder to attach them to the report.");
       return;
     }
-    setError(null);
-    setDropsPending((count) => count + 1);
-    void Promise.resolve(onDropFiles(files)).finally(() => setDropsPending((count) => count - 1));
+    queueFileImport(files);
+  }
+
+  // Pasted screenshots become attachments, same as the composer. Only image
+  // files are interceptable (Finder file copies never reach clipboardData);
+  // a plain text paste falls through to the textarea untouched.
+  function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
+    event.stopPropagation();
+    if (sent || busy) return;
+    const files = clipboardImageFiles(event.clipboardData);
+    if (!files.length) return;
+    // Mixed payload (e.g. a copied web-page selection carrying both text and
+    // an image): import the image but let the browser paste the text into the
+    // textarea — preventing default would silently drop the text the user
+    // meant to keep. With no meaningful text we preventDefault, which also
+    // stops screenshot tools' stray metadata from landing in the field.
+    const hasText = Boolean(event.clipboardData?.getData("text/plain")?.trim());
+    if (!hasText) event.preventDefault();
+    queueFileImport(files);
   }
 
   async function handleSubmit() {
@@ -165,9 +206,10 @@ export function ReportDialog({
           className="dialog-body report-dialog-drop"
           data-drop-active={dropActive || undefined}
           onDragOver={handleDragOver}
-          onDragEnter={() => setDropActive(true)}
-          onDragLeave={() => setDropActive(false)}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
           onDrop={handleDrop}
+          onPaste={handlePaste}
         >
           <SegmentedControl
             value={category}
