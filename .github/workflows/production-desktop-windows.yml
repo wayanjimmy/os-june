@@ -7,6 +7,11 @@ on:
         description: "Existing semver release to attach Windows assets to (for example 0.2.0)"
         required: true
         type: string
+      publish:
+        description: "Upload Windows assets to the releases repo"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -375,6 +380,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish Windows release assets
+        if: inputs.publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -425,11 +431,22 @@ jobs:
 
       - name: Summary
         shell: pwsh
+        env:
+          PUBLISH_RELEASE_ASSETS: ${{ inputs.publish }}
         run: |
+          $publishReleaseAssets = $env:PUBLISH_RELEASE_ASSETS -eq "true"
+          $publishStatus = if ($publishReleaseAssets) { "yes" } else { "no, dry run only" }
+          $marketingDownload = if ($publishReleaseAssets) {
+            "https://github.com/open-software-network/os-june-releases/releases/latest/download/June_x64-setup.exe"
+          } else {
+            "not updated by this dry run"
+          }
+
           @(
             "### Production Windows release",
             "- Version: ``$env:VERSION``",
             "- Release repo: ``open-software-network/os-june-releases``",
-            "- Marketing download: ``https://github.com/open-software-network/os-june-releases/releases/latest/download/June_x64-setup.exe``",
-            "- Updater platform key: ``windows-x86_64``"
+            "- Published release assets: $publishStatus",
+            "- Marketing download: ``$marketingDownload``",
+            "- Updater platform [REDACTED_SECRET]`"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
