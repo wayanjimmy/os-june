@@ -221,14 +221,6 @@ jobs:
             } else {
               Write-Host "::error::Windows Authenticode signing configuration mixes PFX and Azure Artifact Signing values. Configure exactly one complete signing mode."
             }
-            foreach ($name in ($pfxNames + $artifactNames)) {
-              $value = [Environment]::GetEnvironmentVariable($name)
-              if ([string]::IsNullOrWhiteSpace($value)) {
-                Write-Host "::notice::$name is not set."
-              } else {
-                Write-Host "::notice::$name is set."
-              }
-            }
             $missing = 1
           }
 
