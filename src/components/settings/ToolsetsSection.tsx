@@ -21,6 +21,7 @@ import {
   type SkillExplanation,
   type ToolsetsState,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 
 type ToolsetsSectionProps = {
@@ -45,7 +46,8 @@ type ToolsetsSectionProps = {
  * can drive it with a stubbed state (no Tauri, no network).
  */
 export function ToolsetsSection({ mode = "sandboxed" }: ToolsetsSectionProps) {
-  const state = useToolsets(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useToolsets(mode, profile);
   return <ToolsetsView state={state} mode={mode} />;
 }
 

@@ -15,6 +15,7 @@ import {
   type IntegrationsHealth,
 } from "../../lib/hermes-admin";
 import type { HermesAdminMode } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 
 /** The Settings tab a health issue links to. The {@link HealthTarget} union is a
  * subset of the AppSettings `SettingsTab` ids, so the mapping is the identity;
@@ -44,7 +45,8 @@ export function IntegrationsHealthSection({
   mode = "sandboxed",
   onNavigate,
 }: IntegrationsHealthSectionProps) {
-  const health = useIntegrationsHealth(mode);
+  const profile = useActiveHermesProfileName();
+  const health = useIntegrationsHealth(mode, profile);
   return <IntegrationsHealthView health={health} mode={mode} onNavigate={onNavigate} />;
 }
 

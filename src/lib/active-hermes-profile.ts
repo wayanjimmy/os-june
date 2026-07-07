@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from "react";
+
 import { createHermesAdminClient } from "./hermes-admin/client";
 import { createRustAdminFetch } from "./hermes-admin/rust-transport";
 import {
@@ -28,6 +30,10 @@ function normalizeProfileName(name: string | null | undefined): string {
 
 export function getActiveHermesProfileName(): string {
   return activeProfileName;
+}
+
+export function useActiveHermesProfileName(): string {
+  return useSyncExternalStore(subscribe, getActiveHermesProfileName, getActiveHermesProfileName);
 }
 
 export function setActiveHermesProfileName(name: string): void {

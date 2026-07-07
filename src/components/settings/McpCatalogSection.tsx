@@ -34,6 +34,7 @@ import {
   type McpCatalogState,
   type McpInstallDraft,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
@@ -60,7 +61,8 @@ type McpCatalogSectionProps = {
  * happen (feature 17) rather than pretending install is complete.
  */
 export function McpCatalogSection({ mode = "sandboxed" }: McpCatalogSectionProps) {
-  const state = useMcpCatalog(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useMcpCatalog(mode, profile);
   return <McpCatalogView state={state} mode={mode} />;
 }
 

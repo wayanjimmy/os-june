@@ -17,6 +17,7 @@ import {
   type SetupSnapshotState,
   type SnapshotRequiredSecret,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { hermesBridgeStatus, type HermesBridgeStatus } from "../../lib/tauri";
 
 type SetupSnapshotSectionProps = {
@@ -38,6 +39,7 @@ type SetupSnapshotSectionProps = {
  * never read into the export and never imported from a file.
  */
 export function SetupSnapshotSection({ mode = "sandboxed" }: SetupSnapshotSectionProps) {
+  const profile = useActiveHermesProfileName();
   const [bridge, setBridge] = useState<HermesBridgeStatus>();
   const [bridgeError, setBridgeError] = useState<string>();
 
@@ -57,7 +59,7 @@ export function SetupSnapshotSection({ mode = "sandboxed" }: SetupSnapshotSectio
     };
   }, []);
 
-  const engine = useMcpServersEngine(bridge, mode);
+  const engine = useMcpServersEngine(bridge, mode, profile);
   const base = useSetupSnapshotController(engine);
   const state: SetupSnapshotState =
     engine === null && bridgeError

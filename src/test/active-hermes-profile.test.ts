@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
 
 import {
   getActiveHermesProfileName,
   refreshActiveHermesProfile,
   setActiveHermesProfileName,
   subscribe,
+  useActiveHermesProfileName,
 } from "../lib/active-hermes-profile";
 
 const mocks = vi.hoisted(() => ({
@@ -79,5 +81,17 @@ describe("active Hermes profile store", () => {
     unsubscribe();
     setActiveHermesProfileName("writing");
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes a React hook over the shared active profile subscription", () => {
+    const { result } = renderHook(() => useActiveHermesProfileName());
+
+    expect(result.current).toBe("default");
+
+    act(() => {
+      setActiveHermesProfileName("research");
+    });
+
+    expect(result.current).toBe("research");
   });
 });

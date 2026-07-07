@@ -26,6 +26,7 @@ import {
   type SkillSetupBadge as SkillSetupBadgeModel,
   type SkillsSetupOverview,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { Switch } from "../ui/Switch";
 import { AdminNotifications } from "./AdminNotifications";
 import { SkillDetailSection } from "./SkillDetailSection";
@@ -63,12 +64,13 @@ export function InstalledSkillsSection({
   mode = "sandboxed",
   onOpenSkill,
 }: InstalledSkillsSectionProps) {
-  const state = useInstalledSkills(mode);
-  const setup = useSkillsSetupOverview(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useInstalledSkills(mode, profile);
+  const setup = useSkillsSetupOverview(mode, profile);
   // Lifecycle actions (update / audit / uninstall / reset) run on their own
   // engine; on a successful mutation they refresh the inventory through this
   // callback so the list + toolsets reflect the change.
-  const lifecycle = useSkillLifecycle(mode, undefined, state.refresh);
+  const lifecycle = useSkillLifecycle(mode, profile, state.refresh);
   // The detail surface is a sub-view OFF this section (matching how the setup
   // panel and hub drawer are surfaced), not a top-level tab. When the host
   // supplies its own `onOpenSkill`, we defer to it; otherwise we open the

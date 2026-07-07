@@ -21,6 +21,7 @@ import {
   type ResolvedSkillBundle,
   type SkillBundlesState,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 
 type SkillBundlesSectionProps = {
@@ -41,7 +42,8 @@ type SkillBundlesSectionProps = {
  * is presentation + the editor form's local state.
  */
 export function SkillBundlesSection({ mode = "sandboxed", onStartChat }: SkillBundlesSectionProps) {
-  const state = useSkillBundles(mode, onStartChat);
+  const profile = useActiveHermesProfileName();
+  const state = useSkillBundles(mode, onStartChat, profile);
   return <SkillBundlesView state={state} mode={mode} canStartChat={!!onStartChat} />;
 }
 

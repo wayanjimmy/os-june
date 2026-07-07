@@ -25,6 +25,7 @@ import {
   type TapInstallState,
 } from "../../lib/hermes-admin";
 import type { HermesSkillTapDto } from "../../lib/tauri";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 
 type TeamTapsSectionProps = {
@@ -53,7 +54,8 @@ export function TeamTapsSection({
   mode = "sandboxed",
   onConfigureGithubToken,
 }: TeamTapsSectionProps) {
-  const state = useSkillTaps(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useSkillTaps(mode, profile);
   return <TeamTapsView state={state} mode={mode} onConfigureGithubToken={onConfigureGithubToken} />;
 }
 

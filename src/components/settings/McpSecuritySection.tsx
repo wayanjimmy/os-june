@@ -11,6 +11,7 @@ import {
   type McpSecurityLabelCode,
   type McpSecurityState,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 
 type McpSecuritySectionProps = {
@@ -45,7 +46,8 @@ const EXPLAINED_LABELS: readonly McpSecurityLabelCode[] = [
  * is honest: a config change applies next session.
  */
 export function McpSecuritySection({ mode = "sandboxed" }: McpSecuritySectionProps) {
-  const state = useMcpSecurity(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useMcpSecurity(mode, profile);
   return <McpSecurityView state={state} mode={mode} />;
 }
 

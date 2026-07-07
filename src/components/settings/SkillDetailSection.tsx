@@ -30,6 +30,7 @@ import {
   type SkillLifecycleState,
   type SkillSupportingFiles,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 import { SkillLifecycleActions } from "./SkillLifecycleActions";
 import { SkillSetupSection } from "./SkillSetupSection";
@@ -66,10 +67,11 @@ export function SkillDetailSection({
   /** Returns to the installed skills list. */
   onBack?: () => void;
 }) {
-  const state = useSkillDetail(skill, info, mode);
+  const profile = useActiveHermesProfileName();
+  const state = useSkillDetail(skill, info, mode, profile);
   // Lifecycle actions refresh the skill's content on a successful mutation so the
   // detail view reflects a reset / update.
-  const lifecycle = useSkillLifecycle(mode, undefined, state.refresh);
+  const lifecycle = useSkillLifecycle(mode, profile, state.refresh);
   return <SkillDetailView state={state} lifecycle={lifecycle} onBack={onBack} />;
 }
 

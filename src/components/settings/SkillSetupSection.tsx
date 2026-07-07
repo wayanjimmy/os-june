@@ -17,6 +17,7 @@ import {
   type SkillSetupBadge as SkillSetupBadgeModel,
   type SkillSetupState,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 
 /**
@@ -47,7 +48,8 @@ export function SkillSetupSection({
    * separate setup-status badge (the Installed skills list) can refresh it. */
   onSaved?: () => void;
 }) {
-  const state = useSkillSetup(skill, skillRaw, mode, undefined, onSaved);
+  const profile = useActiveHermesProfileName();
+  const state = useSkillSetup(skill, skillRaw, mode, profile, onSaved);
   return <SkillSetupView state={state} onClose={onClose} />;
 }
 

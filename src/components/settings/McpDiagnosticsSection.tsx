@@ -21,6 +21,7 @@ import {
   type McpDiagnosticsState,
   type ServerDiagnostics,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { hermesBridgeStatus, type HermesBridgeStatus } from "../../lib/tauri";
 import { AdminNotifications } from "./AdminNotifications";
 
@@ -45,6 +46,7 @@ type McpDiagnosticsSectionProps = {
  * surfaced, and the support export is sanitized through the shared redactor.
  */
 export function McpDiagnosticsSection({ mode = "sandboxed" }: McpDiagnosticsSectionProps) {
+  const profile = useActiveHermesProfileName();
   const [bridge, setBridge] = useState<HermesBridgeStatus>();
   const [bridgeError, setBridgeError] = useState<string>();
 
@@ -64,7 +66,7 @@ export function McpDiagnosticsSection({ mode = "sandboxed" }: McpDiagnosticsSect
     };
   }, []);
 
-  const engine = useMcpServersEngine(bridge, mode);
+  const engine = useMcpServersEngine(bridge, mode, profile);
   const base = useMcpDiagnosticsController(engine);
   const state: McpDiagnosticsState =
     engine === null && bridgeError

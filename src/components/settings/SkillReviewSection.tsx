@@ -24,6 +24,7 @@ import {
   type PendingSkillWriteFile,
   type SkillReviewState,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { Switch } from "../ui/Switch";
 import { AdminNotifications } from "./AdminNotifications";
 
@@ -46,7 +47,8 @@ type SkillReviewSectionProps = {
  * local expand state.
  */
 export function SkillReviewSection({ mode = "sandboxed" }: SkillReviewSectionProps) {
-  const state = useSkillReview(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useSkillReview(mode, profile);
   return <SkillReviewView state={state} mode={mode} />;
 }
 

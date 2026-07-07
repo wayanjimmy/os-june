@@ -16,6 +16,7 @@ import {
   type ExternalDirsState,
   type HermesAdminMode,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 
 type ExternalDirsSectionProps = {
@@ -37,7 +38,8 @@ type ExternalDirsSectionProps = {
  * + the local add-form input state.
  */
 export function ExternalDirsSection({ mode = "sandboxed" }: ExternalDirsSectionProps) {
-  const state = useExternalDirs(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useExternalDirs(mode, profile);
   return <ExternalDirsView state={state} mode={mode} />;
 }
 

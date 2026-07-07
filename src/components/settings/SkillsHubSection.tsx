@@ -28,6 +28,7 @@ import {
   type HubSourceKind,
   type SkillsHubState,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import { AdminNotifications } from "./AdminNotifications";
 import {
   SkillInstallReviewDialog,
@@ -55,7 +56,8 @@ type SkillsHubSectionProps = {
  * kept in the detail drawer's advanced section for debugging.
  */
 export function SkillsHubSection({ mode = "sandboxed" }: SkillsHubSectionProps) {
-  const state = useSkillsHub(mode);
+  const profile = useActiveHermesProfileName();
+  const state = useSkillsHub(mode, profile);
   return <SkillsHubView state={state} mode={mode} />;
 }
 

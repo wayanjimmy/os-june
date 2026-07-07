@@ -52,6 +52,7 @@ import {
   type McpTestState,
   type ToolPolicyDraft,
 } from "../../lib/hermes-admin";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
 import {
   hermesBridgeStatus,
   startHermesBridge,
@@ -84,6 +85,7 @@ type McpServersSectionProps = {
  * surfaced; this component is presentation + local filter / dialog state.
  */
 export function McpServersSection({ mode = "sandboxed" }: McpServersSectionProps) {
+  const profile = useActiveHermesProfileName();
   const [bridge, setBridge] = useState<HermesBridgeStatus>();
   const [bridgeError, setBridgeError] = useState<string>();
   // The native runtime restart. June owns the Hermes process, so applying MCP
@@ -112,7 +114,7 @@ export function McpServersSection({ mode = "sandboxed" }: McpServersSectionProps
     };
   }, []);
 
-  const engine = useMcpServersEngine(bridge, mode);
+  const engine = useMcpServersEngine(bridge, mode, profile);
   const serversState = useMcpFilteringController(engine);
   const oauthState = useMcpOauthController(engine);
 
