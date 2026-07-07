@@ -431,22 +431,12 @@ jobs:
 
       - name: Summary
         shell: pwsh
-        env:
-          PUBLISH_RELEASE_ASSETS: ${{ inputs.publish }}
         run: |
-          $publishReleaseAssets = $env:PUBLISH_RELEASE_ASSETS -eq "true"
-          $publishStatus = if ($publishReleaseAssets) { "yes" } else { "no, dry run only" }
-          $marketingDownload = if ($publishReleaseAssets) {
-            "https://github.com/open-software-network/os-june-releases/releases/latest/download/June_x64-setup.exe"
-          } else {
-            "not updated by this dry run"
-          }
-
           @(
             "### Production Windows release",
             "- Version: ``$env:VERSION``",
             "- Release repo: ``open-software-network/os-june-releases``",
-            "- Published release assets: $publishStatus",
-            "- Marketing download: ``$marketingDownload``",
-            "- Updater platform [REDACTED_SECRET]`"
+            "- Published release assets: ${{ inputs.publish && 'yes' || 'no, dry run only' }}",
+            "- Marketing download: ``${{ inputs.publish && 'https://github.com/open-software-network/os-june-releases/releases/latest/download/June_x64-setup.exe' || 'not updated by this dry run' }}``",
+            "- Windows updater platform: windows-x86_64"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
