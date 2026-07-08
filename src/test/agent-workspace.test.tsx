@@ -159,7 +159,7 @@ vi.mock("../lib/hermes-gateway", async (importOriginal) => ({
   // Real HermesGatewayError / isSessionBusyError — only the client is faked.
   ...(await importOriginal<typeof import("../lib/hermes-gateway")>()),
   HermesGatewayClient: class {
-    constructor() {
+    constructor(_diagnostics?: unknown) {
       mocks.gatewayInstances.push(this as unknown as (typeof mocks.gatewayInstances)[number]);
     }
     connect = vi.fn();

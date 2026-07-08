@@ -160,6 +160,56 @@ describe("HermesGatewayClient", () => {
     expect(isSessionBusyError(new Error("session busy"))).toBe(false);
   });
 
+  it("records redacted diagnostics for connect and request lifecycle", async () => {
+    const diagnostics = vi.fn();
+    const client = new HermesGatewayClient(diagnostics);
+    const connecting = client.connect("ws://127.0.0.1:8787/api/ws?token=secret-token");
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    await connecting;
+
+    const pending = client.request<{ ok: boolean }>("session.create");
+    const frame = JSON.parse(socket.sent[0]) as { id: number };
+    socket.message({ id: frame.id, result: { ok: true } });
+    await expect(pending).resolves.toEqual({ ok: true });
+
+    expect(diagnostics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ws.connect.started",
+        url: "ws://127.0.0.1:8787/api/ws?token=%5Bredacted%5D",
+      }),
+    );
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ event: "ws.connect.open" }));
+    expect(diagnostics).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "rpc.request.started", method: "session.create" }),
+    );
+    expect(diagnostics).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "rpc.request.ok", method: "session.create" }),
+    );
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("secret-token");
+  });
+
+  it("records request timeout diagnostics", async () => {
+    vi.useFakeTimers();
+    try {
+      const diagnostics = vi.fn();
+      const client = new HermesGatewayClient(diagnostics);
+      const connecting = client.connect("ws://gateway");
+      FakeWebSocket.instances[0].open();
+      await connecting;
+
+      const pending = client.request("prompt.submit", {}, 50);
+      vi.advanceTimersByTime(50);
+
+      await expect(pending).rejects.toThrow("Hermes request timed out: prompt.submit");
+      expect(diagnostics).toHaveBeenCalledWith(
+        expect.objectContaining({ event: "rpc.request.timeout", method: "prompt.submit" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("notifies close listeners on unexpected drops but not on explicit close", async () => {
     const client = new HermesGatewayClient();
     const onClose = vi.fn();

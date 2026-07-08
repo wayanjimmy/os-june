@@ -26,6 +26,18 @@ function Invoke-Native {
   }
 }
 
+function Resolve-Npm {
+  $candidates = @("npm.cmd", "npm.exe", "npm")
+  foreach ($candidate in $candidates) {
+    $command = Get-Command $candidate -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+      return $command.Source
+    }
+  }
+
+  Fail "npm is required to prebuild the Hermes dashboard web UI. Install Node.js/npm or ensure npm is on PATH."
+}
+
 function Resolve-Python {
   $candidates = @(
     @{ Exe = "py"; Args = @("-3.11") },
@@ -114,10 +126,27 @@ function Invoke-Uv {
     [string]$WorkingDirectory = ""
   )
 
-  $saved = @{}
+  $keysToRestore = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   foreach ($key in $ExtraEnv.Keys) {
+    [void]$keysToRestore.Add($key)
+  }
+  [void]$keysToRestore.Add("UV_PYTHON_INSTALL_BIN")
+
+  $saved = @{}
+  foreach ($key in $keysToRestore) {
     $saved[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
-    [Environment]::SetEnvironmentVariable($key, [string]$ExtraEnv[$key], "Process")
+  }
+
+  foreach ($key in $keysToRestore) {
+    if ($ExtraEnv.ContainsKey($key)) {
+      [Environment]::SetEnvironmentVariable($key, [string]$ExtraEnv[$key], "Process")
+    } elseif ($key -ieq "UV_PYTHON_INSTALL_BIN") {
+      # uv parses this global boolean for every command, including sync/pip.
+      # Keep the bundler isolated from inherited blank or invalid shell values.
+      [Environment]::SetEnvironmentVariable($key, "0", "Process")
+    } elseif ([string]::IsNullOrEmpty($saved[$key])) {
+      Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
+    }
   }
 
   $previousLocation = $null
@@ -131,8 +160,13 @@ function Invoke-Uv {
     if ($null -ne $previousLocation) {
       Set-Location $previousLocation
     }
-    foreach ($key in $ExtraEnv.Keys) {
-      [Environment]::SetEnvironmentVariable($key, $saved[$key], "Process")
+    foreach ($key in $keysToRestore) {
+      $restoreValue = $saved[$key]
+      if ([string]::IsNullOrEmpty($restoreValue)) {
+        Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
+      } else {
+        [Environment]::SetEnvironmentVariable($key, $restoreValue, "Process")
+      }
     }
   }
 }
@@ -217,14 +251,13 @@ foreach ($file in $licenseFiles) {
 }
 [IO.File]::WriteAllLines((Join-Path $noticesDir "THIRD_PARTY_NOTICES.txt"), $noticeLines, [Text.UTF8Encoding]::new($false))
 
-if ($null -eq (Get-Command "npm.cmd" -ErrorAction SilentlyContinue)) {
-  Fail "npm is required to prebuild the Hermes dashboard web UI."
-}
+$npm = Resolve-Npm
+Log "npm: $(& $npm --version)"
 Log "prebuilding dashboard web UI"
 Push-Location (Join-Path $agentDir "web")
 try {
-  Invoke-Native "npm.cmd" @("ci", "--no-audit", "--no-fund")
-  Invoke-Native "npm.cmd" @("run", "build")
+  Invoke-Native $npm @("ci", "--no-audit", "--no-fund")
+  Invoke-Native $npm @("run", "build")
 } finally {
   Pop-Location
 }

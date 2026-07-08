@@ -162,6 +162,7 @@ import {
 import {
   HermesGatewayClient,
   isSessionBusyError,
+  type HermesGatewayDiagnosticEvent,
   type HermesGatewayEvent,
 } from "../../lib/hermes-gateway";
 import {
@@ -1212,6 +1213,27 @@ type HermesRuntimeSessionResponse = {
   stored_session_id?: string;
 };
 
+type AgentChatDiagnosticEvent =
+  | HermesGatewayDiagnosticEvent
+  | {
+      event:
+        | "bridge.status.missing"
+        | "bridge.start.requested"
+        | "bridge.start.ok"
+        | "session.create.started"
+        | "session.create.ok"
+        | "session.resume.started"
+        | "session.resume.ok"
+        | "prompt.submit.started"
+        | "prompt.submit.ack";
+      at: string;
+      fullMode?: boolean;
+      storedSessionIdPresent?: boolean;
+      runtimeSessionIdPresent?: boolean;
+      sameSessionIds?: boolean;
+      method?: string;
+    };
+
 /** Where the session was opened from — rendered as the leading crumbs in the
  * sticky session bar ("Projects / June" or "Agents") with a back arrow. */
 export type AgentWorkspaceOrigin = {
@@ -1281,6 +1303,7 @@ const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
   "june-agent-issue-report-follow-up-submit-failed";
 const ISSUE_REPORT_SENT_MESSAGE =
   "Your report was sent to the June team. Thank you for helping improve June.";
+const AGENT_CHAT_DIAGNOSTIC_LIMIT = 200;
 const ISSUE_REPORT_DIAGNOSIS_REFRESH_TIMEOUT_MS = 1500;
 const ISSUE_REPORT_DIAGNOSIS_BOUNDARY_SKEW_MS = 1500;
 const agentComposerDrafts = new Map<string, ComposerDraftSnapshot>();
@@ -2019,6 +2042,16 @@ export function AgentWorkspace({
   // runtime processes run side by side, each with its own socket. Sessions
   // route to the gateway matching their recorded mode.
   const gatewaysRef = useRef<Map<boolean, HermesGatewayClient>>(new Map());
+  const agentChatDiagnosticsRef = useRef<AgentChatDiagnosticEvent[]>([]);
+  const recordAgentChatDiagnostic = useCallback(
+    (event: Omit<AgentChatDiagnosticEvent, "at"> | AgentChatDiagnosticEvent) => {
+      const entry = "at" in event ? event : { ...event, at: new Date().toISOString() };
+      agentChatDiagnosticsRef.current = [...agentChatDiagnosticsRef.current, entry].slice(
+        -AGENT_CHAT_DIAGNOSTIC_LIMIT,
+      );
+    },
+    [],
+  );
   // The gateway's close listener is registered once per client instance, so
   // it routes through this ref to always run the latest render's recovery
   // closure (see recoverFromGatewayClose).
@@ -5179,13 +5212,26 @@ export function AgentWorkspace({
         ),
         titlePromise ?? Promise.resolve(undefined),
       ]);
-      const nextCreated = targetSessionId
-        ? undefined
-        : await nextGateway.request<HermesRuntimeSessionResponse>("session.create", {
-            title: nextSessionTitle ?? fallbackSessionTitle,
-            cols: 96,
-            ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
-          });
+      let nextCreated: HermesRuntimeSessionResponse | undefined;
+      if (!targetSessionId) {
+        recordAgentChatDiagnostic({ event: "session.create.started", method: "session.create" });
+        nextCreated = await nextGateway.request<HermesRuntimeSessionResponse>("session.create", {
+          title: nextSessionTitle ?? fallbackSessionTitle,
+          cols: 96,
+          ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
+        });
+        recordAgentChatDiagnostic({
+          event: "session.create.ok",
+          method: "session.create",
+          storedSessionIdPresent: Boolean(nextCreated?.stored_session_id),
+          runtimeSessionIdPresent: Boolean(nextCreated?.session_id),
+          sameSessionIds: Boolean(
+            nextCreated?.stored_session_id &&
+              nextCreated?.session_id &&
+              nextCreated.stored_session_id === nextCreated.session_id,
+          ),
+        });
+      }
       const nextStoredSessionId =
         targetSessionId ?? nextCreated?.stored_session_id ?? nextCreated?.session_id;
       if (!nextStoredSessionId) {
@@ -5252,14 +5298,20 @@ export function AgentWorkspace({
     let runtimeSessionId: string | undefined;
     try {
       runtimeSessionId =
-        created?.session_id ??
-        runtimeSessionIdsRef.current[storedSessionId] ??
-        (
-          await gateway.request<HermesRuntimeSessionResponse>("session.resume", {
-            session_id: storedSessionId,
-            cols: 96,
-          })
-        ).session_id;
+        created?.session_id ?? runtimeSessionIdsRef.current[storedSessionId] ?? undefined;
+      if (!runtimeSessionId) {
+        recordAgentChatDiagnostic({ event: "session.resume.started", method: "session.resume" });
+        const resumed = await gateway.request<HermesRuntimeSessionResponse>("session.resume", {
+          session_id: storedSessionId,
+          cols: 96,
+        });
+        runtimeSessionId = resumed.session_id;
+        recordAgentChatDiagnostic({
+          event: "session.resume.ok",
+          method: "session.resume",
+          runtimeSessionIdPresent: Boolean(runtimeSessionId),
+        });
+      }
     } catch (err) {
       clearQueuedIssueReport();
       if (optimisticSession) {
@@ -5271,6 +5323,7 @@ export function AgentWorkspace({
       clearQueuedIssueReport();
       rollbackOptimisticBeforePrompt(new Error("Hermes did not resume the session."));
     }
+    const activeRuntimeSessionId = runtimeSessionId as string;
     if (!imageInputFallbackContent) {
       // Feature 19: send any imported images to the session through the
       // structured image attach flow before the prompt, so the model/tools see
@@ -5279,7 +5332,12 @@ export function AgentWorkspace({
       // which the submit() catch turns into a restored composer the user can
       // retry — the prompt is NOT sent with a silently-missing image.
       try {
-        await attachPendingImages(gateway, runtimeSessionId, storedSessionId, turnAttachments);
+        await attachPendingImages(
+          gateway,
+          activeRuntimeSessionId,
+          storedSessionId,
+          turnAttachments,
+        );
       } catch (err) {
         clearQueuedIssueReport();
         rollbackOptimisticBeforePrompt(err);
@@ -5288,7 +5346,7 @@ export function AgentWorkspace({
     const createdAt = optimisticSession?.createdAt ?? new Date().toISOString();
     setRuntimeSessionIds((current) => ({
       ...current,
-      [storedSessionId]: runtimeSessionId,
+      [storedSessionId]: activeRuntimeSessionId,
     }));
     if (!optimisticSession) {
       newSessionModeRef.current = false;
@@ -5361,7 +5419,7 @@ export function AgentWorkspace({
     });
     attachHermesSessionEventListener({
       gateway,
-      runtimeSessionId,
+      runtimeSessionId: activeRuntimeSessionId,
       sessionDisplayTitle,
       storedSessionId,
     });
@@ -5374,12 +5432,14 @@ export function AgentWorkspace({
       hermesTraceBuffer.recordOutbound({
         sessionId: storedSessionId,
         method: "prompt.submit",
-        params: { session_id: runtimeSessionId, text: promptSubmitContent },
+        params: { session_id: activeRuntimeSessionId, text: promptSubmitContent },
       });
+      recordAgentChatDiagnostic({ event: "prompt.submit.started", method: "prompt.submit" });
       await gateway.request("prompt.submit", {
-        session_id: runtimeSessionId,
+        session_id: activeRuntimeSessionId,
         text: promptSubmitContent,
       });
+      recordAgentChatDiagnostic({ event: "prompt.submit.ack", method: "prompt.submit" });
       // JUN-171 (Phase A): the held fast-path images have now ridden along
       // with a successful follow-up prompt, either as structured image bytes or
       // in the non-vision path fallback. Clear only after prompt.submit accepts
@@ -5439,14 +5499,17 @@ export function AgentWorkspace({
   async function ensureHermesGateway(fullMode = false) {
     let connection = hermesConnectionForMode(bridge.running ? bridge : undefined, fullMode);
     if (!connection) {
+      recordAgentChatDiagnostic({ event: "bridge.status.missing", fullMode });
+      recordAgentChatDiagnostic({ event: "bridge.start.requested", fullMode });
       const next = await startBridge(fullMode);
+      recordAgentChatDiagnostic({ event: "bridge.start.ok", fullMode });
       connection = hermesConnectionForMode(next, fullMode);
     }
     const wsUrl = connection?.wsUrl;
     if (!wsUrl) throw new Error("Hermes bridge did not return a gateway URL.");
     let gateway = gatewaysRef.current.get(fullMode);
     if (!gateway) {
-      gateway = new HermesGatewayClient();
+      gateway = new HermesGatewayClient(recordAgentChatDiagnostic);
       gatewaysRef.current.set(fullMode, gateway);
       // Fires only on unexpected drops — the unmount close() detaches the
       // socket first, and a superseded socket never notifies.

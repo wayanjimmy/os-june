@@ -75,6 +75,17 @@ const IMAGE_SAFE_MODE_CONSENT_EVENT: &str = "image-safe-mode-consent";
 /// Bounds only the event payload shown in the consent dialog; the explicit-
 /// content check runs on the full prompt.
 const IMAGE_SAFE_MODE_CONSENT_PROMPT_MAX_CHARS: usize = 120;
+static PROVIDER_PROXY_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "windows")]
+fn suppress_child_console(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn suppress_child_console(_cmd: &mut Command) {}
 
 const fn base64_encoded_len(byte_count: usize) -> usize {
     byte_count.div_ceil(3) * 4
@@ -333,10 +344,32 @@ struct ProviderProxyState {
     token: String,
     image_sources: ImageSourceCapabilities,
     app: Option<AppHandle>,
+    diagnostics: Option<ProviderProxyDiagnostics>,
     /// Safe-mode values already injected, keyed by requestId, so an MCP retry
     /// of the same request replays the same shape even if the user flipped
     /// the toggle in between (June API bills a changed shape as a new call).
     image_safe_mode_pins: Arc<Mutex<VecDeque<(String, bool)>>>,
+}
+
+#[derive(Clone)]
+struct ProviderProxyDiagnostics {
+    path: PathBuf,
+}
+
+impl ProviderProxyDiagnostics {
+    fn log(&self, event: serde_json::Value) {
+        if let Err(error) = append_jsonl_diagnostic(&self.path, event) {
+            eprintln!("June provider proxy diagnostics failed: {error}");
+        }
+    }
+}
+
+impl ProviderProxyState {
+    fn log_provider_event(&self, event: serde_json::Value) {
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.log(event);
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -939,9 +972,15 @@ async fn start_hermes_bridge_inner(
             cmd
         }
     };
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.stdin(Stdio::null());
+    match open_dashboard_log(&hermes_home, full_mode, port, &cwd, sandboxed) {
+        Some((log_for_stdout, log_for_stderr)) => {
+            cmd.stdout(log_for_stdout).stderr(log_for_stderr);
+        }
+        None => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
     apply_isolated_hermes_env(
         &mut cmd,
         &hermes_home,
@@ -949,6 +988,7 @@ async fn start_hermes_bridge_inner(
         environment_hint_for_spawn(full_mode, sandbox_available),
     );
     cmd.current_dir(&cwd);
+    suppress_child_console(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|error| {
         AppError::new(
@@ -1035,8 +1075,13 @@ async fn ensure_provider_proxy(
         images_dir: hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME),
         secret: load_or_create_image_source_capability_secret(&app_data_dir)?,
     };
-    let started =
-        start_june_provider_proxy(token.clone(), image_sources, Some(app.clone())).await?;
+    let started = start_june_provider_proxy(
+        token.clone(),
+        image_sources,
+        Some(app.clone()),
+        Some(hermes_home.to_path_buf()),
+    )
+    .await?;
     let mut guard = bridge
         .provider_proxy
         .lock()
@@ -2980,6 +3025,7 @@ fn build_hermes_mcp_login_command(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    suppress_child_console(&mut cmd);
     cmd
 }
 
@@ -3385,6 +3431,7 @@ fn build_hermes_skill_reset_command(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    suppress_child_console(&mut cmd);
     cmd
 }
 
@@ -3584,6 +3631,7 @@ fn build_hermes_skill_tap_command(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    suppress_child_console(&mut cmd);
     cmd
 }
 
@@ -4787,8 +4835,16 @@ async fn ensure_hermes_gateway_running(
         return Ok(());
     }
 
-    run_hermes_gateway_start(connection).await?;
-    wait_for_hermes_gateway(connection).await
+    #[cfg(target_os = "windows")]
+    {
+        spawn_hermes_gateway_start(connection)?;
+        wait_for_hermes_gateway(connection).await
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        run_hermes_gateway_start(connection).await?;
+        wait_for_hermes_gateway(connection).await
+    }
 }
 
 async fn hermes_gateway_running(connection: &HermesBridgeConnection) -> Result<bool, AppError> {
@@ -4892,6 +4948,7 @@ fn hermes_gateway_start_command(connection: &HermesBridgeConnection) -> Command 
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
     }
+    suppress_child_console(&mut cmd);
     cmd
 }
 
@@ -4902,13 +4959,18 @@ fn build_hermes_gateway_start_command(
     hermes_home: &Path,
 ) -> Command {
     let mut cmd = Command::new(&connection.command);
-    cmd.args(["gateway", "start"]);
+    if cfg!(target_os = "windows") {
+        cmd.args(["gateway", "run", "--replace", "--accept-hooks"]);
+    } else {
+        cmd.args(["gateway", "start"]);
+    }
     // No sandbox-status hint: `gateway start` is a helper invocation, not the
     // agent runtime, so it never builds a system prompt.
     apply_isolated_hermes_env(&mut cmd, hermes_home, &connection.token, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(hermes_home);
     cmd.stdin(Stdio::null());
+    suppress_child_console(&mut cmd);
     cmd
 }
 
@@ -4933,6 +4995,86 @@ fn open_gateway_start_log(hermes_home: &Path) -> Option<(std::fs::File, std::fs:
     );
     let clone = file.try_clone().ok()?;
     Some((file, clone))
+}
+
+fn open_dashboard_log(
+    hermes_home: &Path,
+    full_mode: bool,
+    port: u16,
+    cwd: &Path,
+    sandboxed: bool,
+) -> Option<(std::fs::File, std::fs::File)> {
+    let log_dir = hermes_home.join("logs");
+    fs::create_dir_all(&log_dir).ok()?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("dashboard.log"))
+        .ok()?;
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    use io::Write as _;
+    let _ = writeln!(
+        file,
+        "{}",
+        dashboard_log_header(&timestamp.to_string(), full_mode, port, cwd, sandboxed)
+    );
+    let clone = file.try_clone().ok()?;
+    Some((file, clone))
+}
+
+fn dashboard_log_header(
+    timestamp: &str,
+    full_mode: bool,
+    port: u16,
+    cwd: &Path,
+    sandboxed: bool,
+) -> String {
+    let mode = if full_mode {
+        "unrestricted"
+    } else {
+        "sandboxed"
+    };
+    format!(
+        "\n=== dashboard started {timestamp} mode={mode} port={port} cwd={} sandboxed={sandboxed} ===",
+        cwd.display()
+    )
+}
+
+fn open_provider_proxy_diagnostics(hermes_home: &Path) -> Option<ProviderProxyDiagnostics> {
+    let log_dir = hermes_home.join("logs");
+    fs::create_dir_all(&log_dir).ok()?;
+    Some(ProviderProxyDiagnostics {
+        path: log_dir.join("provider-proxy.jsonl"),
+    })
+}
+
+fn append_jsonl_diagnostic(path: &Path, mut event: serde_json::Value) -> io::Result<()> {
+    if let Some(object) = event.as_object_mut() {
+        object.insert(
+            "ts".to_string(),
+            serde_json::Value::String(chrono::Local::now().to_rfc3339()),
+        );
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, &event).map_err(io::Error::other)?;
+    file.write_all(b"\n")
+}
+
+fn diagnostic_error_preview(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.get("message"))
+        .and_then(serde_json::Value::as_str)?;
+    Some(capped_diagnostic_message(message))
+}
+
+fn capped_diagnostic_message(message: &str) -> String {
+    const MAX_DIAGNOSTIC_MESSAGE_CHARS: usize = 240;
+    message.chars().take(MAX_DIAGNOSTIC_MESSAGE_CHARS).collect()
 }
 
 /// The bare `hermes` arguments that resume a session in the raw TUI. Mirror of
@@ -5597,30 +5739,31 @@ async fn install_managed_hermes_runtime_windows(
         let install_dir = install_dir.clone();
         let hermes_home = hermes_home.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            Command::new("powershell.exe")
-                .args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    WINDOWS_MANAGED_HERMES_INSTALL_SCRIPT,
-                ])
-                .env("JUNE_HERMES_RUNTIME_DIR", &runtime_dir)
-                .env("JUNE_HERMES_INSTALL_DIR", &install_dir)
-                .env("JUNE_HERMES_HOME", &hermes_home)
-                .env("JUNE_HERMES_INSTALL_COMMIT", HERMES_AGENT_INSTALL_COMMIT)
-                .env("JUNE_HERMES_SOURCE_TARBALL_URL", HERMES_SOURCE_TARBALL_URL)
-                .env(
-                    "JUNE_HERMES_SOURCE_TARBALL_SHA256",
-                    HERMES_SOURCE_TARBALL_SHA256,
-                )
-                .env("HERMES_HOME", &hermes_home)
-                .stdin(Stdio::null())
-                .stdout(Stdio::from(log_file))
-                .stderr(Stdio::from(log_file_for_stderr))
-                .status()
+            let mut cmd = Command::new("powershell.exe");
+            cmd.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                WINDOWS_MANAGED_HERMES_INSTALL_SCRIPT,
+            ])
+            .env("JUNE_HERMES_RUNTIME_DIR", &runtime_dir)
+            .env("JUNE_HERMES_INSTALL_DIR", &install_dir)
+            .env("JUNE_HERMES_HOME", &hermes_home)
+            .env("JUNE_HERMES_INSTALL_COMMIT", HERMES_AGENT_INSTALL_COMMIT)
+            .env("JUNE_HERMES_SOURCE_TARBALL_URL", HERMES_SOURCE_TARBALL_URL)
+            .env(
+                "JUNE_HERMES_SOURCE_TARBALL_SHA256",
+                HERMES_SOURCE_TARBALL_SHA256,
+            )
+            .env("HERMES_HOME", &hermes_home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_for_stderr));
+            suppress_child_console(&mut cmd);
+            cmd.status()
         })
         .await
         .map_err(|error| AppError::new("hermes_runtime_install_failed", error.to_string()))?
@@ -7006,6 +7149,7 @@ async fn start_june_provider_proxy(
     token: String,
     image_sources: ImageSourceCapabilities,
     app: Option<AppHandle>,
+    hermes_home: Option<PathBuf>,
 ) -> Result<RunningJuneProviderProxy, AppError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
@@ -7025,6 +7169,9 @@ async fn start_june_provider_proxy(
             token,
             image_sources,
             app,
+            diagnostics: hermes_home
+                .as_deref()
+                .and_then(open_provider_proxy_diagnostics),
             image_safe_mode_pins: Arc::new(Mutex::new(VecDeque::new())),
         }),
         shutdown_rx,
@@ -7071,9 +7218,16 @@ async fn handle_june_provider_connection(
     mut stream: tokio::net::TcpStream,
     state: Arc<ProviderProxyState>,
 ) -> io::Result<()> {
+    let request_id = PROVIDER_PROXY_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
     let request = match read_http_request(&mut stream).await {
         Ok(request) => request,
         Err(error) => {
+            state.log_provider_event(serde_json::json!({
+                "event": "request_parse_failed",
+                "requestId": request_id,
+                "message": capped_diagnostic_message(&error.to_string()),
+            }));
             let _ = write_json_response(
                 &mut stream,
                 400,
@@ -7083,7 +7237,22 @@ async fn handle_june_provider_connection(
             return Ok(());
         }
     };
-    if !provider_proxy_authorized(&request, &state.token) {
+    let authorized = provider_proxy_authorized(&request, &state.token);
+    state.log_provider_event(serde_json::json!({
+        "event": "request",
+        "requestId": request_id,
+        "method": request.method.as_str(),
+        "path": request.path.as_str(),
+        "authorized": authorized,
+        "bodyBytes": request.body.len(),
+    }));
+    if !authorized {
+        state.log_provider_event(serde_json::json!({
+            "event": "response",
+            "requestId": request_id,
+            "status": 401,
+            "durationMs": started.elapsed().as_millis(),
+        }));
         write_json_response(
             &mut stream,
             401,
@@ -7098,11 +7267,23 @@ async fn handle_june_provider_connection(
                 crate::providers::generation_model(),
                 crate::providers::generation_model_context_tokens().await,
             );
+            state.log_provider_event(serde_json::json!({
+                "event": "response",
+                "requestId": request_id,
+                "status": 200,
+                "durationMs": started.elapsed().as_millis(),
+            }));
             write_json_response(&mut stream, 200, body).await?;
         }
         ("POST", "/v1/chat/completions") => {
             let body = serde_json::from_slice::<serde_json::Value>(&request.body)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            state.log_provider_event(serde_json::json!({
+                "event": "chat_completion_start",
+                "requestId": request_id,
+                "model": body.get("model").and_then(serde_json::Value::as_str),
+                "stream": body.get("stream").and_then(serde_json::Value::as_bool),
+            }));
             match crate::june_api::proxy_agent_chat_completions(body).await {
                 Ok(response) if response.status >= 400 => {
                     // Error bodies are small enough to buffer whole, and
@@ -7111,6 +7292,14 @@ async fn handle_june_provider_connection(
                     let status = response.status;
                     let content_type = response.content_type.clone();
                     let body = response.collect_body().await.unwrap_or_default();
+                    state.log_provider_event(serde_json::json!({
+                        "event": "june_api_response",
+                        "requestId": request_id,
+                        "status": status,
+                        "contentType": content_type,
+                        "durationMs": started.elapsed().as_millis(),
+                        "errorPreview": diagnostic_error_preview(&body),
+                    }));
                     match translate_context_overflow_error(&body) {
                         Some(rewritten) => {
                             write_json_response(&mut stream, status, rewritten).await?;
@@ -7121,9 +7310,27 @@ async fn handle_june_provider_connection(
                     }
                 }
                 Ok(response) => {
-                    write_streaming_response(&mut stream, response).await?;
+                    let status = response.status;
+                    let content_type = response.content_type.clone();
+                    let outcome = write_streaming_response(&mut stream, response).await;
+                    state.log_provider_event(serde_json::json!({
+                        "event": if outcome.is_ok() { "stream_complete" } else { "stream_failed" },
+                        "requestId": request_id,
+                        "status": status,
+                        "contentType": content_type,
+                        "durationMs": started.elapsed().as_millis(),
+                        "message": outcome.as_ref().err().map(|error| capped_diagnostic_message(&error.to_string())),
+                    }));
+                    outcome?;
                 }
                 Err(error) => {
+                    state.log_provider_event(serde_json::json!({
+                        "event": "june_api_error",
+                        "requestId": request_id,
+                        "code": error.code,
+                        "message": capped_diagnostic_message(&error.message),
+                        "durationMs": started.elapsed().as_millis(),
+                    }));
                     write_json_response(
                         &mut stream,
                         502,
@@ -9476,6 +9683,33 @@ mcp_servers:
     }
 
     #[test]
+    fn dashboard_log_header_redacts_runtime_tokens() {
+        let header = dashboard_log_header(
+            "2026-07-08 12:00:00",
+            false,
+            57858,
+            Path::new("/tmp/june-workspace"),
+            true,
+        );
+
+        assert!(header.contains("dashboard started 2026-07-08 12:00:00"));
+        assert!(header.contains("mode=sandboxed"));
+        assert!(header.contains("port=57858"));
+        assert!(!header.contains("token="));
+        assert!(!header.contains("api/ws"));
+    }
+
+    #[test]
+    fn provider_proxy_diagnostic_error_preview_is_capped() {
+        let long_message = "a".repeat(400);
+        let body = serde_json::json!({ "error": { "message": long_message } }).to_string();
+        let preview = diagnostic_error_preview(body.as_bytes()).expect("preview");
+
+        assert_eq!(preview.chars().count(), 240);
+        assert!(!preview.contains("Bearer"));
+    }
+
+    #[test]
     fn render_hermes_config_registers_june_context_mcp_server() {
         let context = test_june_context_mcp_config();
         let web = test_june_web_mcp_config();
@@ -9609,6 +9843,9 @@ mcp_servers:
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
+        #[cfg(target_os = "windows")]
+        assert_eq!(args, ["gateway", "run", "--replace", "--accept-hooks"]);
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(args, ["gateway", "start"]);
         let envs: std::collections::HashMap<String, String> = cmd
             .get_envs()

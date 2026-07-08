@@ -119,6 +119,7 @@ vi.mock("../lib/hermes-adapter", async (importOriginal) => ({
 vi.mock("../lib/hermes-gateway", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/hermes-gateway")>()),
   HermesGatewayClient: class {
+    constructor(_diagnostics?: unknown) {}
     connect = vi.fn();
     close = vi.fn();
     onEvent = vi.fn((handler: (event: Record<string, unknown>) => void) => {

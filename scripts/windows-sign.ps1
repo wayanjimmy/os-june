@@ -5,6 +5,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($env:JUNE_WINDOWS_SKIP_SIGNING -eq "1") {
+  Write-Host "[windows-sign] JUNE_WINDOWS_SKIP_SIGNING=1; skipping Authenticode signing for local build: $TargetPath"
+  exit 0
+}
+
 function Fail([string]$Message) {
   throw "[windows-sign] $Message"
 }

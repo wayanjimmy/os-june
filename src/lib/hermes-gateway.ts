@@ -29,6 +29,7 @@ export type HermesGatewayEvent<P = unknown> = {
 };
 
 type PendingCall = {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer?: number;
@@ -39,8 +40,31 @@ type Frame = {
   method?: string;
   params?: HermesGatewayEvent;
   result?: unknown;
-  error?: { code?: number; message?: string };
+  error?: { code?: number; message?: string; method?: string };
 };
+
+export type HermesGatewayDiagnosticEvent = {
+  event:
+    | "ws.connect.started"
+    | "ws.connect.open"
+    | "ws.connect.error"
+    | "ws.connect.timeout"
+    | "ws.close"
+    | "rpc.request.started"
+    | "rpc.request.ok"
+    | "rpc.request.error"
+    | "rpc.request.timeout"
+    | "event.received";
+  at: string;
+  method?: string;
+  id?: string | number;
+  url?: string;
+  code?: number;
+  message?: string;
+  eventType?: string;
+};
+
+export type HermesGatewayDiagnosticSink = (event: HermesGatewayDiagnosticEvent) => void;
 
 /** RPC rejection from the gateway, keeping the JSON-RPC error code so callers
  * can branch on well-known conditions instead of matching message strings. */
@@ -70,6 +94,8 @@ export class HermesGatewayClient {
   private handlers = new Set<(event: HermesGatewayEvent) => void>();
   private closeHandlers = new Set<() => void>();
 
+  constructor(private readonly diagnostics?: HermesGatewayDiagnosticSink) {}
+
   async connect(wsUrl: string) {
     if (this.socket?.readyState === WebSocket.OPEN) return;
     // Coalesce concurrent connects: a second caller arriving while the
@@ -77,19 +103,26 @@ export class HermesGatewayClient {
     // just awaits the same connection attempt.
     if (this.connectPromise) return this.connectPromise;
     this.close();
+    this.recordDiagnostic({ event: "ws.connect.started", url: redactGatewayUrl(wsUrl) });
     const socket = new WebSocket(wsUrl);
     this.socket = socket;
     socket.addEventListener("message", (event) => this.handleMessage(event.data));
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
       // A stale socket's close event must not reject requests pending on
       // the socket that replaced it, nor notify close listeners.
       if (this.socket !== socket) return;
       this.socket = undefined;
+      this.recordDiagnostic({
+        event: "ws.close",
+        code: closeEventCode(event),
+        message: closeEventReason(event),
+      });
       this.rejectAll(new Error("Hermes gateway connection closed."));
       for (const handler of [...this.closeHandlers]) handler();
     });
     const connectPromise = new Promise<void>((resolve, reject) => {
       const timer = window.setTimeout(() => {
+        this.recordDiagnostic({ event: "ws.connect.timeout", url: redactGatewayUrl(wsUrl) });
         reject(new Error("Hermes gateway connection timed out."));
         socket.close();
       }, 15000);
@@ -97,6 +130,7 @@ export class HermesGatewayClient {
         "open",
         () => {
           window.clearTimeout(timer);
+          this.recordDiagnostic({ event: "ws.connect.open", url: redactGatewayUrl(wsUrl) });
           resolve();
         },
         { once: true },
@@ -105,6 +139,7 @@ export class HermesGatewayClient {
         "error",
         () => {
           window.clearTimeout(timer);
+          this.recordDiagnostic({ event: "ws.connect.error", url: redactGatewayUrl(wsUrl) });
           reject(new Error("Could not connect to Hermes gateway."));
         },
         { once: true },
@@ -146,13 +181,16 @@ export class HermesGatewayClient {
       return Promise.reject(new Error("Hermes gateway is not connected."));
     }
     const id = ++this.nextId;
+    this.recordDiagnostic({ event: "rpc.request.started", id, method });
     return new Promise<T>((resolve, reject) => {
       const pending: PendingCall = {
+        method,
         resolve: (value) => resolve(value as T),
         reject,
       };
       pending.timer = window.setTimeout(() => {
         if (this.pending.delete(id)) {
+          this.recordDiagnostic({ event: "rpc.request.timeout", id, method });
           reject(new Error(`Hermes request timed out: ${method}`));
         }
       }, timeoutMs);
@@ -174,17 +212,30 @@ export class HermesGatewayClient {
       if (pending.timer) window.clearTimeout(pending.timer);
       this.pending.delete(frame.id);
       if (frame.error) {
+        this.recordDiagnostic({
+          event: "rpc.request.error",
+          id: frame.id,
+          method: pending.method,
+          code: frame.error.code,
+          message: frame.error.message,
+        });
         pending.reject(
           new HermesGatewayError(frame.error.message ?? "Hermes RPC failed.", frame.error.code),
         );
       } else {
+        this.recordDiagnostic({ event: "rpc.request.ok", id: frame.id, method: pending.method });
         pending.resolve(frame.result);
       }
       return;
     }
     if (frame.method === "event" && frame.params?.type) {
+      this.recordDiagnostic({ event: "event.received", eventType: frame.params.type });
       for (const handler of this.handlers) handler(frame.params);
     }
+  }
+
+  private recordDiagnostic(event: Omit<HermesGatewayDiagnosticEvent, "at">) {
+    this.diagnostics?.({ ...event, at: new Date().toISOString() });
   }
 
   private rejectAll(error: Error) {
@@ -194,6 +245,28 @@ export class HermesGatewayClient {
       this.pending.delete(id);
     }
   }
+}
+
+function redactGatewayUrl(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.searchParams.has("token")) url.searchParams.set("token", "[redacted]");
+    return url.toString();
+  } catch {
+    return rawUrl.replace(/([?&]token=)[^&]+/i, "$1[redacted]");
+  }
+}
+
+function closeEventCode(event: unknown) {
+  if (typeof event !== "object" || event === null || !("code" in event)) return undefined;
+  const code = Number((event as { code?: unknown }).code);
+  return Number.isFinite(code) ? code : undefined;
+}
+
+function closeEventReason(event: unknown) {
+  return typeof event === "object" && event !== null && "reason" in event
+    ? String((event as { reason?: unknown }).reason ?? "")
+    : undefined;
 }
 
 export type HermesSessionCreateResponse = {
