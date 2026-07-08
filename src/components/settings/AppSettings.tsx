@@ -114,6 +114,7 @@ import { ToolsetsSection } from "./ToolsetsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
+import { PrivacySettingsSection } from "./PrivacySettingsSection";
 
 const THEME_OPTIONS: readonly {
   value: ThemePreference;
@@ -1339,6 +1340,8 @@ export function AppSettings({
               onAccountChanged={onAccountChanged}
               onRefresh={onAccountRefresh}
             />
+
+            <PrivacySettingsSection />
 
             <section className="settings-group" aria-labelledby="appearance-heading">
               <h2 id="appearance-heading" className="settings-group-heading">

@@ -13,6 +13,7 @@ import {
   setOnboardingResumeStep,
   subscribeToOnboardingComplete,
 } from "../lib/onboarding";
+import { TELEMETRY_INFO_URL } from "../lib/p3a";
 import type { AccountStatus, RecordingSourceReadinessDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
@@ -22,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   openPrivacySettings: vi.fn(),
   setDictationLanguage: vi.fn(),
   setDictationShortcut: vi.fn(),
+  setP3aEnabled: vi.fn(),
+  p3aRecord: vi.fn(),
   osAccountsLogin: vi.fn(),
   juneOpenCommunityPage: vi.fn(),
   juneOpenVerifyPage: vi.fn(),
@@ -37,6 +40,8 @@ vi.mock("../lib/tauri", () => ({
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationLanguage: mocks.setDictationLanguage,
   setDictationShortcut: mocks.setDictationShortcut,
+  setP3aEnabled: mocks.setP3aEnabled,
+  p3aRecord: mocks.p3aRecord,
   osAccountsLogin: mocks.osAccountsLogin,
   juneOpenCommunityPage: mocks.juneOpenCommunityPage,
   juneOpenVerifyPage: mocks.juneOpenVerifyPage,
@@ -144,6 +149,16 @@ describe("OnboardingFlow", () => {
     mocks.osAccountsOpenPortal.mockResolvedValue(undefined);
     mocks.setDictationLanguage.mockResolvedValue(undefined);
     mocks.setDictationShortcut.mockResolvedValue(undefined);
+    mocks.setP3aEnabled.mockImplementation((enabled: boolean) =>
+      Promise.resolve({
+        settings: {
+          enabled,
+          consentVersion: 1,
+          consentedAtWeek: enabled ? "2026-W28" : null,
+        },
+      }),
+    );
+    mocks.p3aRecord.mockResolvedValue(undefined);
     mocks.dictationSettings.mockResolvedValue({
       settings: {
         pushToTalkShortcut: shortcut("fn"),
@@ -166,6 +181,8 @@ describe("OnboardingFlow", () => {
 
   async function renderFlow(onComplete = vi.fn()) {
     render(<OnboardingFlow {...flowProps({ onComplete })} />);
+    await screen.findByRole("heading", { name: "Share anonymous usage statistics?" });
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Let June listen and type" });
     return onComplete;
   }
@@ -225,8 +242,40 @@ describe("OnboardingFlow", () => {
     await user.click(screen.getByRole("button", { name: "Start using June" }));
 
     expect(onComplete).toHaveBeenCalledOnce();
+    expect(mocks.p3aRecord).toHaveBeenCalledWith("onboarding.completed");
     // Completion is the caller's job (App marks it), not the flow's.
     expect(isOnboardingComplete()).toBe(false);
+  });
+
+  it("keeps anonymous usage statistics off by default", async () => {
+    render(<OnboardingFlow {...flowProps()} />);
+
+    await screen.findByRole("heading", { name: "Share anonymous usage statistics?" });
+    expect(screen.queryByText("See exactly what is shared")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Learn how it works" })).toHaveAttribute(
+      "href",
+      TELEMETRY_INFO_URL,
+    );
+    expect(
+      screen.getByRole("switch", { name: "Share anonymous usage statistics" }),
+    ).toHaveAttribute("aria-checked", "false");
+
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(mocks.setP3aEnabled).toHaveBeenCalledWith(false);
+    await screen.findByRole("heading", { name: "Let June listen and type" });
+  });
+
+  it("saves anonymous usage statistics consent when selected", async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow {...flowProps()} />);
+
+    await screen.findByRole("heading", { name: "Share anonymous usage statistics?" });
+    await user.click(screen.getByRole("switch", { name: "Share anonymous usage statistics" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(mocks.setP3aEnabled).toHaveBeenCalledWith(true);
+    await screen.findByRole("heading", { name: "Let June listen and type" });
   });
 
   async function walkToPractice(user: ReturnType<typeof userEvent.setup>) {
@@ -443,6 +492,8 @@ describe("OnboardingFlow", () => {
   it("does not ask unsubscribed users for a card during onboarding", async () => {
     const user = userEvent.setup();
     render(<OnboardingFlow {...flowProps({ account: unsubscribedAccount })} />);
+    await screen.findByRole("heading", { name: "Share anonymous usage statistics?" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Let June listen and type" });
 
     grantPermissions();
