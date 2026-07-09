@@ -301,7 +301,7 @@ const SETTINGS_SIDEBAR_GROUPS: {
       },
       {
         id: "profile-builder",
-        label: "Profile builder",
+        label: "Profiles",
         icon: <IconMagicWand size={16} />,
       },
       {
@@ -335,7 +335,6 @@ export const HIDDEN_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set<SettingsTa
   "taps",
   "toolsets",
   "bundles",
-  "profile-builder",
   "integrations-health",
   "import-export",
 ]);
