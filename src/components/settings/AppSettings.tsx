@@ -21,6 +21,7 @@ import {
   juneOpenCommunityPage,
   juneOpenVerifyPage,
   clearVeniceApiKey,
+  hermesBridgeStatus,
   saveLocalGenerationSettings,
   setLocalGenerationEnabled,
   probeLocalGenerationEndpoint,
@@ -115,6 +116,13 @@ import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
 import { PrivacySettingsSection } from "./PrivacySettingsSection";
+import { useActiveHermesProfileName } from "../../lib/active-hermes-profile";
+import {
+  DEFAULT_HERMES_PROFILE,
+  adminTargetForMode,
+  createHermesAdminClient,
+  createRustAdminFetch,
+} from "../../lib/hermes-admin";
 
 const THEME_OPTIONS: readonly {
   value: ThemePreference;
@@ -222,6 +230,42 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   imageSafeMode: true,
   imageSafeModePromptDismissed: false,
 };
+
+type ProviderModelSettingsSnapshot = {
+  settings: ProviderModelSettingsDto;
+  effectiveSettings?: ProviderModelSettingsDto;
+};
+
+function mergeProviderModelSettings(settings?: Partial<ProviderModelSettingsDto>) {
+  return {
+    ...DEFAULT_PROVIDER_MODELS,
+    ...settings,
+  };
+}
+
+function providerModelSettingsSnapshot(response: ProviderModelSettingsSnapshot) {
+  const settings = mergeProviderModelSettings(response.settings);
+  return {
+    settings,
+    effectiveSettings: mergeProviderModelSettings(response.effectiveSettings ?? response.settings),
+  };
+}
+
+async function activeProfileTextModel(profileName: string): Promise<string | undefined> {
+  const status = await hermesBridgeStatus();
+  const target =
+    adminTargetForMode(status, "sandboxed", profileName) ??
+    adminTargetForMode(status, "unrestricted", profileName);
+  if (!target) return undefined;
+  const client = createHermesAdminClient(target, {
+    fetch: createRustAdminFetch(target.mode),
+  });
+  const profiles = await client.profiles.list();
+  const normalized = profileName.trim().toLowerCase();
+  return profiles
+    .find((profile) => profile.name.trim().toLowerCase() === normalized)
+    ?.model?.trim();
+}
 
 const MIC_TEST_DURATION_SECONDS = 5;
 
@@ -370,9 +414,15 @@ export function AppSettings({
   const [settings, setSettings] = useState<DictationSettingsDto>(DEFAULT_SETTINGS);
   const [providerSettings, setProviderSettings] =
     useState<ProviderModelSettingsDto>(DEFAULT_PROVIDER_MODELS);
+  const [effectiveProviderSettings, setEffectiveProviderSettings] =
+    useState<ProviderModelSettingsDto>(DEFAULT_PROVIDER_MODELS);
+  const providerSettingsProfileRef = useRef<string | null>(null);
   const [localGenerationDraft, setLocalGenerationDraft] = useState<LocalGenerationSettingsDto>(
     DEFAULT_PROVIDER_MODELS.localGeneration,
   );
+  const activeProfileName = useActiveHermesProfileName();
+  const showingActiveProfileModels = activeProfileName !== DEFAULT_HERMES_PROFILE;
+  const [activeProfileGenerationModel, setActiveProfileGenerationModel] = useState<string>();
   // Model ids returned by the last successful "Test connection" probe, used to
   // populate the Model ID field's datalist (free text is still allowed).
   const [localProbeModels, setLocalProbeModels] = useState<string[]>([]);
@@ -578,10 +628,10 @@ export function AppSettings({
         if (cancelled) return;
         // Merge over defaults so a settings payload that predates a field
         // (e.g. imageModel from an older backend) still has every model set.
-        setProviderSettings({
-          ...DEFAULT_PROVIDER_MODELS,
-          ...modelResponse.settings,
-        });
+        const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
+        setProviderSettings(modelSnapshot.settings);
+        setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
+        providerSettingsProfileRef.current = activeProfileName;
         await requestMicrophones();
         await Promise.all([
           requestVeniceModels("transcription"),
@@ -608,6 +658,57 @@ export function AppSettings({
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      providerSettingsProfileRef.current === null ||
+      providerSettingsProfileRef.current === activeProfileName
+    ) {
+      return;
+    }
+    let cancelled = false;
+
+    async function refreshProviderModelsForProfile() {
+      try {
+        const modelResponse = await providerModelSettings();
+        if (cancelled) return;
+        const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
+        setProviderSettings(modelSnapshot.settings);
+        setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
+        providerSettingsProfileRef.current = activeProfileName;
+      } catch (error) {
+        if (!cancelled) setStatus(messageFromError(error));
+      }
+    }
+
+    void refreshProviderModelsForProfile();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProfileName]);
+
+  useEffect(() => {
+    if (!showingActiveProfileModels) {
+      setActiveProfileGenerationModel(undefined);
+      return;
+    }
+    let cancelled = false;
+    setActiveProfileGenerationModel(undefined);
+
+    async function loadActiveProfileTextModel() {
+      try {
+        const model = await activeProfileTextModel(activeProfileName);
+        if (!cancelled) setActiveProfileGenerationModel(model);
+      } catch {
+        if (!cancelled) setActiveProfileGenerationModel(undefined);
+      }
+    }
+
+    void loadActiveProfileTextModel();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProfileName, showingActiveProfileModels]);
 
   useEffect(() => {
     if (!micOpen) return;
@@ -894,9 +995,11 @@ export function AppSettings({
   }
 
   async function selectVeniceModel(mode: ProviderModelMode, modelId: string) {
+    if (showingActiveProfileModels) return;
     try {
       const next = await setVeniceModel(mode, modelId);
       setProviderSettings(next);
+      setEffectiveProviderSettings(next);
       dispatchProviderModelSettingsChanged({ mode, modelId });
       setStatus(
         mode === "transcription"
@@ -917,6 +1020,10 @@ export function AppSettings({
   }
 
   function selectModelFromPicker(mode: ProviderModelMode, modelId: string) {
+    if (showingActiveProfileModels) {
+      closeModelPicker();
+      return;
+    }
     const picked = modelOptionsForMode(mode).find((model) => model.id === modelId);
     if (mode === "generation" && picked?.provider === "local") {
       enableLocalGenerationFromPicker();
@@ -1136,9 +1243,12 @@ export function AppSettings({
     0,
     LANGUAGE_OPTIONS.findIndex((option) => option.value === (settings.language ?? "")),
   );
+  const displayProviderSettings = showingActiveProfileModels
+    ? effectiveProviderSettings
+    : providerSettings;
   const transcriptionOptions = modelOptions(
     veniceModels.transcription,
-    providerSettings.transcriptionModel,
+    displayProviderSettings.transcriptionModel,
   );
   const localModelEnabled = providerSettings.generationProvider === "local";
   const generationCatalog = useMemo(
@@ -1155,7 +1265,7 @@ export function AppSettings({
   // model when clicked.
   const generationOptions = modelOptions(generationCatalog, modelValueForMode("generation"));
   const imageOptions = IMAGE_GENERATION_ENABLED
-    ? modelOptions(imageModelCatalog(), providerSettings.imageModel)
+    ? modelOptions(imageModelCatalog(), displayProviderSettings.imageModel)
     : [];
   const localDraftBaseUrl = localGenerationDraft.baseUrl.trim();
   const localNonLoopback = localDraftBaseUrl.length > 0 && !isLoopbackUrl(localDraftBaseUrl);
@@ -1180,6 +1290,10 @@ export function AppSettings({
       setLocalModelSetupVisible(true);
     }
   }, [localModelEnabled]);
+
+  useEffect(() => {
+    if (showingActiveProfileModels) closeModelPicker();
+  }, [showingActiveProfileModels]);
 
   useEffect(() => {
     if (!pickerMode) return;
@@ -1252,8 +1366,15 @@ export function AppSettings({
   }
 
   function modelValueForMode(mode: ProviderModelMode) {
-    if (mode === "transcription") return providerSettings.transcriptionModel;
-    if (mode === "image") return providerSettings.imageModel;
+    if (mode === "transcription") return displayProviderSettings.transcriptionModel;
+    if (mode === "image") return displayProviderSettings.imageModel;
+    if (showingActiveProfileModels) {
+      return activeProfileGenerationModel ?? globalGenerationModelValue();
+    }
+    return globalGenerationModelValue();
+  }
+
+  function globalGenerationModelValue() {
     if (localModelEnabled && providerSettings.localGeneration.modelId.trim()) {
       return localGenerationOptionId(providerSettings.localGeneration.modelId);
     }
@@ -1261,6 +1382,7 @@ export function AppSettings({
   }
 
   function openModelPicker(mode: ProviderModelMode) {
+    if (showingActiveProfileModels) return;
     if (mode === "image" && !IMAGE_GENERATION_ENABLED) return;
     setPickerMode(mode);
     setModelPickerFlyout(null);
@@ -1690,13 +1812,19 @@ export function AppSettings({
               <h2 id="models-heading" className="settings-group-heading">
                 AI models
               </h2>
+              {showingActiveProfileModels ? (
+                <p className="settings-models-profile-note">
+                  Showing models for the active profile: {activeProfileName}. Switch to the default
+                  profile to edit global models.
+                </p>
+              ) : null}
               <div className="settings-card settings-models-card">
                 <div className="settings-rows">
                   <ModelRow
                     mode="transcription"
                     title="Transcription"
                     description="Speech-to-text for note recordings and dictation."
-                    value={providerSettings.transcriptionModel}
+                    value={modelValueForMode("transcription")}
                     options={transcriptionOptions}
                     open={pickerMode === "transcription"}
                     flyout={modelPickerFlyout}
@@ -1712,6 +1840,7 @@ export function AppSettings({
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
                     onSelect={(modelId) => selectModelFromPicker("transcription", modelId)}
+                    readOnly={showingActiveProfileModels}
                   />
                   <ModelRow
                     mode="generation"
@@ -1733,13 +1862,14 @@ export function AppSettings({
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
                     onSelect={(modelId) => selectModelFromPicker("generation", modelId)}
+                    readOnly={showingActiveProfileModels}
                   />
                   {IMAGE_GENERATION_ENABLED ? (
                     <ModelRow
                       mode="image"
                       title="Image"
                       description="Used when you generate an image from chat."
-                      value={providerSettings.imageModel}
+                      value={modelValueForMode("image")}
                       options={imageOptions}
                       open={pickerMode === "image"}
                       flyout={modelPickerFlyout}
@@ -1753,6 +1883,7 @@ export function AppSettings({
                       onFlyoutChange={setModelPickerFlyout}
                       onSearchChange={setModelSearch}
                       onSelect={(modelId) => selectModelFromPicker("image", modelId)}
+                      readOnly={showingActiveProfileModels}
                     />
                   ) : null}
                   <button
@@ -2361,6 +2492,7 @@ function ModelRow({
   onFlyoutChange,
   onSearchChange,
   onSelect,
+  readOnly = false,
 }: {
   mode: ProviderModelMode;
   title: string;
@@ -2377,6 +2509,7 @@ function ModelRow({
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
   onSelect: (modelId: string) => void;
+  readOnly?: boolean;
 }) {
   const model = selectedModel(options, value);
   const modelLabel = `${title.toLowerCase()} model`;
@@ -2395,13 +2528,14 @@ function ModelRow({
           suppressed={open}
         >
           <button
-            ref={open ? triggerRef : undefined}
+            ref={open && !readOnly ? triggerRef : undefined}
             type="button"
             className="model-summary-button"
-            onClick={onToggle}
+            onClick={readOnly ? undefined : onToggle}
             aria-label={`Change ${modelLabel}`}
             aria-haspopup="dialog"
-            aria-expanded={open}
+            aria-expanded={readOnly ? false : open}
+            disabled={readOnly}
           >
             <span className="model-summary-logo" aria-hidden>
               <ProviderLogo provider={model.provider} id={model.id} name={model.name} />
@@ -2410,7 +2544,7 @@ function ModelRow({
             <IconChevronDownSmall size={14} aria-hidden />
           </button>
         </HoverTip>
-        {open ? (
+        {open && !readOnly ? (
           <ModelPickerPopover
             mode={mode}
             flyout={flyout}
