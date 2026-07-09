@@ -93,13 +93,15 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
   }, []);
 
   const requiredScopes = template?.connectorScopes;
+  // The routine runs against the first connected account (triggerAccountId
+  // below, and the bridge registers the same account for its MCP servers), so
+  // the scope gate must check that exact account. Checking "any account" would
+  // enable Create while the routine still polls/calls Google with an account
+  // that lacks the scope, silently missing triggers or failing on scope errors.
   const connectedAccount = (accounts ?? []).find((account) => account.status === "connected");
   const scopeGateSatisfied =
     !requiredScopes ||
-    (accounts ?? []).some(
-      (account) =>
-        account.status === "connected" && scopesCoverBundles(account.scopes, requiredScopes),
-    );
+    (connectedAccount != null && scopesCoverBundles(connectedAccount.scopes, requiredScopes));
   const eventGateSatisfied = trigger.source === "schedule" || Boolean(connectedAccount);
   const blocked = !scopeGateSatisfied || !eventGateSatisfied;
 

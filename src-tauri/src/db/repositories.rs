@@ -5,7 +5,7 @@ use crate::domain::types::{
     ListDictationHistoryResponse, ListNotesResponse, NoteDto, NoteListItemDto, ProcessingStatus,
     RecordingSourceMode, RecordingState, SessionFolderDto, TranscriptCoverageDto, TranscriptDto,
 };
-use chrono::{Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sqlx::query::query;
 use sqlx::row::Row;
 use sqlx_sqlite::SqlitePool;
@@ -51,6 +51,10 @@ pub struct RoutineTrustRecord {
     pub trust_mode: String,
     pub approval_run_count: i64,
     pub autonomous_tools: Vec<String>,
+    /// When the routine most recently entered approval mode (RFC 3339), or
+    /// `None` if it has never been in approval mode. Approval-run crediting
+    /// only counts runs that finished at or after this instant.
+    pub approval_since: Option<String>,
     pub updated_at: String,
 }
 
@@ -321,7 +325,7 @@ impl Repositories {
         job_id: &str,
     ) -> Result<Option<RoutineTrustRecord>, sqlx::error::Error> {
         let row = query(
-            "SELECT job_id, trust_mode, approval_run_count, autonomous_tools, updated_at
+            "SELECT job_id, trust_mode, approval_run_count, autonomous_tools, approval_since, updated_at
              FROM routine_trust WHERE job_id = ?",
         )
         .bind(job_id)
@@ -340,17 +344,38 @@ impl Repositories {
     ) -> Result<RoutineTrustRecord, sqlx::error::Error> {
         let now = timestamp();
         let tools_json = string_vec_to_json(autonomous_tools);
+        let existing = self.routine_trust_get(job_id).await?;
+        // Stamp the approval window when the routine enters approval mode. An
+        // already-approval routine keeps its original stamp so re-affirming the
+        // mode does not restart the earned-autonomy count; leaving approval
+        // preserves the last stamp but it goes unused until approval returns.
+        let approval_since = if trust_mode == "approval" {
+            match &existing {
+                Some(record)
+                    if record.trust_mode == "approval" && record.approval_since.is_some() =>
+                {
+                    record.approval_since.clone()
+                }
+                _ => Some(now.clone()),
+            }
+        } else {
+            existing
+                .as_ref()
+                .and_then(|record| record.approval_since.clone())
+        };
         query(
-            "INSERT INTO routine_trust (job_id, trust_mode, approval_run_count, autonomous_tools, updated_at)
-             VALUES (?, ?, 0, ?, ?)
+            "INSERT INTO routine_trust (job_id, trust_mode, approval_run_count, autonomous_tools, approval_since, updated_at)
+             VALUES (?, ?, 0, ?, ?, ?)
              ON CONFLICT(job_id) DO UPDATE SET
                trust_mode = excluded.trust_mode,
                autonomous_tools = excluded.autonomous_tools,
+               approval_since = excluded.approval_since,
                updated_at = excluded.updated_at",
         )
         .bind(job_id)
         .bind(trust_mode)
         .bind(&tools_json)
+        .bind(&approval_since)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -359,27 +384,56 @@ impl Repositories {
             .ok_or(sqlx::Error::RowNotFound)
     }
 
-    /// Record a completed approval-mode run; the counter is what earns a
-    /// routine the right to go autonomous.
-    pub async fn routine_trust_record_run(
+    /// Credits one completed approval-mode run toward the autonomy threshold,
+    /// exactly once per `(job_id, run_id)`. A run counts only when the routine
+    /// is currently in approval mode and the run finished at or after the
+    /// routine entered that mode, so background runs still count on the next
+    /// observation while earlier read-only runs never do. Returns the current
+    /// trust record (updated when newly credited), or `None` when the routine
+    /// has no trust row.
+    pub async fn record_approval_run(
         &self,
         job_id: &str,
-    ) -> Result<RoutineTrustRecord, sqlx::error::Error> {
+        run_id: &str,
+        run_ended_at: &str,
+    ) -> Result<Option<RoutineTrustRecord>, sqlx::error::Error> {
+        let Some(record) = self.routine_trust_get(job_id).await? else {
+            return Ok(None);
+        };
+        if record.trust_mode != "approval" {
+            return Ok(Some(record));
+        }
+        if let Some(since) = &record.approval_since {
+            if run_finished_before(run_ended_at, since) {
+                return Ok(Some(record));
+            }
+        }
         let now = timestamp();
-        query(
-            "INSERT INTO routine_trust (job_id, trust_mode, approval_run_count, autonomous_tools, updated_at)
-             VALUES (?, 'approval', 1, '[]', ?)
-             ON CONFLICT(job_id) DO UPDATE SET
-               approval_run_count = approval_run_count + 1,
-               updated_at = excluded.updated_at",
+        let mut tx = self.pool.begin().await?;
+        let inserted = query(
+            "INSERT OR IGNORE INTO connector_credited_runs (job_id, run_id, created_at)
+             VALUES (?, ?, ?)",
         )
         .bind(job_id)
+        .bind(run_id)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        self.routine_trust_get(job_id)
-            .await?
-            .ok_or(sqlx::Error::RowNotFound)
+        if inserted.rows_affected() == 0 {
+            // Already credited on an earlier observation; leave the count as is.
+            tx.commit().await?;
+            return Ok(Some(record));
+        }
+        query(
+            "UPDATE routine_trust SET approval_run_count = approval_run_count + 1, updated_at = ?
+             WHERE job_id = ?",
+        )
+        .bind(&now)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.routine_trust_get(job_id).await
     }
 
     pub async fn list_connector_triggers(
@@ -579,6 +633,41 @@ impl Repositories {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Remove every connector row keyed to a routine when the routine itself is
+    /// deleted: its triggers (so the poller stops firing a missing job), its
+    /// per-job event cursor, its trust row and credited-run ledger, and its
+    /// autonomy grants (so a deleted routine can never keep an auto MCP server
+    /// or a live grant token). Email cursors are per account, not per job, so
+    /// they are left for the account's own lifecycle.
+    pub async fn delete_routine_connector_state(
+        &self,
+        job_id: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        let event_cursor_kind = format!("event_upcoming:{job_id}");
+        let mut tx = self.pool.begin().await?;
+        query("DELETE FROM connector_triggers WHERE job_id = ?")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+        query("DELETE FROM trigger_cursors WHERE kind = ?")
+            .bind(&event_cursor_kind)
+            .execute(&mut *tx)
+            .await?;
+        query("DELETE FROM connector_grants WHERE job_id = ?")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+        query("DELETE FROM connector_credited_runs WHERE job_id = ?")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+        query("DELETE FROM routine_trust WHERE job_id = ?")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
     }
 
     pub async fn list_folders(&self) -> Result<Vec<FolderDto>, sqlx::error::Error> {
@@ -3228,6 +3317,19 @@ pub fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// True when `run_ended_at` is strictly before `approval_since`. Unparseable
+/// timestamps are treated as "not before" so a formatting quirk never silently
+/// drops a run from the earned-autonomy count.
+fn run_finished_before(run_ended_at: &str, approval_since: &str) -> bool {
+    match (
+        DateTime::parse_from_rfc3339(run_ended_at),
+        DateTime::parse_from_rfc3339(approval_since),
+    ) {
+        (Ok(ended), Ok(since)) => ended < since,
+        _ => false,
+    }
+}
+
 fn string_vec_to_json(values: &[String]) -> String {
     serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
 }
@@ -3254,6 +3356,7 @@ fn routine_trust_from_row(row: sqlx_sqlite::SqliteRow) -> RoutineTrustRecord {
         trust_mode: row.get("trust_mode"),
         approval_run_count: row.get("approval_run_count"),
         autonomous_tools: string_vec_from_json(&row.get::<String, _>("autonomous_tools")),
+        approval_since: row.get::<Option<String>, _>("approval_since"),
         updated_at: row.get("updated_at"),
     }
 }
@@ -3534,25 +3637,46 @@ mod tests {
             .is_empty());
     }
 
+    // Far enough ahead that a recorded run always lands after the approval
+    // window that a test opens moments earlier.
+    const FUTURE_RUN_END: &str = "2999-01-01T00:00:00.000Z";
+
     #[tokio::test]
     async fn routine_trust_counts_runs_and_preserves_them_across_set() {
         let repos = test_repositories().await;
+        // No trust row yet: recording a run is a no-op.
         assert!(repos
-            .routine_trust_get("job-1")
+            .record_approval_run("job-1", "run-0", FUTURE_RUN_END)
             .await
-            .expect("get")
+            .expect("record with no row")
             .is_none());
 
-        // Runs recorded before any explicit trust setting default to approval.
+        // Entering approval opens the crediting window.
         let record = repos
-            .routine_trust_record_run("job-1")
+            .routine_trust_set("job-1", "approval", &[])
             .await
-            .expect("record run");
+            .expect("set approval");
         assert_eq!(record.trust_mode, "approval");
-        assert_eq!(record.approval_run_count, 1);
-        repos.routine_trust_record_run("job-1").await.expect("run");
-        let record = repos.routine_trust_record_run("job-1").await.expect("run");
-        assert_eq!(record.approval_run_count, 3);
+        assert_eq!(record.approval_run_count, 0);
+        assert!(record.approval_since.is_some());
+
+        // Three distinct runs each count once.
+        for (index, run_id) in ["run-1", "run-2", "run-3"].iter().enumerate() {
+            let credited = repos
+                .record_approval_run("job-1", run_id, FUTURE_RUN_END)
+                .await
+                .expect("record run")
+                .expect("row exists");
+            assert_eq!(credited.approval_run_count, (index + 1) as i64);
+        }
+
+        // Re-reporting a counted run never double counts.
+        let again = repos
+            .record_approval_run("job-1", "run-3", FUTURE_RUN_END)
+            .await
+            .expect("record dup")
+            .expect("row");
+        assert_eq!(again.approval_run_count, 3);
 
         // Changing the mode keeps the earned run count.
         let record = repos
@@ -3569,6 +3693,121 @@ mod tests {
             record.autonomous_tools,
             scopes(&["gmail.create_draft", "gmail.modify_labels"])
         );
+    }
+
+    #[tokio::test]
+    async fn record_approval_run_gates_on_mode_and_window() {
+        let repos = test_repositories().await;
+        // A read-only routine never earns approval credit.
+        repos
+            .routine_trust_set("job-1", "read_only", &[])
+            .await
+            .expect("set read_only");
+        let record = repos
+            .record_approval_run("job-1", "run-1", FUTURE_RUN_END)
+            .await
+            .expect("record read_only")
+            .expect("row");
+        assert_eq!(record.approval_run_count, 0);
+
+        // Switching to approval opens the window at "now".
+        repos
+            .routine_trust_set("job-1", "approval", &[])
+            .await
+            .expect("set approval");
+
+        // A run that finished long before the window does not count.
+        let before = repos
+            .record_approval_run("job-1", "old-run", "2000-01-01T00:00:00.000Z")
+            .await
+            .expect("record old")
+            .expect("row");
+        assert_eq!(before.approval_run_count, 0);
+
+        // A run after the window counts.
+        let after = repos
+            .record_approval_run("job-1", "new-run", FUTURE_RUN_END)
+            .await
+            .expect("record new")
+            .expect("row");
+        assert_eq!(after.approval_run_count, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_routine_connector_state_clears_all_job_rows() {
+        let repos = test_repositories().await;
+        repos
+            .upsert_connector_account(
+                "user@example.com",
+                "google",
+                "user@example.com",
+                &scopes(&["openid"]),
+                "connected",
+            )
+            .await
+            .expect("account");
+        repos
+            .set_connector_trigger("job-1", "event_upcoming", "user@example.com", "{}")
+            .await
+            .expect("trigger");
+        repos
+            .set_trigger_cursor("user@example.com", "event_upcoming:job-1", "{}")
+            .await
+            .expect("cursor");
+        repos
+            .routine_trust_set("job-1", "approval", &[])
+            .await
+            .expect("trust");
+        repos
+            .record_approval_run("job-1", "run-1", FUTURE_RUN_END)
+            .await
+            .expect("run");
+        repos
+            .set_connector_grant(
+                &super::ConnectorGrant {
+                    job_id: "job-1".to_string(),
+                    provider: "gmail".to_string(),
+                    server_name: "june_gmail_auto_job1".to_string(),
+                    token: "tok".to_string(),
+                    tools: scopes(&["send_email"]),
+                    account_id: "user@example.com".to_string(),
+                },
+                "2026-07-09T00:00:00.000Z",
+            )
+            .await
+            .expect("grant");
+
+        repos
+            .delete_routine_connector_state("job-1")
+            .await
+            .expect("delete state");
+
+        assert!(repos
+            .list_connector_triggers(Some("job-1"))
+            .await
+            .expect("triggers")
+            .is_empty());
+        assert!(repos
+            .trigger_cursor("user@example.com", "event_upcoming:job-1")
+            .await
+            .expect("cursor")
+            .is_none());
+        assert!(repos
+            .routine_trust_get("job-1")
+            .await
+            .expect("trust")
+            .is_none());
+        assert!(repos
+            .list_connector_grants()
+            .await
+            .expect("grants")
+            .is_empty());
+        // The account itself survives; only the per-job rows are cleared.
+        assert!(repos
+            .get_connector_account("user@example.com")
+            .await
+            .expect("account")
+            .is_some());
     }
 
     #[tokio::test]

@@ -45,7 +45,6 @@ import { compactScheduleLabel, humanizeSchedule } from "../../lib/routine-schedu
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import {
   connectorTriggerSet,
-  routineTrustGet,
   routineTrustRecordRun,
   routineTrustSet,
   type HermesSessionInfo,
@@ -62,62 +61,32 @@ const NO_ROUTINES: RoutineJob[] = [];
 const NO_RUNS: HermesSessionInfo[] = [];
 const RUN_HISTORY_REFRESH_MS = 10000;
 
-// Session ids already counted toward earned autonomy, so a run is credited
-// once even though the history is re-polled every few seconds. Capped well
-// above the run-history window so ids never fall out and get re-credited.
-const CREDITED_RUNS_KEY = "connector-credited-run-ids";
-const CREDITED_RUNS_CAP = 500;
-
-function readCreditedRuns(): { set: Set<string>; seeded: boolean } {
-  try {
-    const raw = window.localStorage.getItem(CREDITED_RUNS_KEY);
-    if (raw === null) return { set: new Set(), seeded: false };
-    return { set: new Set(JSON.parse(raw) as string[]), seeded: true };
-  } catch {
-    return { set: new Set(), seeded: false };
-  }
-}
-
-function writeCreditedRuns(set: Set<string>): void {
-  try {
-    const ids = [...set].slice(-CREDITED_RUNS_CAP);
-    window.localStorage.setItem(CREDITED_RUNS_KEY, JSON.stringify(ids));
-  } catch {
-    // Non-fatal: crediting simply retries on the next run-history refresh.
-  }
-}
-
 /**
- * Advances the earned-autonomy counter: for each newly finished run of a
- * routine currently in the approval trust mode, records one approval-mode run
- * so autonomy can unlock after the threshold. The very first observation seeds
- * a baseline (existing runs are not credited retroactively), so counting
- * begins from when the routine is first watched with this build. Best-effort:
- * a failure just retries on the next poll.
+ * Advances the earned-autonomy counter by reporting each finished run to the
+ * backend, which credits it exactly once and only when the routine is in
+ * approval mode with the run finishing after approval was enabled. Reporting
+ * every finished run (rather than seeding a client-side baseline) is what lets
+ * background runs that completed while this view was closed still count on the
+ * next visit. Best-effort: a failure just retries on the next refresh.
+ *
+ * `reported` is a per-mount chatter guard so the 10s refresh does not re-report
+ * the same run repeatedly; the backend is the durable, idempotent ledger, so a
+ * fresh mount re-reporting a run is harmless.
  */
-async function creditApprovalRuns(runs: HermesSessionInfo[]): Promise<void> {
-  const finished = runs.filter(isCreditableRun);
-  const { set, seeded } = readCreditedRuns();
-  if (!seeded) {
-    for (const run of finished) set.add(run.id);
-    writeCreditedRuns(set);
-    return;
-  }
-  const fresh = finished.filter((run) => !set.has(run.id));
-  if (fresh.length === 0) return;
-  for (const run of fresh) {
-    set.add(run.id);
+async function creditApprovalRuns(runs: HermesSessionInfo[], reported: Set<string>): Promise<void> {
+  for (const run of runs.filter(isCreditableRun)) {
+    if (reported.has(run.id)) continue;
     const jobId = scheduledRunJobId(run.id);
-    if (!jobId) continue;
+    const runEndedAt = run.ended_at ?? run.endedAt ?? null;
+    if (!jobId || !runEndedAt) continue;
+    reported.add(run.id);
     try {
-      const trust = await routineTrustGet(jobId);
-      if (trust?.trustMode === "approval") await routineTrustRecordRun(jobId);
+      await routineTrustRecordRun({ jobId, runId: run.id, runEndedAt });
     } catch {
-      // Leave the id marked so a transient trust-read error does not double
-      // count later; the run still completed.
+      // Let a transient failure retry on the next refresh.
+      reported.delete(run.id);
     }
   }
-  writeCreditedRuns(set);
 }
 
 type RoutinesViewProps = {
@@ -158,6 +127,9 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
   const [allRuns, setRuns] = useState<HermesSessionInfo[]>([]);
   const [runsUnavailableState, setRunsUnavailable] = useState(false);
   const runLoadSequenceRef = useRef(0);
+  // Run ids already reported for crediting this mount; the backend is the
+  // durable idempotent ledger, this just avoids re-reporting on every refresh.
+  const reportedRunsRef = useRef<Set<string>>(new Set());
 
   // __emptyStates() preview (dev console): render the page as a fresh
   // install would see it, real data untouched underneath.
@@ -200,7 +172,7 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
       if (runLoadSequenceRef.current !== sequence) return;
       setRuns(nextRuns);
       setRunsUnavailable(false);
-      void creditApprovalRuns(nextRuns);
+      void creditApprovalRuns(nextRuns, reportedRunsRef.current);
     } catch {
       if (runLoadSequenceRef.current !== sequence) return;
       setRunsUnavailable(true);

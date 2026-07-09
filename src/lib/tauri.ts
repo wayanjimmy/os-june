@@ -2031,8 +2031,22 @@ export async function routineTrustSet(input: {
   });
 }
 
-export async function routineTrustRecordRun(jobId: string) {
-  return invoke<void>("routine_trust_record_run", { jobId });
+/** Credits a completed run toward the earned-autonomy threshold. Idempotent
+ * per run id and gated on the routine being in approval mode with the run
+ * finishing after approval was enabled, so it is safe to call for every
+ * finished run. Returns the updated record, or null when nothing was credited. */
+export async function routineTrustRecordRun(input: {
+  jobId: string;
+  runId: string;
+  runEndedAt: string;
+}) {
+  return invoke<RoutineTrust | null>("routine_trust_record_run", {
+    request: {
+      jobId: input.jobId,
+      runId: input.runId,
+      runEndedAt: input.runEndedAt,
+    },
+  });
 }
 
 export async function connectorTriggersList(jobId?: string) {

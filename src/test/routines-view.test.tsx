@@ -130,8 +130,7 @@ beforeEach(() => {
   tauriMocks.connectorsConnect.mockResolvedValue(googleAccount());
   tauriMocks.connectorsApplyRuntime.mockResolvedValue(undefined);
   tauriMocks.routineTrustGet.mockResolvedValue(null);
-  tauriMocks.routineTrustRecordRun.mockResolvedValue(undefined);
-  window.localStorage.removeItem("connector-credited-run-ids");
+  tauriMocks.routineTrustRecordRun.mockResolvedValue(null);
   tauriMocks.routineTrustSet.mockImplementation(
     async (input: { trustMode: string; autonomousTools?: string[] }) => ({
       trustMode: input.trustMode,
@@ -524,6 +523,32 @@ describe("RoutinesView connector templates", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Create" })).toBeEnabled());
   });
 
+  it("gates a template on the first connected account, not any account", async () => {
+    // The routine runs against the first connected account, so a later account
+    // holding the scopes must not enable Create while the first one lacks them.
+    tauriMocks.connectorsList.mockResolvedValue([
+      googleAccount({
+        accountId: "acc-first",
+        email: "first@example.com",
+        scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      }),
+      googleAccount({
+        accountId: "acc-second",
+        email: "second@example.com",
+      }),
+    ]);
+    mocks.listRoutines.mockResolvedValue([]);
+    renderView();
+    await screen.findByText("Morning briefing");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add Morning briefing" }));
+
+    // Morning briefing needs calendar read, which only the second account has,
+    // so Create stays blocked because the first account is the one that runs.
+    expect(await screen.findByText(/needs a connected Google account/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
+  });
+
   it("creates a scheduled connector routine with trust and an immediate first run", async () => {
     tauriMocks.connectorsList.mockResolvedValue([googleAccount()]);
     mocks.listRoutines.mockResolvedValueOnce([]);
@@ -593,16 +618,10 @@ describe("RoutinesView connector templates", () => {
     expect(mocks.triggerRoutine).not.toHaveBeenCalled();
   });
 
-  it("credits a finished approval-mode run toward earned autonomy", async () => {
-    // Baseline already seeded, so this run is fresh and gets counted.
-    window.localStorage.setItem("connector-credited-run-ids", "[]");
+  it("reports a finished run to the backend crediting path with its id and end time", async () => {
+    // The backend decides whether to credit (approval mode + after the window);
+    // the view just reports every finished run once, id and end time included.
     mocks.listRoutines.mockResolvedValue([job()]);
-    tauriMocks.routineTrustGet.mockResolvedValue({
-      trustMode: "approval",
-      approvalRunCount: 1,
-      autonomousTools: [],
-      autonomousServers: [],
-    });
     adapterMocks.listScheduledRunSessions.mockResolvedValue([
       {
         id: "cron_abc123_20260709_100000",
@@ -612,18 +631,17 @@ describe("RoutinesView connector templates", () => {
       },
     ]);
     renderView();
-    await waitFor(() => expect(tauriMocks.routineTrustRecordRun).toHaveBeenCalledWith("abc123"));
+    await waitFor(() =>
+      expect(tauriMocks.routineTrustRecordRun).toHaveBeenCalledWith({
+        jobId: "abc123",
+        runId: "cron_abc123_20260709_100000",
+        runEndedAt: "2026-07-09T10:05:00Z",
+      }),
+    );
   });
 
-  it("does not credit a still-running or failed run", async () => {
-    window.localStorage.setItem("connector-credited-run-ids", "[]");
+  it("does not report a still-running or failed run", async () => {
     mocks.listRoutines.mockResolvedValue([job()]);
-    tauriMocks.routineTrustGet.mockResolvedValue({
-      trustMode: "approval",
-      approvalRunCount: 0,
-      autonomousTools: [],
-      autonomousServers: [],
-    });
     adapterMocks.listScheduledRunSessions.mockResolvedValue([
       { id: "cron_abc123_20260709_090000", status: "running", active: true },
       { id: "cron_abc123_20260709_100000", status: "failed", ended_at: "2026-07-09T10:05:00Z" },

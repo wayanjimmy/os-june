@@ -159,17 +159,35 @@ pub async fn routine_trust_set(
     Ok(trust_dto(record, servers))
 }
 
-/// Called after an approval-mode run completes; increments the earned-run
-/// counter that unlocks autonomy.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineRunRecordRequest {
+    pub job_id: String,
+    /// The completed run's session id, used to credit each run exactly once.
+    pub run_id: String,
+    /// When the run finished (RFC 3339). Runs that finished before the routine
+    /// entered approval mode are ignored.
+    pub run_ended_at: String,
+}
+
+/// Called when a routine run completes; credits it toward the earned-autonomy
+/// counter exactly once. Returns `None` (a no-op) when the run is not
+/// approval-mode, predates the approval window, or was already counted, so the
+/// caller can fire this for every finished run without bookkeeping of its own.
 #[tauri::command]
 pub async fn routine_trust_record_run(
     app: tauri::AppHandle,
-    job_id: String,
-) -> Result<RoutineTrustDto, AppError> {
+    request: RoutineRunRecordRequest,
+) -> Result<Option<RoutineTrustDto>, AppError> {
     let repos = crate::commands::repositories(&app).await?;
-    let record = repos.routine_trust_record_run(&job_id).await?;
-    let servers = grant_server_names(&repos, &job_id).await?;
-    Ok(trust_dto(record, servers))
+    let Some(record) = repos
+        .record_approval_run(&request.job_id, &request.run_id, &request.run_ended_at)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let servers = grant_server_names(&repos, &request.job_id).await?;
+    Ok(Some(trust_dto(record, servers)))
 }
 
 /// Build the trust DTO from a persisted record plus its current auto-server

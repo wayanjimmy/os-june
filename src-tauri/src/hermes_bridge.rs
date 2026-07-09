@@ -2771,10 +2771,11 @@ pub async fn hermes_bridge_cron_job_action(
 
 #[tauri::command]
 pub async fn delete_hermes_bridge_cron_job(
+    app: AppHandle,
     bridge: State<'_, HermesBridge>,
     request: HermesCronJobRequest,
 ) -> Result<serde_json::Value, AppError> {
-    hermes_api_json(
+    let result = hermes_api_json(
         &bridge,
         reqwest::Method::DELETE,
         &format!(
@@ -2783,7 +2784,21 @@ pub async fn delete_hermes_bridge_cron_job(
         ),
         None,
     )
-    .await
+    .await?;
+    // A deleted routine must leave no connector footprint: drop its triggers,
+    // trust, credited runs, and autonomy grants so the poller stops firing a
+    // missing job and no auto MCP server or grant token outlives it. Best
+    // effort so a cleanup hiccup never blocks the delete the user asked for;
+    // the next config sync also prunes any orphaned MCP entries.
+    if let Ok(repos) = crate::commands::repositories(&app).await {
+        if let Err(error) = repos.delete_routine_connector_state(&request.job_id).await {
+            tracing::warn!(
+                error_code = %AppError::from(error).code,
+                "connector state cleanup after routine delete failed"
+            );
+        }
+    }
+    Ok(result)
 }
 
 /// Fires a routine by its job id through the cron `trigger` action, the same
@@ -7060,14 +7075,48 @@ fn merge_hermes_config(existing_path: &std::path::Path, rendered: &str) -> Strin
     let Ok(existing_text) = std::fs::read_to_string(existing_path) else {
         return rendered.to_string();
     };
-    let Ok(existing) = serde_yaml::from_str::<serde_yaml::Value>(&existing_text) else {
+    let Ok(mut existing) = serde_yaml::from_str::<serde_yaml::Value>(&existing_text) else {
         return rendered.to_string();
     };
     let Ok(overlay) = serde_yaml::from_str::<serde_yaml::Value>(rendered) else {
         return rendered.to_string();
     };
+    // Drop June-owned connector MCP entries from the existing config before
+    // merging. The overlay re-adds them only while the connector is active, so
+    // a disconnect (or a removed auto grant) renders none and the deep merge
+    // must not preserve the old june_gmail*/june_gcal*/per-job auto-server keys
+    // and keep exposing stale connector tools. User-added servers and June's
+    // always-rendered entries (june_context, june_web, ...) are untouched.
+    prune_connector_mcp_servers(&mut existing);
     let merged = deep_merge_yaml(existing, overlay);
     serde_yaml::to_string(&merged).unwrap_or_else(|_| rendered.to_string())
+}
+
+/// Removes June's connector MCP server entries (`june_gmail`, `june_gcal`,
+/// their `_actions` servers, and the per-job `june_gmail_auto_*` /
+/// `june_gcal_auto_*` servers) from a parsed config so a fresh render alone
+/// decides which, if any, still exist.
+fn prune_connector_mcp_servers(config: &mut serde_yaml::Value) {
+    let Some(mcp_servers) = config
+        .get_mut("mcp_servers")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+    mcp_servers.retain(|key, _| {
+        key.as_str()
+            .map(|name| !is_june_connector_server_name(name))
+            .unwrap_or(true)
+    });
+}
+
+/// True for every MCP server name June owns for connectors. The `_` prefixes
+/// cover both the `_actions` servers and the per-job `_auto_<jobid>` servers.
+fn is_june_connector_server_name(name: &str) -> bool {
+    name == JUNE_GMAIL_MCP_SERVER_NAME
+        || name == JUNE_GCAL_MCP_SERVER_NAME
+        || name.starts_with("june_gmail_")
+        || name.starts_with("june_gcal_")
 }
 
 /// Recursive overlay merge: mappings merge key by key (overlay wins on leaf
@@ -11733,6 +11782,71 @@ mcp_servers:
 
         std::fs::write(&missing, ": not yaml : [").expect("seed corrupt");
         assert_eq!(merge_hermes_config(&missing, rendered), rendered);
+    }
+
+    #[test]
+    fn merge_hermes_config_prunes_stale_connector_servers() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config_path = home.path().join("config.yaml");
+        // A prior spawn had a connected Google account and an autonomous
+        // routine, so config.yaml carries June's connector servers and a
+        // per-job auto server, next to a user-added server and June's context.
+        std::fs::write(
+            &config_path,
+            r#"mcp_servers:
+  june_context:
+    command: "/old/python"
+  june_gmail:
+    command: "/old/python"
+  june_gmail_actions:
+    command: "/old/python"
+  june_gcal:
+    command: "/old/python"
+  june_gcal_auto_ab12cd34:
+    command: "/old/python"
+  todoist:
+    url: "https://ai.todoist.net/mcp"
+"#,
+        )
+        .expect("seed config");
+
+        // The account is now disconnected: the render carries no connectors.
+        let rendered = render_hermes_config(
+            "m",
+            false,
+            "http://127.0.0.1:9/v1",
+            "t",
+            "recorder",
+            "connector",
+            "web",
+            &[],
+            BuiltinMcpConfigs {
+                context: Some(&test_june_context_mcp_config()),
+                web: None,
+                image: None,
+                video: None,
+                recorder: None,
+                gmail: None,
+                gmail_actions: None,
+                gcal: None,
+                gcal_actions: None,
+                connector_autos: &[],
+            },
+        );
+        let merged = merge_hermes_config(&config_path, &rendered);
+        let value: serde_yaml::Value = serde_yaml::from_str(&merged).expect("merged parses");
+
+        // Every stale June connector entry (base, actions, per-job auto) is gone.
+        assert!(value["mcp_servers"]["june_gmail"].is_null());
+        assert!(value["mcp_servers"]["june_gmail_actions"].is_null());
+        assert!(value["mcp_servers"]["june_gcal"].is_null());
+        assert!(value["mcp_servers"]["june_gcal_auto_ab12cd34"].is_null());
+        // The user server and June's always-rendered context server survive.
+        assert_eq!(
+            value["mcp_servers"]["todoist"]["url"],
+            "https://ai.todoist.net/mcp"
+        );
+        assert!(!value["mcp_servers"]["june_context"].is_null());
     }
 
     #[test]
