@@ -68,8 +68,8 @@ type ProfileBuilderSectionProps = {
 
 /**
  * June's native guided Profile Builder (spec 20). A five-step wizard that creates
- * an isolated Hermes profile with identity/SOUL, model/provider, skills, and MCP
- * servers, then optionally makes it active. It validates
+ * an isolated Hermes profile with name, instructions, model/provider, skills,
+ * and MCP servers, then optionally makes it active. It validates
  * the model's tool-calling capability before allowing creation, shows exactly
  * what files/config will change (with risk labels) on the review step, and
  * surfaces success/failure with rollback messaging.
@@ -267,8 +267,8 @@ function BuilderShell({
         title="Profiles"
         blurb={
           <>
-            Create a specialized profile with its own model, skills, MCP servers, and instructions.
-            A profile keeps June's identity unless you give it its own.{" "}
+            Create a profile with its own model, skills, MCP servers, and optional instructions.
+            Every profile presents as June.{" "}
             <ModeNote
               mode={mode}
               profile={profile}
@@ -709,7 +709,7 @@ function Footer({
 function StepBody({ state }: { state: ProfileBuilderState }) {
   switch (state.step) {
     case "identity":
-      return <IdentityStep state={state} />;
+      return <BasicsStep state={state} />;
     case "model":
       return <ModelStep state={state} />;
     case "skills":
@@ -721,7 +721,7 @@ function StepBody({ state }: { state: ProfileBuilderState }) {
   }
 }
 
-function IdentityStep({ state }: { state: ProfileBuilderState }) {
+function BasicsStep({ state }: { state: ProfileBuilderState }) {
   const { form } = state;
   const slug = slugifyProfileName(form.name);
   const nameError = validateProfileName(form.name, state.existingProfiles);
@@ -751,47 +751,18 @@ function IdentityStep({ state }: { state: ProfileBuilderState }) {
         />
       </label>
 
-      <fieldset className="profile-builder-fieldset">
-        <legend className="profile-builder-field-label">Identity</legend>
-        <label className="profile-builder-radio">
-          <input
-            type="radio"
-            name="identity"
-            checked={form.identity === "june-default"}
-            onChange={() => state.update({ identity: "june-default" })}
-          />
-          <span>
-            <span className="profile-builder-radio-title">June (default)</span>
-            <span className="profile-builder-radio-detail">
-              Specializes June for this task. The agent still identifies as June.
-            </span>
-          </span>
-        </label>
-        <label className="profile-builder-radio">
-          <input
-            type="radio"
-            name="identity"
-            checked={form.identity === "specialized"}
-            onChange={() => state.update({ identity: "specialized" })}
-          />
-          <span>
-            <span className="profile-builder-radio-title">Specialized role</span>
-            <span className="profile-builder-radio-detail">
-              A distinct named agent. Give it its own instructions below.
-            </span>
-          </span>
-        </label>
-      </fieldset>
-
       <label className="profile-builder-field">
         <span className="profile-builder-field-label">Custom instructions (SOUL)</span>
         <textarea
           value={form.soul}
           rows={4}
-          placeholder="Optional. Leave empty to keep June's instructions."
+          placeholder="Optional. Add task-specific guidance."
           aria-label="Custom instructions"
           onChange={(event) => state.update({ soul: event.currentTarget.value })}
         />
+        <span className="profile-builder-field-meta">
+          Appended to June's default instructions for this profile.
+        </span>
       </label>
     </div>
   );

@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   providerModelSettings: vi.fn(),
   listVeniceModels: vi.fn(),
   hermesBridgeStatus: vi.fn(),
+  juneDefaultSoul: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -40,6 +41,7 @@ vi.mock("../lib/tauri", () => ({
   providerModelSettings: mocks.providerModelSettings,
   listVeniceModels: mocks.listVeniceModels,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
+  juneDefaultSoul: mocks.juneDefaultSoul,
 }));
 
 // ---------------------------------------------------------------------------
@@ -175,11 +177,11 @@ describe("profile builder — wizard state back/next/validation", () => {
     expect(canAdvance("mcps", form, ctx())).toBe(true);
   });
 
-  it("warns (does not block) on missing specialized SOUL", () => {
-    const specialized = validForm({ identity: "specialized", soul: "" });
-    const idValidation = validateStep("identity", specialized, ctx());
+  it("does not warn when custom instructions are empty", () => {
+    const form = validForm({ soul: "" });
+    const idValidation = validateStep("identity", form, ctx());
     expect(idValidation.error).toBeUndefined();
-    expect(idValidation.warnings.join(" ")).toMatch(/still behaves like June/i);
+    expect(idValidation.warnings).toEqual([]);
   });
 });
 
@@ -227,7 +229,9 @@ describe("profile builder — create plan + payload", () => {
     const without = buildCreatePlan(validForm());
     expect(without.some((c) => c.target.endsWith("SOUL.md"))).toBe(false);
     const withSoul = buildCreatePlan(validForm({ soul: "Be terse." }));
-    expect(withSoul.some((c) => c.target.endsWith("SOUL.md"))).toBe(true);
+    expect(withSoul.find((c) => c.target.endsWith("SOUL.md"))?.detail).toBe(
+      "Appends your custom instructions to June's default instructions.",
+    );
   });
 
   it("builds a ProfileCreate payload with the slug, model, and clone flags", () => {
@@ -316,7 +320,10 @@ describe("profile builder — create plan + payload", () => {
 
 describe("profile builder — create success/failure + rollback", () => {
   beforeEach(() => {
+    mocks.setProfileModelOverrides.mockReset();
+    mocks.juneDefaultSoul.mockReset();
     mocks.setProfileModelOverrides.mockResolvedValue(undefined);
+    mocks.juneDefaultSoul.mockResolvedValue("You are June.\nDefault tools.");
     resetActiveHermesProfileForTests();
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
@@ -359,11 +366,15 @@ describe("profile builder — create success/failure + rollback", () => {
     expect(await engine.client.profiles.active()).toMatchObject({ active: "research-assistant" });
     expect(getActiveHermesProfileName()).toBe("research-assistant");
 
-    // The SOUL was written via a separate PUT, not the create body.
+    // The SOUL was written via a separate PUT, composed from June's default and
+    // the user's custom instructions.
+    expect(mocks.juneDefaultSoul).toHaveBeenCalledTimes(1);
     const soulPut = engine.server.requestLog.find(
       (entry) => entry.method === "PUT" && entry.path === "/api/profiles/research-assistant/soul",
     );
-    expect(soulPut?.body).toMatchObject({ content: "Be terse." });
+    expect(soulPut?.body).toMatchObject({
+      content: "You are June.\nDefault tools.\n\nBe terse.\n",
+    });
 
     controller.dispose();
     resetActiveHermesProfileForTests();
@@ -391,6 +402,25 @@ describe("profile builder — create success/failure + rollback", () => {
 
     const profiles = await engine.client.profiles.list();
     expect(profiles.some((p) => p.name === "research-assistant")).toBe(true);
+
+    controller.dispose();
+  });
+
+  it("skips the SOUL write when custom instructions are empty", async () => {
+    const engine = makeBuilderEngine();
+    const controller = new ProfileBuilderController(engine);
+    await controller.load();
+    await flush();
+
+    controller.update(validForm({ soul: "" }));
+    await controller.createProfile();
+
+    expect(mocks.juneDefaultSoul).not.toHaveBeenCalled();
+    expect(
+      engine.server.requestLog.some(
+        (entry) => entry.method === "PUT" && entry.path === "/api/profiles/research-assistant/soul",
+      ),
+    ).toBe(false);
 
     controller.dispose();
   });
@@ -593,6 +623,15 @@ function stubState(overrides: Partial<ProfileBuilderState> = {}): ProfileBuilder
 }
 
 describe("profile builder — view", () => {
+  it("renders basics without a radio group", () => {
+    render(<ProfileBuilderView state={stubState({ step: "identity", form: validForm() })} />);
+    expect(screen.getByLabelText("Profile name")).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Appended to June's default instructions for this profile."),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces the tool-calling block on the model step", () => {
     render(<ProfileBuilderView state={stubState()} />);
     expect(screen.getByText(/does not support tool calling/i)).toBeInTheDocument();

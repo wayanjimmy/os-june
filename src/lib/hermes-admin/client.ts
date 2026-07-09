@@ -144,13 +144,14 @@ export type HermesInstallCatalogPayload = {
 } & Record<string, unknown>;
 
 /** Payload for `POST /api/profiles`, matching the dashboard's `ProfileCreate`
- * schema (v2026.6.19). `name` is the only required field. `clone_from_default`
- * seeds the new profile from June's default (so it inherits June's identity and
- * bundled skills unless `no_skills` is set); `keep_skills` narrows which bundled
+ * schema (v2026.6.19). `name` is the only required field.
+ * `clone_from_default` seeds the new profile from June's default SOUL and
+ * bundled skills unless `no_skills` is set; `keep_skills` narrows which bundled
  * skills survive; `hub_skills` installs optional hub skills at create time;
  * `mcp_servers` attaches MCP servers. `provider`/`model` set the generation
- * model. The SOUL/instructions are NOT part of this body — they are written
- * after create via `PUT /api/profiles/{name}/soul`. */
+ * model. The SOUL/instructions are NOT part of this body. Custom instructions
+ * are written after create via `PUT /api/profiles/{name}/soul` after the caller
+ * composes them with June's default SOUL. */
 export type HermesCreateProfilePayload = {
   name: string;
   description?: string;
@@ -252,9 +253,10 @@ export type HermesAdminClient = {
     create(
       payload: HermesCreateProfilePayload,
     ): Promise<MutationOutcome<HermesProfileCreateResult>>;
-    /** Writes a profile's SOUL/instructions. `PUT /api/profiles/{name}/soul`
-     * with `ProfileSoulUpdate` (`{ content }`). Called after create when the
-     * builder collected a custom SOUL. */
+    /** Writes a profile's full SOUL. `PUT /api/profiles/{name}/soul` with
+     * `ProfileSoulUpdate` (`{ content }`). The endpoint replaces the file, so
+     * callers that collect custom instructions compose them with June's default
+     * SOUL before calling this method. */
     setSoul(name: string, content: string): Promise<MutationOutcome<{ ok: boolean }>>;
     /** Lists live/recent profile sessions. `GET /api/profiles/sessions`. */
     sessions(): Promise<HermesProfileSession[]>;

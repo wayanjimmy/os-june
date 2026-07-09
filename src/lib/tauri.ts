@@ -1658,6 +1658,10 @@ export async function providerModelSettings() {
   return invoke<ProviderModelSettingsResponse>("provider_model_settings");
 }
 
+export async function juneDefaultSoul() {
+  return invoke<string>("june_default_soul");
+}
+
 export async function profileModelOverrides(profile: string) {
   return invoke<ProfileModelOverridesDto | null>("profile_model_overrides", { profile });
 }

@@ -745,6 +745,17 @@ pub async fn hermes_bridge_status(
     Ok(status_for(connections, None))
 }
 
+#[tauri::command]
+pub fn june_default_soul(app: AppHandle) -> Result<String, AppError> {
+    let soul_path = resolve_june_hermes_home(&app)?.join("SOUL.md");
+    match fs::read_to_string(&soul_path) {
+        Ok(content) if content.is_empty() => Ok(String::new()),
+        Ok(content) => Ok(content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(AppError::new("june_default_soul_failed", error.to_string())),
+    }
+}
+
 /// Reap-and-collect: drops map entries whose process has exited and returns
 /// the connections that are still live, sandboxed first.
 fn live_connections(bridge: &HermesBridge) -> Result<Vec<HermesBridgeConnection>, AppError> {

@@ -2,8 +2,8 @@
  * The data + orchestration hook behind June's guided Profile Builder (spec 20).
  * It owns the wizard's input loading (existing profiles, the generation model
  * catalog, installed skills, MCP servers, the MCP catalog), the create
- * orchestration (`POST /api/profiles` then optional SOUL write then optional
- * activation), and the success/failure-with-rollback messaging.
+ * orchestration (`POST /api/profiles` then optional appended SOUL write then
+ * optional activation), and the success/failure-with-rollback messaging.
  *
  * Everything user-facing and rule-based lives in the framework-free
  * {@link ProfileBuilderController}, so back/next/validation, the model
@@ -22,6 +22,7 @@ import { setActiveHermesProfileName } from "../active-hermes-profile";
 import { imageModelCatalog } from "../image-models";
 import {
   hermesBridgeStatus,
+  juneDefaultSoul,
   listVeniceModels,
   providerModelSettings,
   setProfileModelOverrides,
@@ -79,8 +80,9 @@ export type ProfileBuilderEffectiveModelSettings = Pick<
 
 export type ProfileBuilderStatus = "unavailable" | "loading" | "ready" | "error";
 
-/** Where the create flow is. `creating` runs the create + soul + session calls;
- * `created` is the terminal success; `failed` carries a rolled-back message. */
+/** Where the create flow is. `creating` runs the create + instruction +
+ * activation calls; `created` is the terminal success; `failed` carries a
+ * rolled-back message. */
 export type CreatePhase = "idle" | "creating" | "created" | "failed";
 
 export type CreateState = {
@@ -335,7 +337,7 @@ export class ProfileBuilderController {
   /**
    * Runs the create orchestration:
    *   1. POST /api/profiles (create the isolated profile)
-   *   2. PUT /api/profiles/{slug}/soul when a custom SOUL was written
+   *   2. PUT /api/profiles/{slug}/soul when custom instructions were written
    *   3. POST /api/profiles/active when activation is asked
    *
    * On a step-1 failure nothing was created, so the message is a plain failure.
@@ -378,11 +380,14 @@ export class ProfileBuilderController {
 
     // Step 2: SOUL. The profile now exists; a failure here is NOT a clean
     // rollback, so the message says so.
-    if (this.form.soul.trim()) {
+    const userText = this.form.soul.trim();
+    if (userText) {
       this.create = { phase: "creating", message: "Writing instructions..." };
       this.recompute();
       try {
-        await this.engine.client.profiles.setSoul(slug, this.form.soul.trim());
+        const base = await juneDefaultSoul();
+        const composed = base.trim() ? `${base.trimEnd()}\n\n${userText}\n` : `${userText}\n`;
+        await this.engine.client.profiles.setSoul(slug, composed);
       } catch (error) {
         if (this.disposed) return;
         const adminError = HermesAdminError.from(`PUT /api/profiles/${slug}/soul`, error);

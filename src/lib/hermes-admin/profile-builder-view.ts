@@ -6,17 +6,16 @@
  * React or Tauri, so the whole flow is unit-testable without a DOM.
  *
  * The builder talks to Hermes through the existing admin REST surface only:
- * `POST /api/profiles` (create), `PUT /api/profiles/{name}/soul` (custom SOUL),
- * and `POST /api/profiles/active` when the new profile should become active. It
- * reuses the already-landed data sources for its step inputs (the model catalog, installed
- * skills, the Skills Hub, MCP servers and the MCP catalog) rather than inventing
- * its own. Profile creation is a documented endpoint, so June never copies
- * directories by hand — no Tauri bridge command is added.
+ * `POST /api/profiles` (create), `PUT /api/profiles/{name}/soul` (custom
+ * instructions appended to June's default SOUL), and `POST /api/profiles/active`
+ * when the new profile should become active. It reuses the already-landed data
+ * sources for its step inputs (the model catalog, installed skills, the Skills
+ * Hub, MCP servers and the MCP catalog) rather than inventing its own. Profile
+ * creation is a documented endpoint, so June never copies directories by hand.
  *
- * June identity rule: a profile may SPECIALIZE June, but the agent still
- * identifies as June. The builder only treats a profile as a distinct named
- * agent when the user explicitly opts into the "specialized role" identity AND
- * provides their own SOUL — otherwise the default June identity is preserved.
+ * June presentation rule: every profile presents as June. A profile can add
+ * task-specific instructions, models, skills, and MCP servers, but it never
+ * changes what the agent says it is.
  */
 
 import type { HermesCreateProfilePayload } from "./client";
@@ -56,8 +55,8 @@ export type ProfileBuilderStep = (typeof PROFILE_BUILDER_STEPS)[number];
 export const STEP_META: Readonly<Record<ProfileBuilderStep, { title: string; hint: string }>> =
   Object.freeze({
     identity: {
-      title: "Identity",
-      hint: "Name the profile and decide if it specializes June or is a new agent.",
+      title: "Basics",
+      hint: "Name the profile and add optional instructions on top of June's default.",
     },
     model: {
       title: "Model",
@@ -77,19 +76,13 @@ export const STEP_META: Readonly<Record<ProfileBuilderStep, { title: string; hin
     },
   });
 
-/** Whether the profile keeps June's default identity or becomes a distinct
- * specialized role. The default preserves June's identity even when skills/MCPs
- * are added. */
-export type ProfileIdentityKind = "june-default" | "specialized";
-
 /** The mutable wizard state. */
 export type ProfileBuilderForm = {
   /** Profile name/slug. The slug is derived from this. */
   name: string;
   description: string;
-  /** Optional custom SOUL/instructions. Empty keeps the inherited identity. */
+  /** Optional custom instructions appended to June's default SOUL. */
   soul: string;
-  identity: ProfileIdentityKind;
   /** Provider id of the chosen model, empty until picked. */
   provider: string;
   /** Model id of the chosen model, empty until picked. */
@@ -113,14 +106,13 @@ export type ProfileBuilderForm = {
   mcpCatalogInstalls: string[];
 };
 
-/** The fresh form a new wizard starts from. June default identity and bundled
- * skills kept: the safe, June-correct starting point. */
+/** The fresh form a new wizard starts from. June's default instructions and
+ * bundled skills are kept: the safe, June-correct starting point. */
 export function emptyProfileForm(): ProfileBuilderForm {
   return {
     name: "",
     description: "",
     soul: "",
-    identity: "june-default",
     provider: "",
     model: "",
     voiceModel: "",
@@ -225,10 +217,10 @@ export type StepValidation = {
   warnings: string[];
 };
 
-/** Validates a single step. Only the identity and model steps can block: a name
+/** Validates a single step. Only the first and model steps can block: a name
  * must be valid and a tool-calling model must be chosen before an agent profile
- * is created. The remaining steps always permit advancing (their choices are
- * optional), surfacing advisories instead. */
+ * is created. The remaining steps always permit advancing because their choices
+ * are optional. */
 export function validateStep(
   step: ProfileBuilderStep,
   form: ProfileBuilderForm,
@@ -238,11 +230,6 @@ export function validateStep(
   switch (step) {
     case "identity": {
       const error = validateProfileName(form.name, context.existingProfiles);
-      if (!error && form.identity === "specialized" && !form.soul.trim()) {
-        warnings.push(
-          "A specialized role with no instructions still behaves like June. Add a SOUL to change its behavior.",
-        );
-      }
       return { error, warnings };
     }
     case "model": {
@@ -396,17 +383,14 @@ export function buildCreatePlan(
 
   changes.push({
     target: `${root}/config.yaml`,
-    detail:
-      form.identity === "specialized"
-        ? `Specialized June profile "${slug}" with model ${form.model || "(unset)"}.`
-        : `June profile "${slug}" (keeps June's identity) with model ${form.model || "(unset)"}.`,
+    detail: `June profile "${slug}" with model ${form.model || "(unset)"}.`,
     risk: "info",
   });
 
   if (form.soul.trim()) {
     changes.push({
       target: `${root}/SOUL.md`,
-      detail: "Custom instructions you wrote for this profile.",
+      detail: "Appends your custom instructions to June's default instructions.",
       risk: "caution",
     });
   }
@@ -483,15 +467,13 @@ export function buildCreatePlan(
 /** Maps the wizard form to the `ProfileCreate` body. The slug is used as the
  * profile name (the create endpoint scopes everything by this id). The SOUL is
  * NOT in this body — it is written by a follow-up `setSoul` call so an empty
- * SOUL never overwrites the inherited June identity. */
+ * SOUL never overwrites June's default instructions. */
 export function buildCreatePayload(form: ProfileBuilderForm): HermesCreateProfilePayload {
   const slug = slugifyProfileName(form.name);
   const payload: HermesCreateProfilePayload = {
     name: slug,
-    // June identity is preserved by seeding from the default profile unless the
-    // user starts from scratch. clone_from_default brings June's SOUL + bundled
-    // skills along, which is what keeps a "specialized June" still identifying
-    // as June.
+    // clone_from_default brings June's SOUL and bundled skills along. Custom
+    // instructions are composed later so they append to that default.
     clone_from_default: form.keepBundledSkills,
     no_skills: !form.keepBundledSkills,
   };
