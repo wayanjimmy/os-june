@@ -239,7 +239,7 @@ describe("notes recording reliability", () => {
       sourceMode: "microphonePlusSystem",
       sources: [
         { source: "microphone", ready: true },
-        { source: "system", ready: true },
+        { source: "system", ready: true, permissionState: "granted" },
       ],
     });
     mocks.startRecording.mockResolvedValue(recording());
@@ -549,7 +549,7 @@ describe("notes recording reliability", () => {
           ready: false,
           message: "Microphone is not ready.",
         },
-        { source: "system", ready: true },
+        { source: "system", ready: true, permissionState: "granted" },
       ],
     });
 

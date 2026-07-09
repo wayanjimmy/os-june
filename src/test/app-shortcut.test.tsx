@@ -305,7 +305,7 @@ describe("App shortcuts", () => {
     mocks.checkRecordingSourceReadiness.mockResolvedValue({
       sources: [
         { source: "microphone", ready: true },
-        { source: "system", ready: true },
+        { source: "system", ready: true, permissionState: "granted" },
       ],
     });
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
