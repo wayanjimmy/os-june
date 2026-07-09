@@ -38,9 +38,8 @@ describe("BiographySection", () => {
   it("shows the empty state with the local-only framing", async () => {
     render(<BiographySection />);
 
-    expect(
-      await screen.findByText(/Here's what I already know, and it never left your Mac/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Here's what I already know\./)).toBeInTheDocument();
+    expect(screen.getByText(/stored only on this device/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Build my profile" })).toBeInTheDocument();
   });
 
@@ -55,7 +54,7 @@ describe("BiographySection", () => {
     const pending = window.sessionStorage.getItem(AGENT_NEW_SESSION_PENDING_KEY);
     expect(pending).toBeTruthy();
     const payload = JSON.parse(pending ?? "{}") as { prompt?: string };
-    expect(payload.prompt).toContain("stays on this Mac");
+    expect(payload.prompt).toContain("saved only on this Mac");
     expect(payload.prompt).toContain("```markdown");
     expect(opened).toHaveBeenCalled();
     window.removeEventListener(AGENT_OPEN_EVENT, opened);

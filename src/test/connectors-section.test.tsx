@@ -63,7 +63,7 @@ describe("ConnectorsSection", () => {
     expect(await screen.findByText("alex@example.com")).toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(screen.getByText("Reconnect needed")).toBeInTheDocument();
-    expect(screen.getByText(/read mail, calendar/i)).toBeInTheDocument();
+    expect(screen.getByText(/read mail, manage calendar/i)).toBeInTheDocument();
     // Subscribed to the connectors-changed Tauri event to stay fresh.
     expect(mocks.listen).toHaveBeenCalledWith("june://connectors-changed", expect.any(Function));
   });
@@ -74,9 +74,9 @@ describe("ConnectorsSection", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Connect Google account" }));
     const dialog = screen.getByRole("dialog", { name: "Connect Google account" });
-    // Read mail and calendar are preselected; add drafting.
+    // Read mail and read calendar are preselected; add drafting.
     expect(within(dialog).getByRole("checkbox", { name: /read mail/i })).toBeChecked();
-    expect(within(dialog).getByRole("checkbox", { name: /calendar/i })).toBeChecked();
+    expect(within(dialog).getByRole("checkbox", { name: /read calendar/i })).toBeChecked();
     expect(within(dialog).getByRole("checkbox", { name: /send mail/i })).not.toBeChecked();
     await userEvent.click(within(dialog).getByRole("checkbox", { name: /draft replies/i }));
 
@@ -85,7 +85,7 @@ describe("ConnectorsSection", () => {
 
     await waitFor(() =>
       expect(mocks.connectorsConnect).toHaveBeenCalledWith({
-        scopes: ["gmail_read", "gmail_draft", "calendar_events"],
+        scopes: ["gmail_read", "gmail_draft", "calendar_read"],
         loginHint: undefined,
       }),
     );

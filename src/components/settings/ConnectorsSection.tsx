@@ -25,7 +25,10 @@ import { InlineNotice } from "../ui/InlineNotice";
 import { toast } from "../ui/Toaster";
 import { SettingsPageHeader } from "./AppSettings";
 
-const DEFAULT_CONNECT_BUNDLES: readonly ConnectorScopeBundle[] = ["gmail_read", "calendar_events"];
+// Read-only by default: mail read and calendar read. Write scopes (draft,
+// send, organize, manage calendar) are opt-in checkboxes, so a fresh connect
+// never grants mutation authority the user did not ask for.
+const DEFAULT_CONNECT_BUNDLES: readonly ConnectorScopeBundle[] = ["gmail_read", "calendar_read"];
 
 /**
  * The Connectors settings page: connected Google accounts (email, granted

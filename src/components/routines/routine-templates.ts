@@ -87,7 +87,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     prompt:
       "Put together my morning briefing. List today's calendar events with times and who I am meeting, summarize my unread email and call out anything that needs a reply, and add one line of prep for each meeting based on my notes and recent threads. Keep it under 250 words.",
     schedule: "0 8 * * *",
-    connectorScopes: ["gmail_read", "calendar_events"],
+    connectorScopes: ["gmail_read", "calendar_read"],
     trustMode: "read_only",
     toolSummary: "This routine can: read your mail, read your calendar",
     icon: IconSunrise,
@@ -99,10 +99,10 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     prompt:
       "New email just arrived. Triage the unread messages: label each by topic and urgency, archive obvious noise, and draft a short reply to anything that clearly needs one. Every label change and draft waits for my approval.",
     schedule: "0 9 * * *",
-    connectorScopes: ["gmail_read", "gmail_draft"],
+    connectorScopes: ["gmail_read", "gmail_draft", "gmail_modify"],
     trustMode: "approval",
     trigger: { kind: "email_received" },
-    toolSummary: "This routine can: read your mail, draft replies, change labels",
+    toolSummary: "This routine can: read your mail, draft replies, label and archive",
     icon: IconEmail1,
   },
   {
@@ -113,7 +113,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     prompt:
       "A meeting with external guests starts soon. Look up the event, then brief me: who is attending and their company, the last email threads with them, and what my meeting notes say we discussed or promised last time. Keep it under 200 words.",
     schedule: "0 9 * * 1-5",
-    connectorScopes: ["gmail_read", "calendar_events"],
+    connectorScopes: ["gmail_read", "calendar_read"],
     trustMode: "read_only",
     trigger: { kind: "event_upcoming", leadMinutes: 30, externalOnly: true },
     toolSummary: "This routine can: read your mail, read your calendar",

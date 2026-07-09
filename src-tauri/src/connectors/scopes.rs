@@ -10,18 +10,28 @@ pub const EMAIL: &str = "email";
 pub const GMAIL_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
 pub const GMAIL_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
 pub const GMAIL_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
+/// Apply/remove labels and archive (users.messages.modify / threads.modify).
+/// Google requires gmail.modify for these; readonly/compose/send cannot label.
+pub const GMAIL_MODIFY: &str = "https://www.googleapis.com/auth/gmail.modify";
+/// Read-only calendar for briefings and meeting prep. calendar.events grants
+/// write ("view and edit events"), so read-only routines must not request it.
+pub const CALENDAR_READONLY: &str = "https://www.googleapis.com/auth/calendar.readonly";
 pub const CALENDAR_EVENTS: &str = "https://www.googleapis.com/auth/calendar.events";
 
 pub const BASELINE_SCOPES: &[&str] = &[OPENID, EMAIL];
 
 /// Feature bundle a connect (or scope escalation) request asks for. Wire
 /// names ("gmail_read", ...) are what the frontend sends in
-/// `connectors_connect.scopes`.
+/// `connectors_connect.scopes`. Bundles stay minimal per Google's own scope
+/// semantics: read-only capabilities never carry a write scope, so a briefing
+/// routine cannot be granted send or calendar-write authority it never uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeBundle {
     GmailRead,
     GmailDraft,
+    GmailModify,
     GmailSend,
+    CalendarRead,
     CalendarEvents,
 }
 
@@ -32,7 +42,9 @@ impl ScopeBundle {
         match self {
             ScopeBundle::GmailRead => &[GMAIL_READONLY],
             ScopeBundle::GmailDraft => &[GMAIL_COMPOSE],
+            ScopeBundle::GmailModify => &[GMAIL_MODIFY],
             ScopeBundle::GmailSend => &[GMAIL_SEND],
+            ScopeBundle::CalendarRead => &[CALENDAR_READONLY],
             ScopeBundle::CalendarEvents => &[CALENDAR_EVENTS],
         }
     }
@@ -42,7 +54,9 @@ impl ScopeBundle {
         match self {
             ScopeBundle::GmailRead => "gmail_read",
             ScopeBundle::GmailDraft => "gmail_draft",
+            ScopeBundle::GmailModify => "gmail_modify",
             ScopeBundle::GmailSend => "gmail_send",
+            ScopeBundle::CalendarRead => "calendar_read",
             ScopeBundle::CalendarEvents => "calendar_events",
         }
     }
@@ -51,7 +65,9 @@ impl ScopeBundle {
         match name {
             "gmail_read" => Some(ScopeBundle::GmailRead),
             "gmail_draft" => Some(ScopeBundle::GmailDraft),
+            "gmail_modify" => Some(ScopeBundle::GmailModify),
             "gmail_send" => Some(ScopeBundle::GmailSend),
+            "calendar_read" => Some(ScopeBundle::CalendarRead),
             "calendar_events" => Some(ScopeBundle::CalendarEvents),
             _ => None,
         }
@@ -146,11 +162,24 @@ mod tests {
         for bundle in [
             ScopeBundle::GmailRead,
             ScopeBundle::GmailDraft,
+            ScopeBundle::GmailModify,
             ScopeBundle::GmailSend,
+            ScopeBundle::CalendarRead,
             ScopeBundle::CalendarEvents,
         ] {
             assert_eq!(ScopeBundle::from_name(bundle.name()), Some(bundle));
         }
         assert_eq!(ScopeBundle::from_name("gmail"), None);
+    }
+
+    #[test]
+    fn label_and_archive_bundle_carries_the_modify_scope() {
+        assert_eq!(ScopeBundle::GmailModify.scopes(), &[GMAIL_MODIFY]);
+    }
+
+    #[test]
+    fn read_only_calendar_bundle_never_carries_write_scope() {
+        assert_eq!(ScopeBundle::CalendarRead.scopes(), &[CALENDAR_READONLY]);
+        assert!(!ScopeBundle::CalendarRead.scopes().contains(&CALENDAR_EVENTS));
     }
 }

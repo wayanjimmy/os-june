@@ -1899,7 +1899,13 @@ export async function latestDictationEvent() {
 
 /** Feature bundle wire names the connect flow requests. Mirrors the Rust
  * `ScopeBundle::name()` registry in src-tauri/src/connectors/scopes.rs. */
-export type ConnectorScopeBundle = "gmail_read" | "gmail_draft" | "gmail_send" | "calendar_events";
+export type ConnectorScopeBundle =
+  | "gmail_read"
+  | "gmail_draft"
+  | "gmail_modify"
+  | "gmail_send"
+  | "calendar_read"
+  | "calendar_events";
 
 export type ConnectorAccountStatus = "connected" | "reconnect_required";
 

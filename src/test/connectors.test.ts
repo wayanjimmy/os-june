@@ -58,6 +58,17 @@ describe("scope bundles", () => {
     expect(scopesCoverBundles([GMAIL_READONLY], ["gmail_read", "calendar_events"])).toBe(false);
   });
 
+  it("treats a broader granted scope as covering a narrower read need", () => {
+    // calendar.events (write) satisfies a read-only briefing, so the user is
+    // not re-prompted for calendar.readonly they effectively already hold.
+    expect(scopesCoverBundles([CALENDAR_EVENTS], ["calendar_read"])).toBe(true);
+    expect(
+      scopesCoverBundles(["https://www.googleapis.com/auth/gmail.modify"], ["gmail_read"]),
+    ).toBe(true);
+    // But a narrower grant never covers a broader need.
+    expect(scopesCoverBundles([GMAIL_READONLY], ["gmail_modify"])).toBe(false);
+  });
+
   it("keeps bundle copy sentence case with no typographic dashes", () => {
     for (const bundle of ALL_SCOPE_BUNDLES) {
       const meta = BUNDLE_META[bundle];
@@ -204,7 +215,7 @@ describe("event triggers", () => {
 describe("biography", () => {
   it("frames the prompt as local-only and read-only", () => {
     const prompt = biographyPrompt();
-    expect(prompt).toContain("stays on this Mac");
+    expect(prompt).toContain("saved only on this Mac");
     expect(prompt).toContain("june_context");
     expect(prompt).toContain("gmail and gcal read tools");
     expect(prompt).toContain("read tools only");

@@ -154,6 +154,7 @@ function googleAccount(overrides: Record<string, unknown> = {}) {
     scopes: [
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
       "https://www.googleapis.com/auth/calendar.events",
     ],
     status: "connected" as const,
@@ -492,7 +493,7 @@ describe("RoutinesView connector templates", () => {
       screen.getAllByText(/This routine can: read your mail, read your calendar/).length,
     ).toBeGreaterThan(0);
     expect(
-      screen.getByText(/This routine can: read your mail, draft replies, change labels/),
+      screen.getByText(/This routine can: read your mail, draft replies, label and archive/),
     ).toBeInTheDocument();
     expect(screen.getAllByText(/Trust: approval/).length).toBeGreaterThan(0);
   });
@@ -513,7 +514,7 @@ describe("RoutinesView connector templates", () => {
 
     await waitFor(() =>
       expect(tauriMocks.connectorsConnect).toHaveBeenCalledWith({
-        scopes: ["gmail_read", "calendar_events"],
+        scopes: ["gmail_read", "calendar_read"],
       }),
     );
     await waitFor(() => expect(tauriMocks.connectorsApplyRuntime).toHaveBeenCalled());

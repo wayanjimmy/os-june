@@ -10,9 +10,10 @@ import { toast } from "../ui/Toaster";
 
 /**
  * The "Here's what I already know" card: a locally stored profile June builds
- * from your notes, mail, and calendar through a one-shot agent run. The
- * profile never leaves this Mac — it lives in a single app-data file the
- * agent's soul can read at spawn.
+ * from your notes, mail, and calendar through a one-shot agent run. The saved
+ * profile lives only in a single app-data file the agent's soul can read at
+ * spawn; building it is an agent task, so what it reads goes to the user's
+ * selected model provider like any other routine (qualified in the copy).
  *
  * "Build my profile" hands the generation prompt to a fresh agent session
  * (the same pending-marker handoff the routines describe bar uses) and
@@ -87,8 +88,10 @@ export function BiographySection() {
         Your profile
       </h2>
       <p className="settings-group-description">
-        Here's what I already know, and it never left your Mac. June can build a short profile of
-        you from your notes, mail, and calendar, stored only on this device.
+        Here's what I already know. June can build a short profile of you from your notes, mail, and
+        calendar. The profile is stored only on this device. Building it runs an agent task, so the
+        content it reads goes to your selected model provider (the attested June API by default, or
+        a local model) the same as any other routine.
       </p>
       <div className="settings-card">
         {!loaded ? (

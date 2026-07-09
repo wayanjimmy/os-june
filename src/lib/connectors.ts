@@ -51,30 +51,70 @@ export const BUNDLE_META: Readonly<Record<ConnectorScopeBundle, ConnectorBundleM
       scopeUrls: ["https://www.googleapis.com/auth/gmail.compose"],
       feature: "draft replies",
     },
+    gmail_modify: {
+      label: "Organize mail",
+      description: "Label and archive your mail. Never deletes.",
+      scopeUrls: ["https://www.googleapis.com/auth/gmail.modify"],
+      feature: "label and archive mail",
+    },
     gmail_send: {
       label: "Send mail",
       description: "Send email on your behalf. Only used when you allow it per routine.",
       scopeUrls: ["https://www.googleapis.com/auth/gmail.send"],
       feature: "send mail",
     },
-    calendar_events: {
-      label: "Calendar",
-      description: "Read your events, find free slots, and create events.",
-      scopeUrls: ["https://www.googleapis.com/auth/calendar.events"],
+    calendar_read: {
+      label: "Read calendar",
+      description: "Read your events and find free slots for briefings and prep.",
+      scopeUrls: ["https://www.googleapis.com/auth/calendar.readonly"],
       feature: "read your calendar",
+    },
+    calendar_events: {
+      label: "Manage calendar",
+      description: "Create events and respond to invites on your behalf.",
+      scopeUrls: ["https://www.googleapis.com/auth/calendar.events"],
+      feature: "manage your calendar",
     },
   });
 
 export const ALL_SCOPE_BUNDLES: readonly ConnectorScopeBundle[] = Object.freeze([
   "gmail_read",
   "gmail_draft",
+  "gmail_modify",
   "gmail_send",
+  "calendar_read",
   "calendar_events",
 ]);
 
-/** Maps an account's granted Google scope URLs back to the feature bundles
- * they cover, in registry order. Unknown URLs (identity scopes, future
- * grants) are ignored: the UI shows features, not raw scopes. */
+/** A granted Google scope implies these narrower scope needs: a write scope
+ * already grants the matching read, so an account with `calendar.events` need
+ * not be re-prompted for `calendar.readonly`, and `gmail.modify` covers read
+ * and draft. Used for the "can this routine run" gate, not for display. */
+const SCOPE_IMPLICATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  "https://www.googleapis.com/auth/gmail.modify": [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+  ],
+  "https://www.googleapis.com/auth/calendar.events": [
+    "https://www.googleapis.com/auth/calendar.readonly",
+  ],
+});
+
+/** True when the granted scope set satisfies `needed`, directly or because a
+ * broader granted scope implies it. */
+function grantsScope(granted: Set<string>, needed: string): boolean {
+  if (granted.has(needed)) return true;
+  for (const held of granted) {
+    if (SCOPE_IMPLICATIONS[held]?.includes(needed)) return true;
+  }
+  return false;
+}
+
+/** Maps an account's granted Google scope URLs back to the feature bundles it
+ * explicitly holds, in registry order. Exact match (not superset): this drives
+ * display and reconnect, which should reflect what was actually granted, not
+ * what a broader scope could stand in for. Unknown URLs (identity scopes,
+ * future grants) are ignored: the UI shows features, not raw scopes. */
 export function bundlesFromScopes(scopeUrls: string[]): ConnectorScopeBundle[] {
   const granted = new Set(scopeUrls);
   return ALL_SCOPE_BUNDLES.filter((bundle) =>
@@ -88,13 +128,17 @@ export function grantedFeatureLabels(scopeUrls: string[]): string[] {
   return bundlesFromScopes(scopeUrls).map((bundle) => BUNDLE_META[bundle].label);
 }
 
-/** True when the account's granted scopes already cover every bundle. */
+/** True when the account's granted scopes already cover every bundle a routine
+ * needs, counting a broader granted scope as covering a narrower need (so a
+ * read-only briefing runs on an account that granted calendar write). */
 export function scopesCoverBundles(
   scopeUrls: string[],
   bundles: readonly ConnectorScopeBundle[],
 ): boolean {
-  const granted = new Set(bundlesFromScopes(scopeUrls));
-  return bundles.every((bundle) => granted.has(bundle));
+  const granted = new Set(scopeUrls);
+  return bundles.every((bundle) =>
+    BUNDLE_META[bundle].scopeUrls.every((url) => grantsScope(granted, url)),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +385,7 @@ export function triggerConfigFromDraft(
  */
 export function biographyPrompt(): string {
   return [
-    "Build a short professional profile of me, for my eyes only. Everything you read and write stays on this Mac; nothing leaves it.",
+    "Build a short professional profile of me, for my eyes only. The profile is saved only on this Mac. Do not send, share, or store it anywhere else.",
     "Sources: use the june_context tools to review my notes and past sessions, and the gmail and gcal read tools (search_threads, read_thread, list_unread, list_events, get_event) to learn my role, the people I work with most, my current projects, and my typical week. Use read tools only: do not draft, send, label, or change anything.",
     "Write the profile as concise markdown: who I am, what I am working on, key people and how we collaborate, recurring commitments, and anything a great assistant should remember.",
     'When you are done, output the profile as one single fenced code block tagged "markdown" (```markdown ... ```), with no other fenced blocks in your final message, so June can save it.',

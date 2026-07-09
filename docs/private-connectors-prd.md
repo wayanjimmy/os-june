@@ -55,7 +55,7 @@ Named, one-tap templates on the existing routines engine: **Morning briefing**, 
 
 ### 3.4 The biography moment — the activation wow
 
-On first connect, June builds a profile from what's already on your Mac plus your mail and calendar, and shows it: *"Here's what I already know — and it never left your Mac."* Editable, deletable, regenerable. This is Town's best onboarding beat, executed with a punchline they can't deliver.
+On first connect, June builds a profile from what's already on your Mac plus your mail and calendar, and shows it: *"Here's what I already know."* Editable, deletable, regenerable. This is Town's best onboarding beat, executed with a punchline they can't deliver. Claim discipline (per the threat-model page): the saved profile is stored only on the device, but building it is an agent task, so the copy does not claim the content it reads "never left your Mac" (inference follows the user's selected provider, the attested June API by default, like any routine). The shipped card says "stored only on this device," not an absolute local-only claim.
 
 ### Out of scope (v1)
 
