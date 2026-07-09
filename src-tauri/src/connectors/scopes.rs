@@ -101,14 +101,29 @@ pub fn requested_scopes(bundles: &[ScopeBundle]) -> Vec<&'static str> {
 pub fn missing_scopes(granted: &[String], wanted: &[ScopeBundle]) -> Vec<&'static str> {
     let mut missing: Vec<&'static str> = Vec::new();
     for bundle in wanted {
-        for scope in bundle.scopes() {
-            let already_granted = granted.iter().any(|granted| granted == scope);
-            if !already_granted && !missing.contains(scope) {
+        for &scope in bundle.scopes() {
+            let already_granted = granted.iter().any(|held| scope_grants(held, scope));
+            if !already_granted && !missing.contains(&scope) {
                 missing.push(scope);
             }
         }
     }
     missing
+}
+
+/// True when a granted scope satisfies a needed scope, directly or because it
+/// is a broader scope that implies it: a write scope already grants the
+/// matching read/draft. Mirrors the frontend `SCOPE_IMPLICATIONS` so the
+/// incremental-auth short-circuit does not force a fresh consent round for a
+/// scope a broader existing grant already authorizes.
+fn scope_grants(held: &str, needed: &str) -> bool {
+    held == needed
+        || matches!(
+            (held, needed),
+            (GMAIL_MODIFY, GMAIL_READONLY)
+                | (GMAIL_MODIFY, GMAIL_COMPOSE)
+                | (CALENDAR_EVENTS, CALENDAR_READONLY)
+        )
 }
 
 #[cfg(test)]
@@ -155,6 +170,23 @@ mod tests {
         // stored list) must not force an escalation round-trip.
         let granted = owned(&[GMAIL_READONLY]);
         assert!(missing_scopes(&granted, &[ScopeBundle::GmailRead]).is_empty());
+    }
+
+    #[test]
+    fn missing_scopes_treats_broader_grants_as_covering_narrower_bundles() {
+        // gmail.modify already grants read and draft, so neither re-prompts.
+        let granted = owned(&[GMAIL_MODIFY]);
+        assert!(missing_scopes(&granted, &[ScopeBundle::GmailRead]).is_empty());
+        assert!(missing_scopes(&granted, &[ScopeBundle::GmailDraft]).is_empty());
+        // calendar.events already grants calendar read.
+        let granted = owned(&[CALENDAR_EVENTS]);
+        assert!(missing_scopes(&granted, &[ScopeBundle::CalendarRead]).is_empty());
+        // But a narrower grant never covers a broader need.
+        let granted = owned(&[GMAIL_READONLY]);
+        assert_eq!(
+            missing_scopes(&granted, &[ScopeBundle::GmailModify]),
+            vec![GMAIL_MODIFY]
+        );
     }
 
     #[test]

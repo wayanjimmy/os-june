@@ -272,6 +272,17 @@ async fn refresh_google_access_token_with_freshness_gate(
     }
 }
 
+/// Fired whenever an account's connection state changes (connect, disconnect,
+/// or a background `reconnect_required` transition) so an open settings page
+/// refreshes without a remount. The frontend `CONNECTORS_CHANGED_EVENT`
+/// subscribes to this.
+const CONNECTORS_CHANGED_EVENT: &str = "june://connectors-changed";
+
+fn emit_connectors_changed(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit(CONNECTORS_CHANGED_EVENT, ());
+}
+
 async fn mark_reconnect_required(app: &tauri::AppHandle, account_id: &str) {
     match crate::commands::repositories(app).await {
         Ok(repos) => {
@@ -286,6 +297,10 @@ async fn mark_reconnect_required(app: &tauri::AppHandle, account_id: &str) {
                     error_code = %AppError::from(error).code,
                     "failed to flag connector account for reconnect"
                 );
+            } else {
+                // A background refresh just downgraded this account; tell any
+                // open settings page so it does not show a stale "Connected".
+                emit_connectors_changed(app);
             }
         }
         Err(error) => {
@@ -352,6 +367,19 @@ pub async fn begin_connect(
     let grant = oauth::authorize(flow, &client_id, &requested, login_hint).await?;
     let email = grant.email.clone();
 
+    // A login hint means the user asked to (re)connect one specific account.
+    // Google only preselects it; the browser can still consent as a different
+    // account. Abort on mismatch rather than silently storing the wrong account
+    // (which would leave the intended account still flagged reconnect_required).
+    if let Some(hint) = login_hint.map(str::trim).filter(|hint| !hint.is_empty()) {
+        if !email.eq_ignore_ascii_case(hint) {
+            return Err(AppError::new(
+                "connector_account_mismatch",
+                "That Google account does not match the one you were reconnecting. Try again and choose that account.",
+            ));
+        }
+    }
+
     // `include_granted_scopes=true` means the response scope field carries
     // the union of everything this app was ever granted for the account.
     let granted_scopes: Vec<String> = grant
@@ -400,6 +428,7 @@ pub async fn begin_connect(
             ConnectorAccountStatus::Connected.as_str(),
         )
         .await?;
+    emit_connectors_changed(app);
 
     Ok(ConnectorAccount {
         account_id: email.clone(),
@@ -440,6 +469,7 @@ pub async fn disconnect(
     store::delete_tokens(account_id).await?;
     let repos = crate::commands::repositories(app).await?;
     repos.delete_connector_account(account_id).await?;
+    emit_connectors_changed(app);
     Ok(())
 }
 
