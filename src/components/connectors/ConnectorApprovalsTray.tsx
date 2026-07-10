@@ -1,6 +1,7 @@
 import { IconChecklist } from "central-icons/IconChecklist";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { actionToolLabel } from "../../lib/connectors";
+import { useScrollFade } from "../../lib/use-scroll-fade";
 import {
   CONNECTOR_APPROVALS_CHANGED_EVENT,
   type PendingConnectorApproval,
@@ -23,6 +24,10 @@ export function ConnectorApprovalsTray() {
   const [pending, setPending] = useState<PendingConnectorApproval[]>([]);
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
+  // The list clips to a max-height once a batch is long; the shared scroll
+  // fade signals that more approvals are hidden below (spec/scroll-fade.md).
+  const listRef = useRef<HTMLUListElement>(null);
+  const fade = useScrollFade(listRef);
 
   const refresh = useCallback(async () => {
     try {
@@ -83,6 +88,13 @@ export function ConnectorApprovalsTray() {
     [pending, refresh],
   );
 
+  // The list grows and shrinks as approvals arrive or are answered without a
+  // scroll or resize, so nudge the shared fade to re-measure on each change.
+  useEffect(() => {
+    const id = requestAnimationFrame(fade.update);
+    return () => cancelAnimationFrame(id);
+  }, [pending, fade.update]);
+
   if (pending.length === 0) return null;
 
   return (
@@ -119,7 +131,7 @@ export function ConnectorApprovalsTray() {
           </span>
         ) : null}
       </header>
-      <ul className="connector-approvals-list">
+      <ul className="connector-approvals-list scroll-fade-mask" ref={listRef} {...fade.props}>
         {pending.map((item) => (
           <li key={item.approvalId} className="connector-approvals-item">
             <div className="connector-approvals-info">
