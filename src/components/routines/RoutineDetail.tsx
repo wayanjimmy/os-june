@@ -330,14 +330,22 @@ export function RoutineDetail({
       // could still let that run act on Google. No trigger row was written yet,
       // so there is nothing else to unwind.
       if (trustChanged) {
-        await routineTrustSet({
-          jobId: routine.job_id,
-          trustMode: previousTrust?.trustMode ?? "read_only",
-          autonomousTools:
-            previousTrust?.trustMode === "autonomous" ? previousTrust.autonomousTools : undefined,
-        })
-          .then(setStoredTrust)
-          .catch(() => {});
+        try {
+          const restored = await routineTrustSet({
+            jobId: routine.job_id,
+            trustMode: previousTrust?.trustMode ?? "read_only",
+            autonomousTools:
+              previousTrust?.trustMode === "autonomous" ? previousTrust.autonomousTools : undefined,
+          });
+          setStoredTrust(restored);
+          // Restoring autonomous trust mints a fresh grant token. A running
+          // auto MCP server still carries the pre-save token in its env, so
+          // re-render/restart after a successful rollback just as we do after
+          // a successful autonomous change below.
+          if (autoServersChanged) await connectorsApplyRuntime();
+        } catch (err) {
+          toast.error(messageFromError(err));
+        }
       }
       return;
     }

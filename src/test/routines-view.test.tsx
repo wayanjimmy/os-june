@@ -732,6 +732,9 @@ describe("RoutinesView detail", () => {
         autonomousTools: ["create_draft"],
       }),
     );
+    // Restoring autonomous trust mints a new token, so the runtime must reload
+    // the auto MCP server instead of leaving its old token in the environment.
+    expect(tauriMocks.connectorsApplyRuntime).toHaveBeenCalledTimes(1);
   });
 
   it("does not write the event trigger when the cron save fails", async () => {
