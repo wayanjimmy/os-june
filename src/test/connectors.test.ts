@@ -24,6 +24,8 @@ import {
   routineTrustModeFromToolsets,
   scopesCoverBundles,
   triggerConfigFromDraft,
+  triggerRequiredBundles,
+  triggerScopeWarning,
 } from "../lib/connectors";
 import { UNRESTRICTED_ROUTINE_TOOLSETS } from "../lib/hermes-routines";
 
@@ -261,6 +263,33 @@ describe("event triggers", () => {
     expect(TRIGGER_META.email_received.label).toBe("When new email arrives");
     expect(TRIGGER_META.event_upcoming.label).toBe("Before an upcoming meeting");
     expect(TRIGGER_META.event_upcoming.configFields).toEqual(["leadMinutes", "externalOnly"]);
+  });
+
+  it("maps each connector trigger to the scope its daemon polls", () => {
+    expect(triggerRequiredBundles({ source: "schedule" })).toEqual([]);
+    expect(triggerRequiredBundles({ source: "email_received" })).toEqual(["gmail_read"]);
+    expect(
+      triggerRequiredBundles({ source: "event_upcoming", leadMinutes: 30, externalOnly: true }),
+    ).toEqual(["calendar_read"]);
+  });
+
+  it("warns only when a connected account lacks the trigger's scope", () => {
+    // A calendar-only account can't back an email_received trigger.
+    expect(triggerScopeWarning({ source: "email_received" }, [CALENDAR_EVENTS])).toBe(
+      "This trigger needs read mail access on your connected Google account. Add it in Settings under Connectors.",
+    );
+    // Gmail read covers the new-mail trigger, so no warning.
+    expect(triggerScopeWarning({ source: "email_received" }, [GMAIL_READONLY])).toBeNull();
+    // A broader granted scope (calendar write) covers the upcoming-event trigger.
+    expect(
+      triggerScopeWarning({ source: "event_upcoming", leadMinutes: 30, externalOnly: true }, [
+        CALENDAR_EVENTS,
+      ]),
+    ).toBeNull();
+    // Schedules need no scope.
+    expect(triggerScopeWarning({ source: "schedule" }, [])).toBeNull();
+    // No account connected: the picker owns the "connect an account" notice.
+    expect(triggerScopeWarning({ source: "email_received" }, null)).toBeNull();
   });
 });
 

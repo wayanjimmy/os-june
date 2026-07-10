@@ -393,6 +393,45 @@ export type TriggerDraft =
 export const DEFAULT_EVENT_LEAD_MINUTES = 30;
 
 /**
+ * The connector scope bundle a connector event trigger's daemon must be able to
+ * call on the account it subscribes on: a Gmail read to poll for new mail, a
+ * calendar read to poll upcoming events. Schedules poll nothing, so they need
+ * none. Drives the create/edit gate so a trigger can't be saved against an
+ * account whose token lacks the scope the daemon will call, which would leave
+ * the routine silently never firing (the Gmail history / calendar list call
+ * fails on the missing scope).
+ */
+export function triggerRequiredBundles(trigger: TriggerDraft): readonly ConnectorScopeBundle[] {
+  switch (trigger.source) {
+    case "email_received":
+      return ["gmail_read"];
+    case "event_upcoming":
+      return ["calendar_read"];
+    default:
+      return [];
+  }
+}
+
+/**
+ * A one-line warning when the account a connector trigger would subscribe on is
+ * connected but lacks the scope its daemon needs, naming the missing access and
+ * where to add it. Returns null when the trigger needs no scope, the account
+ * already covers it, or no account is connected (the picker shows its own
+ * "connect an account" notice in that case).
+ */
+export function triggerScopeWarning(
+  trigger: TriggerDraft,
+  accountScopes: string[] | null,
+): string | null {
+  const bundles = triggerRequiredBundles(trigger);
+  if (bundles.length === 0) return null;
+  if (accountScopes == null) return null;
+  if (scopesCoverBundles(accountScopes, bundles)) return null;
+  const features = bundles.map((bundle) => BUNDLE_META[bundle].label.toLowerCase()).join(" and ");
+  return `This trigger needs ${features} access on your connected Google account. Add it in Settings under Connectors.`;
+}
+
+/**
  * The schedule an event-triggered routine is created with. Event routines
  * still need a Hermes cron record underneath (the trigger daemon fires them
  * via the cron trigger action), so they get a far-future one-time schedule

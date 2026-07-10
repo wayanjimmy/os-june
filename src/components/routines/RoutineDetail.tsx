@@ -12,6 +12,7 @@ import {
   eventTriggerScheduleDraft,
   routineToolsetsFor,
   triggerConfigFromDraft,
+  triggerScopeWarning,
   type TriggerDraft,
 } from "../../lib/connectors";
 import {
@@ -292,6 +293,13 @@ export function RoutineDetail({
             toast.error("Connect a Google account before using an event trigger.");
             return;
           }
+          // The account must hold the scope this trigger's daemon polls, or the
+          // routine saves but never fires (the Gmail/calendar call fails).
+          const scopeIssue = triggerScopeWarning(trigger, account.scopes);
+          if (scopeIssue) {
+            toast.error(scopeIssue);
+            return;
+          }
           const stored = await connectorTriggerSet({
             jobId: routine.job_id,
             kind: trigger.source,
@@ -529,6 +537,10 @@ export function RoutineDetail({
                   trigger={trigger}
                   scheduleDraft={draft}
                   hasAccount={accounts.some((entry) => entry.status === "connected")}
+                  scopeWarning={triggerScopeWarning(
+                    trigger,
+                    accounts.find((entry) => entry.status === "connected")?.scopes ?? null,
+                  )}
                   onTriggerChange={setTrigger}
                   onScheduleChange={setDraft}
                 />

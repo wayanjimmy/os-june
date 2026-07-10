@@ -21,6 +21,7 @@ export function TriggerPicker({
   trigger,
   scheduleDraft,
   hasAccount,
+  scopeWarning,
   onTriggerChange,
   onScheduleChange,
 }: {
@@ -28,6 +29,9 @@ export function TriggerPicker({
   scheduleDraft: ScheduleDraft;
   /** Whether any Google account is connected; event triggers require one. */
   hasAccount: boolean;
+  /** Set when an account is connected but lacks the scope the selected trigger
+   * needs, so the routine could be saved yet never fire. Null otherwise. */
+  scopeWarning?: string | null;
   onTriggerChange: (trigger: TriggerDraft) => void;
   onScheduleChange: (draft: ScheduleDraft) => void;
 }) {
@@ -99,6 +103,10 @@ export function TriggerPicker({
           body="Event triggers need a connected Google account. Connect one in Settings under Connectors."
           aria-label="Google account required"
         />
+      ) : null}
+
+      {trigger.source !== "schedule" && hasAccount && scopeWarning ? (
+        <InlineNotice tone="warning" body={scopeWarning} aria-label="More Google access needed" />
       ) : null}
     </div>
   );
