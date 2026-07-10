@@ -1,7 +1,7 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconArrowUp } from "central-icons/IconArrowUp";
 import { IconCalendarRepeat } from "central-icons/IconCalendarRepeat";
-import { IconCheckmark1Small } from "central-icons/IconCheckmark1Small";
+import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
@@ -1037,7 +1037,7 @@ function DescribeBar({
                   <span className="agent-sandbox-option-desc">{option.description}</span>
                 </span>
                 {unrestricted === option.unrestricted ? (
-                  <IconCheckmark1Small
+                  <IconCheckmark2Small
                     size={16}
                     aria-hidden
                     className="agent-sandbox-option-check"

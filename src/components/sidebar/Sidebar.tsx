@@ -1,4 +1,4 @@
-import { IconCheckmark1Small } from "central-icons/IconCheckmark1Small";
+import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconClipboard } from "central-icons/IconClipboard";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconArrowBoxRight } from "central-icons/IconArrowBoxRight";
@@ -1900,7 +1900,7 @@ function ReferralDialog({
                   onFocus={(event) => event.currentTarget.select()}
                 />
                 <button type="button" className="referral-copy-inset" onClick={onCopy}>
-                  {copied ? <IconCheckmark1Small size={14} /> : <IconClipboard size={14} />}
+                  {copied ? <IconCheckmark2Small size={14} /> : <IconClipboard size={14} />}
                   {copied ? "Copied" : "Copy"}
                 </button>
               </div>

@@ -6,7 +6,7 @@ import { IconMicrophoneOff } from "central-icons/IconMicrophoneOff";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconMicrophone as IconMicrophoneLine } from "central-icons/IconMicrophone";
 import { IconVolumeFull } from "central-icons/IconVolumeFull";
-import { IconCheckmark1 } from "central-icons-filled/IconCheckmark1";
+import { IconCheckmark2 } from "central-icons-filled/IconCheckmark2";
 import { IconChevronBottom } from "central-icons-filled/IconChevronBottom";
 import { IconMicrophone } from "central-icons-filled/IconMicrophone";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
@@ -1055,7 +1055,7 @@ function TranscriptTurn({
           title={copied ? "Copied" : "Copy"}
           onClick={() => void handleCopy()}
         >
-          {copied ? <IconCheckmark1 size={14} /> : <IconClipboard size={14} />}
+          {copied ? <IconCheckmark2 size={14} /> : <IconClipboard size={14} />}
         </button>
       ) : null}
     </article>
@@ -1097,7 +1097,7 @@ function CopyTranscriptButton({ text }: { text: string }) {
       aria-label={copied ? "Transcript copied" : "Copy transcript"}
       title={copied ? "Copied" : "Copy transcript"}
     >
-      {copied ? <IconCheckmark1 size={14} /> : <IconClipboard size={14} />}
+      {copied ? <IconCheckmark2 size={14} /> : <IconClipboard size={14} />}
       {copied ? "Copied" : "Copy"}
     </button>
   );
