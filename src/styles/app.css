@@ -11320,6 +11320,43 @@ input:focus-visible,
   background: var(--card);
 }
 
+/* Agent character editor: a plain textarea over an action row. Matches the
+ * app's other textareas (subtle border, small radius, standard focus ring)
+ * but stays sans: it edits prose, not code. */
+.agent-character-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.agent-character-editor {
+  width: 100%;
+  min-height: 140px;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.agent-character-editor:focus {
+  outline: none;
+  border-color: transparent;
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 0 0 4px var(--focus-ring);
+}
+
+.agent-character-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
 .settings-agent-card {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
