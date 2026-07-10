@@ -396,10 +396,6 @@ impl Debug for LocalDevConfig {
 pub struct OsAccountsConfig {
     pub api_url: String,
     pub app_api_key: String,
-    /// Optional service token for anonymous P3A aggregate ingestion into OS
-    /// Accounts. When unset (empty), P3A ingest is disabled: reports fall back
-    /// to the log-only sink while startup and all other ingest proceed
-    /// normally.
     #[serde(default)]
     pub p3a_ingest_token: String,
     pub iss: String,
@@ -446,14 +442,7 @@ impl Debug for OsAccountsConfig {
             .debug_struct("OsAccountsConfig")
             .field("api_url", &self.api_url)
             .field("app_api_key", &REDACTED)
-            .field(
-                "p3a_ingest_token",
-                if self.p3a_ingest_token.is_empty() {
-                    &"<unset>"
-                } else {
-                    &REDACTED
-                },
-            )
+            .field("p3a_ingest_token", &REDACTED)
             .field("iss", &self.iss)
             .field("aud", &self.aud)
             .field("jwks_refresh_secs", &self.jwks_refresh_secs)
@@ -988,9 +977,11 @@ fn validate(config: &AppConfig) -> Result<(), ConfigError> {
             &config.os_accounts.app_api_key,
             OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS,
         )?;
-        // os_accounts.p3a_ingest_token is deliberately not validated here:
-        // the token is optional, and when unset the P3A sink degrades to
-        // log-only instead of failing startup (JUN-231).
+        validate_required_secret(
+            "os_accounts.p3a_ingest_token",
+            &config.os_accounts.p3a_ingest_token,
+            &[],
+        )?;
     }
     validate_request_limits(config)?;
     validate_issue_report_diagnosis(config)?;
@@ -1933,16 +1924,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_missing_p3a_ingest_token() {
+    fn validate_rejects_missing_p3a_ingest_token() {
         let mut config = valid_config();
         config.os_accounts.p3a_ingest_token = String::new();
 
         let result = validate(&config);
 
-        assert!(
-            result.is_ok(),
-            "missing P3A ingest token must not fail validation: {result:?}"
-        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::MissingRequired {
+                field: "os_accounts.p3a_ingest_token"
+            })
+        ));
     }
 
     #[test]
