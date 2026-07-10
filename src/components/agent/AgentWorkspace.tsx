@@ -204,7 +204,7 @@ import {
   parseBranchSessionResult,
   type BranchSessionResult,
 } from "../../lib/hermes-session-branch";
-import { normalizeSteerText, steeringLiveEvent } from "../../lib/hermes-session-steer";
+import { normalizeSteerText } from "../../lib/hermes-session-steer";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { unsupportedEventStore } from "../../lib/hermes-unsupported-events";
 import { pendingActionStore } from "../../lib/hermes-pending-actions";
@@ -421,6 +421,32 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
     return show
       ? "Agent error gallery shown. Run __agentErrors(false) to hide."
       : "Agent error gallery hidden.";
+  };
+}
+
+// Dev-tools composer state driver (window.__composerSteerDemo). Forces the open
+// session's composer into its "June is working" branch — stop takes the slot,
+// and typing swaps it for the steer-send in place — so that interaction can be
+// iterated on without an in-flight turn. Open any real session first (the
+// branch needs a non-provisional session id). The steer-send click won't reach
+// a running turn in this mode; it's a visual harness only.
+// Dev builds only — the handle never ships.
+const COMPOSER_STEER_DEMO_EVENT = "june:agent:composer-steer-demo";
+let composerSteerDemoDesired = false;
+
+function setComposerSteerDemoDesired(show: boolean) {
+  composerSteerDemoDesired = show;
+  window.dispatchEvent(
+    new CustomEvent<{ show: boolean }>(COMPOSER_STEER_DEMO_EVENT, { detail: { show } }),
+  );
+}
+
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__composerSteerDemo = (show: boolean = true) => {
+    setComposerSteerDemoDesired(show);
+    return show
+      ? "Composer parked in June-is-working state. Type to reveal the steer-send; run __composerSteerDemo(false) to release."
+      : "Composer steer demo released.";
   };
 }
 
@@ -1539,6 +1565,80 @@ type PreparedComposerSubmission = {
   typedMessage: string;
 };
 
+type QueuedAttachmentFollowUp = {
+  id: string;
+  prepared: PreparedComposerSubmission;
+  attachments: AgentAttachment[];
+  status: "queued" | "sending" | "failed";
+  error?: string;
+};
+
+const UP_NEXT_DEMO_IMAGE_PREVIEW =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='44' height='44'%3E%3Crect width='44' height='44' rx='8' fill='%23d8d5ee'/%3E%3Ccircle cx='17' cy='17' r='7' fill='%237a70ba'/%3E%3C/svg%3E";
+
+function buildUpNextDemoImageAttachment(id: string, name: string): AgentAttachment {
+  return {
+    id,
+    name,
+    path: `uploads/${name}`,
+    rootLabel: "Hermes workspace",
+    size: 24_576,
+    previewDataUrl: UP_NEXT_DEMO_IMAGE_PREVIEW,
+    attach: {
+      localId: id,
+      kind: "image",
+      displayName: name,
+      workspacePath: `uploads/${name}`,
+      status: "imported",
+    },
+  };
+}
+
+function buildUpNextDemoFileAttachment(id: string, name: string): AgentAttachment {
+  return {
+    id,
+    name,
+    path: `uploads/${name}`,
+    rootLabel: "Hermes workspace",
+    size: 182_400,
+    attach: {
+      localId: id,
+      kind: "file",
+      displayName: name,
+      workspacePath: `uploads/${name}`,
+      status: "imported",
+    },
+  };
+}
+
+function buildUpNextDemoPrepared(text: string): PreparedComposerSubmission {
+  return { displayContent: text, runtimeContent: text, titleContent: text, typedMessage: text };
+}
+
+// Every follow-up shape the queue can hold: a single-image message and a
+// multi-attachment message led by a file, so the tile well, the thumbnail,
+// and the overflow count all render at once.
+function buildUpNextDemoFollowUps(): QueuedAttachmentFollowUp[] {
+  return [
+    {
+      id: "attachment-follow-up-demo",
+      prepared: buildUpNextDemoPrepared("Review this attachment next"),
+      attachments: [buildUpNextDemoImageAttachment("attachment-demo-image", "reference.png")],
+      status: "queued",
+    },
+    {
+      id: "attachment-follow-up-demo-multi",
+      prepared: buildUpNextDemoPrepared("Fold these findings into the report"),
+      attachments: [
+        buildUpNextDemoFileAttachment("attachment-demo-file", "usability-findings.pdf"),
+        buildUpNextDemoImageAttachment("attachment-demo-image-2", "session-notes.png"),
+        buildUpNextDemoImageAttachment("attachment-demo-image-3", "heatmap.png"),
+      ],
+      status: "queued",
+    },
+  ];
+}
+
 type ComposerInputSizeWarning = {
   inputSignature: string;
   signature: string;
@@ -1637,6 +1737,7 @@ type AgentSessionContinuity = {
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: string[];
   submittingIssueReportSessionIds: string[];
+  queuedAttachmentFollowUps: Record<string, QueuedAttachmentFollowUp[]>;
 };
 
 type AgentSessionTitleSource = "prompt" | "exchange" | "manual";
@@ -1790,6 +1891,7 @@ function captureSessionContinuity(state: {
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: Set<string>;
   submittingIssueReportSessionIds: Set<string>;
+  queuedAttachmentFollowUps: Record<string, QueuedAttachmentFollowUp[]>;
 }): AgentSessionContinuity | null {
   const activeIds = activeHermesActivitySessionIds();
   for (const [sessionId, pending] of Object.entries(state.pendingMessages)) {
@@ -1806,6 +1908,9 @@ function captureSessionContinuity(state: {
   }
   for (const sessionId of state.submittingIssueReportSessionIds) {
     activeIds.add(sessionId);
+  }
+  for (const [sessionId, queued] of Object.entries(state.queuedAttachmentFollowUps)) {
+    if (queued.length > 0) activeIds.add(sessionId);
   }
   if (activeIds.size === 0) return null;
   const pick = <T,>(record: Record<string, T>) =>
@@ -1825,6 +1930,7 @@ function captureSessionContinuity(state: {
     submittingIssueReportSessionIds: [...state.submittingIssueReportSessionIds].filter(
       (sessionId) => activeIds.has(sessionId),
     ),
+    queuedAttachmentFollowUps: pick(state.queuedAttachmentFollowUps),
   };
 }
 
@@ -1932,6 +2038,7 @@ function updateContinuityAfterIssueReportDelivery(detail: IssueReportDeliverySet
         (sessionId) => sessionId !== detail.sessionId,
       ),
     ),
+    queuedAttachmentFollowUps: sessionContinuity.queuedAttachmentFollowUps,
   });
 }
 
@@ -1963,6 +2070,7 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
       sessionContinuity.diagnosisRefreshIssueReportSessionIds,
     ),
     submittingIssueReportSessionIds: new Set(sessionContinuity.submittingIssueReportSessionIds),
+    queuedAttachmentFollowUps: sessionContinuity.queuedAttachmentFollowUps,
   });
 }
 
@@ -1990,6 +2098,7 @@ export function recordManualAgentSessionTitle(sessionId: string, title: string) 
       sessionContinuity.diagnosisRefreshIssueReportSessionIds,
     ),
     submittingIssueReportSessionIds: new Set(sessionContinuity.submittingIssueReportSessionIds),
+    queuedAttachmentFollowUps: sessionContinuity.queuedAttachmentFollowUps,
   });
 }
 
@@ -2099,6 +2208,23 @@ function hermesModelIdFor(modelId: string): string {
   return rawLocalGenerationModelId(modelId) ?? modelId;
 }
 
+export function composerInSteerStateFor(input: {
+  selectedSessionId?: string;
+  provisional: boolean;
+  working: boolean;
+  submitting: boolean;
+  submittingSessionId: string | null;
+  demo: boolean;
+}): boolean {
+  return Boolean(
+    input.selectedSessionId &&
+      !input.provisional &&
+      (input.working ||
+        (input.submitting && input.submittingSessionId === input.selectedSessionId) ||
+        input.demo),
+  );
+}
+
 export function AgentWorkspace({
   initialSession,
   initialSessionId: initialSessionIdProp,
@@ -2137,8 +2263,14 @@ export function AgentWorkspace({
   // tailors the composer placeholder copy while an image is generating.
   const [generatingImage, setGeneratingImage] = useState(false);
   const [generatingVideo, setGeneratingVideo] = useState(false);
+  // Dev-only: window.__composerSteerDemo() parks the composer in the working
+  // branch so the stop/steer-send interaction can be iterated without a turn.
+  const [composerSteerDemo, setComposerSteerDemo] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // `submitting` gates the whole composer, while this id scopes the immediate
+  // Stop visual to the existing session that owns the in-flight send.
+  const [submittingHermesSessionId, setSubmittingHermesSessionId] = useState<string | null>(null);
   const [errorState, setErrorState] = useState<AgentWorkspaceError | null>(null);
   const [submittingErrorIssueReport, setSubmittingErrorIssueReport] = useState(false);
   const [composerSizeWarning, setComposerSizeWarning] = useState<ComposerInputSizeWarning | null>(
@@ -2332,6 +2464,55 @@ export function AgentWorkspace({
   const pendingSteerBySessionIdRef = useRef<
     Record<string, { text: string; accepted: boolean; toolDrained: boolean }[]>
   >({});
+  // Steer cards: injected instructions tacked to the top of the composer while
+  // June works. They are a read-only presentation of instructions already
+  // submitted to Hermes, not a cancellable staging queue. The pending ref
+  // retains delivery tracking until the turn ends or is stopped.
+  const [steerCardsBySessionId, setSteerCardsBySessionId] = useState<
+    Record<string, { id: string; text: string }[]>
+  >({});
+  const steerCardSeqRef = useRef(0);
+  const [queuedAttachmentFollowUps, setQueuedAttachmentFollowUps] = useState<
+    Record<string, QueuedAttachmentFollowUp[]>
+  >(() =>
+    Object.fromEntries(
+      Object.entries(continuity?.queuedAttachmentFollowUps ?? {}).map(([sessionId, items]) => [
+        sessionId,
+        items.map((item) =>
+          item.status === "sending"
+            ? {
+                ...item,
+                status: "failed" as const,
+                error: "Delivery was interrupted. Try again.",
+              }
+            : item,
+        ),
+      ]),
+    ),
+  );
+  const queuedAttachmentFollowUpsRef = useRef(queuedAttachmentFollowUps);
+  const [upNextDemoFollowUpsBySessionId, setUpNextDemoFollowUpsBySessionId] = useState<
+    Record<string, QueuedAttachmentFollowUp[]>
+  >({});
+  const queuedAttachmentFollowUpSeqRef = useRef(
+    Object.values(continuity?.queuedAttachmentFollowUps ?? {}).reduce(
+      (highest, items) =>
+        items.reduce((itemHighest, item) => {
+          const sequence = Number(item.id.match(/^attachment-follow-up-(\d+)$/)?.[1] ?? 0);
+          return Math.max(itemHighest, sequence);
+        }, highest),
+      0,
+    ),
+  );
+  // Completion is observable through the live gateway and both message-refresh
+  // paths. Only one of them may advance queued follow-ups for a finished turn.
+  const continuingCompletedTurnSessionIdsRef = useRef(new Set<string>());
+  // The steer queue shows all rows by default; the header collapses the list
+  // to itself. Reset (back open) per session below.
+  const [steerQueueOpen, setSteerQueueOpen] = useState(true);
+  // Fade for the expanded stack's capped scroller (spec/scroll-fade.md).
+  const steerCardsListRef = useRef<HTMLDivElement | null>(null);
+  const steerCardsFade = useScrollFade(steerCardsListRef);
   const waitingSessionIdsRef = useRef<Set<string>>(waitingSessionIds);
   const [runtimeSessionIds, setRuntimeSessionIds] = useState<Record<string, string>>(
     () => continuity?.runtimeSessionIds ?? {},
@@ -2961,6 +3142,31 @@ export function AgentWorkspace({
   // because the composer auto-grow effect below needs it as a dependency.
   const heroMode =
     !gallerySections && (newSessionMode || (!selectedHermesSessionId && !selectedTask));
+  // Composer steer state: the open session is mid-run (or a send is landing), so
+  // the send slot holds Stop and a typed message steers the running turn rather
+  // than starting a new one. Drives the steer-send button, the queue-style
+  // placeholder, and whether the steer-card stack renders.
+  const composerInSteerState = composerInSteerStateFor({
+    selectedSessionId: selectedHermesSessionId,
+    provisional: selectedHermesSessionIsProvisional,
+    working: selectedHermesSessionId ? workingSessionIds.has(selectedHermesSessionId) : false,
+    submitting,
+    submittingSessionId: submittingHermesSessionId,
+    demo: composerSteerDemo,
+  });
+  const selectedSteerCards = selectedHermesSessionId
+    ? (steerCardsBySessionId[selectedHermesSessionId] ?? [])
+    : [];
+  const selectedQueuedAttachmentFollowUps = selectedHermesSessionId
+    ? (queuedAttachmentFollowUps[selectedHermesSessionId] ?? [])
+    : [];
+  const selectedUpNextDemoFollowUps = selectedHermesSessionId
+    ? (upNextDemoFollowUpsBySessionId[selectedHermesSessionId] ?? [])
+    : [];
+  const selectedFollowUpCount =
+    selectedSteerCards.length +
+    selectedQueuedAttachmentFollowUps.length +
+    selectedUpNextDemoFollowUps.length;
   const visibleErrorState = visibleAgentWorkspaceError(errorState, selectedHermesSessionId);
   const visibleError = visibleErrorState?.message ?? null;
   // The banner offers "Try again" for failures a reconnect-and-reload can clear:
@@ -3236,6 +3442,18 @@ export function AgentWorkspace({
     if (!el) return;
     return attachScrollThumbFade(el);
   }, [heroMode]);
+
+  // Same scroll-driven thumb for the steer-queue list — but attached ONLY
+  // when the list actually scrolls. The helper also shows on pointer activity,
+  // so on a short (non-scrollable) queue merely hovering toggled
+  // scrollbar-part paints, flashing an artifact in the card's corner.
+  const hasFollowUps = selectedFollowUpCount > 0;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-evaluate when the list mounts, opens, or grows
+  useEffect(() => {
+    const el = steerCardsListRef.current;
+    if (!el || el.scrollHeight <= el.clientHeight + 1) return;
+    return attachScrollThumbFade(el);
+  }, [hasFollowUps, steerQueueOpen, selectedFollowUpCount]);
 
   // Updates the task list without touching the selection — a late poll
   // response must not re-select a task the user already navigated away from.
@@ -3756,6 +3974,7 @@ export function AgentWorkspace({
               summary: "June finished.",
               ...activityCounts,
             });
+            continueAfterCompletedTurn(selectedHermesSessionId);
           }
           liveEventsRef.current = {
             ...liveEventsRef.current,
@@ -3844,6 +4063,7 @@ export function AgentWorkspace({
         reviewableIssueReports: reviewableIssueReportsRef.current,
         diagnosisRefreshIssueReportSessionIds: diagnosisRefreshIssueReportSessionIdsRef.current,
         submittingIssueReportSessionIds: submittingIssueReportSessionIdsRef.current,
+        queuedAttachmentFollowUps: queuedAttachmentFollowUpsRef.current,
       });
       for (const gateway of gatewaysRef.current.values()) {
         gateway.close();
@@ -4953,6 +5173,41 @@ export function AgentWorkspace({
     )
       return;
     if (message && (await handleBuiltinComposerSlashCommand(message))) return;
+    const attachmentQueueSessionId =
+      attachments.length > 0 &&
+      !category &&
+      !newSessionModeRef.current &&
+      selectedHermesSessionId &&
+      workingSessionIdsRef.current.has(selectedHermesSessionId)
+        ? selectedHermesSessionId
+        : undefined;
+    if (attachmentQueueSessionId) {
+      let prepared: PreparedComposerSubmission;
+      try {
+        prepared = await prepareComposerSubmission(message, attachments);
+      } catch (err) {
+        // The draft and attachments are still in the composer - only the
+        // banner is needed for recovery, unlike the full submit path below.
+        setError(messageFromError(err));
+        return;
+      }
+      const sizeWarning = oversizedComposerInputWarning({
+        content: prepared.runtimeContent,
+        inputSignature: composerInputSignature,
+        attachments,
+        model: generationModel,
+        models: generationModels,
+      });
+      if (sizeWarning && composerSizeProceedSignatureRef.current !== sizeWarning.signature) {
+        setComposerSizeWarning(sizeWarning);
+        composerEditorRef.current?.focus();
+        return;
+      }
+      enqueueAttachmentFollowUp(attachmentQueueSessionId, prepared, attachments);
+      clearComposerDraft();
+      composerEditorRef.current?.focus();
+      return;
+    }
     // June is mid-run: send the message straight into the loop via steer so
     // June picks it up after the current tool call (adds context without
     // interrupting — Escape or Stop interrupts instead). Plain-text follow-ups
@@ -4989,6 +5244,8 @@ export function AgentWorkspace({
       // clean completion resend anything still pending as a follow-up.
       // `registered` tracks whether Hermes accepted the steer, so a
       // tool.complete only clears ones a tool could actually have drained.
+      steerCardSeqRef.current += 1;
+      const cardId = `steer-${steerCardSeqRef.current}`;
       const steerEntry = { text: message, accepted: false, toolDrained: false };
       pendingSteerBySessionIdRef.current = {
         ...pendingSteerBySessionIdRef.current,
@@ -4997,6 +5254,13 @@ export function AgentWorkspace({
           steerEntry,
         ],
       };
+      // Tack the submitted instruction onto the composer as a read-only card.
+      // This is the sole in-flight representation (steerActiveSession no longer
+      // writes a transcript line); it clears when the turn drains or ends.
+      setSteerCardsBySessionId((prev) => ({
+        ...prev,
+        [steerSessionId]: [...(prev[steerSessionId] ?? []), { id: cardId, text: message }],
+      }));
       void steerActiveSession(steerSessionId, message)
         .then(() => {
           steerEntry.accepted = true;
@@ -5030,9 +5294,13 @@ export function AgentWorkspace({
     // through the wait and then vanish in a single frame when the
     // conversation takes over.
     if (heroMode) setHeroLeaving(true);
+    setSubmittingHermesSessionId(
+      newSessionModeRef.current ? null : (selectedHermesSessionId ?? null),
+    );
     setSubmitting(true);
     let clearedDraft = false;
     let clearedAttachments = false;
+    let submittedAttachments = attachments;
     let clearedIssueReportReview:
       | {
           sessionId: string;
@@ -5103,6 +5371,9 @@ export function AgentWorkspace({
         displayContent: prepared.displayContent,
         titleContent: prepared.titleContent,
         attachments,
+        onAttachmentsUpdated: (nextAttachments) => {
+          submittedAttachments = nextAttachments;
+        },
         ...(nextIssueReport ? { issueReport: nextIssueReport } : {}),
       });
       if (reportFollowUpSessionId) {
@@ -5122,7 +5393,7 @@ export function AgentWorkspace({
         // A blocked image attach carries the failed-status chips so the user
         // sees which image didn't go through; fall back to the originals
         // otherwise.
-        const restore = err instanceof AttachBlockedError ? err.attachments : attachments;
+        const restore = err instanceof AttachBlockedError ? err.attachments : submittedAttachments;
         setComposerAttachments((current) => (current.length ? current : restore));
       }
       if (clearedIssueReportReview) {
@@ -5161,6 +5432,7 @@ export function AgentWorkspace({
       }
     } finally {
       setSubmitting(false);
+      setSubmittingHermesSessionId(null);
       // On success the hero is gone; on failure this fades the greeting and
       // suggestions back in behind the restored draft.
       setHeroLeaving(false);
@@ -5496,7 +5768,7 @@ export function AgentWorkspace({
     turnAttachments: AgentAttachment[],
   ) {
     const pending = pendingImageAttachments(turnAttachments.map((attachment) => attachment.attach));
-    if (!pending.length) return;
+    if (!pending.length) return turnAttachments;
     const methods = createHermesMethods(gateway);
     const heldImageDataByPath = new Map(
       turnAttachments.flatMap((attachment) =>
@@ -5565,6 +5837,10 @@ export function AgentWorkspace({
         }),
       );
     }
+    return turnAttachments.map((item) => {
+      const next = nextStates.get(item.attach.localId);
+      return next ? { ...item, attach: next } : item;
+    });
   }
 
   function clearHeldFastPathImages(sessionId: string, heldImages: AgentAttachment[]) {
@@ -5842,36 +6118,17 @@ export function AgentWorkspace({
         if (!activityCounts) {
           clearSessionActivity(storedSessionId);
         }
-        // Delivery guarantee: any steer not consumed by a tool result this turn
-        // (Hermes only injects steers into tool output) would otherwise be lost.
-        // On a clean completion resend the leftovers as a follow-up so the
-        // message always reaches June; drop them on a failed/cancelled run.
-        const unconsumedSteers =
-          status === "completed"
-            ? pendingSteerBySessionIdRef.current[storedSessionId]?.filter(
-                // Consumed = Hermes accepted it AND a tool result drained it.
-                // Resend the rest (rejected, or accepted but no tool ran).
-                (entry) => !(entry.accepted && entry.toolDrained),
-              )
-            : undefined;
-        delete pendingSteerBySessionIdRef.current[storedSessionId];
-        if (unconsumedSteers?.length) {
-          const followUpSession = hermesSessionItemsRef.current.find(
-            (session) => session.id === storedSessionId,
-          );
-          if (followUpSession) {
-            const followUpText = unconsumedSteers.map((entry) => entry.text).join("\n");
-            window.setTimeout(() => {
-              void submitHermesSession(followUpText, followUpSession).catch((err: unknown) => {
-                // The follow-up never reached June (e.g. a gateway reconnect
-                // or a still-busy session right after completion). Surface it
-                // rather than silently losing the instruction.
-                setError(messageFromError(err), {
-                  sessionId: storedSessionId,
-                });
-              });
-            }, 0);
-          }
+        if (status === "completed") {
+          // Serialize any undrained text steer ahead of the first local
+          // attachment follow-up. Each accepted follow-up installs its own
+          // terminal listener, which advances the attachment FIFO one turn at
+          // a time.
+          continueAfterCompletedTurn(storedSessionId);
+        } else {
+          // Submitted text steers cannot be recalled and are retired on a
+          // failed/cancelled run. Local attachment follow-ups remain available
+          // to edit, remove, or send once the session is idle.
+          clearSubmittedSteers(storedSessionId);
         }
         // The diagnostic turn is over (even on error): let the user append
         // anything June's summary surfaced before sending the bundled report.
@@ -5907,6 +6164,11 @@ export function AgentWorkspace({
        * session id is known and before prompt.submit; a failed attach throws to
        * block the send so the user can retry. */
       attachments?: AgentAttachment[];
+      /** Background follow-ups must not pull the user into their session. */
+      selectSession?: boolean;
+      /** Persist structured image attach state before prompt.submit so a retry
+       * does not attach the same image twice. */
+      onAttachmentsUpdated?: (attachments: AgentAttachment[]) => void;
       /** Create + select the session and add the user bubble, then stop BEFORE
        * `prompt.submit` (the `/image` flow): the model is never invoked, and the
        * caller renders the result itself. Returns the stored session id so the
@@ -6162,7 +6424,13 @@ export function AgentWorkspace({
       // which the submit() catch turns into a restored composer the user can
       // retry — the prompt is NOT sent with a silently-missing image.
       try {
-        await attachPendingImages(gateway, runtimeSessionId, storedSessionId, turnAttachments);
+        const updatedAttachments = await attachPendingImages(
+          gateway,
+          runtimeSessionId,
+          storedSessionId,
+          turnAttachments,
+        );
+        options?.onAttachmentsUpdated?.(updatedAttachments);
       } catch (err) {
         clearQueuedIssueReport();
         rollbackOptimisticBeforePrompt(err);
@@ -6174,11 +6442,13 @@ export function AgentWorkspace({
       [storedSessionId]: runtimeSessionId,
     }));
     if (!optimisticSession) {
-      newSessionModeRef.current = false;
-      setNewSessionMode(false);
-      selectedHermesSessionIdRef.current = storedSessionId;
-      setSelectedHermesSessionId(storedSessionId);
-      setSelectedTaskId(undefined);
+      if (options?.selectSession !== false) {
+        newSessionModeRef.current = false;
+        setNewSessionMode(false);
+        selectedHermesSessionIdRef.current = storedSessionId;
+        setSelectedHermesSessionId(storedSessionId);
+        setSelectedTaskId(undefined);
+      }
       const optimisticSessionItem: HermesSessionInfo = {
         id: storedSessionId,
         title: sessionDisplayTitle,
@@ -6662,6 +6932,7 @@ export function AgentWorkspace({
             summary: "June finished.",
             ...activityCounts,
           });
+          continueAfterCompletedTurn(sessionId);
         }
         liveEventsRef.current = { ...liveEventsRef.current, [sessionId]: [] };
         setLiveEvents(liveEventsRef.current);
@@ -7156,6 +7427,176 @@ export function AgentWorkspace({
     setLiveEvents(liveEventsRef.current);
   }
 
+  function writeQueuedAttachmentFollowUps(next: Record<string, QueuedAttachmentFollowUp[]>) {
+    queuedAttachmentFollowUpsRef.current = next;
+    setQueuedAttachmentFollowUps(next);
+  }
+
+  function updateQueuedAttachmentFollowUps(
+    sessionId: string,
+    update: (items: QueuedAttachmentFollowUp[]) => QueuedAttachmentFollowUp[],
+  ) {
+    const nextItems = update(queuedAttachmentFollowUpsRef.current[sessionId] ?? []);
+    const next = { ...queuedAttachmentFollowUpsRef.current };
+    if (nextItems.length) {
+      next[sessionId] = nextItems;
+    } else {
+      delete next[sessionId];
+    }
+    writeQueuedAttachmentFollowUps(next);
+  }
+
+  function enqueueAttachmentFollowUp(
+    sessionId: string,
+    prepared: PreparedComposerSubmission,
+    queuedAttachments: AgentAttachment[],
+  ) {
+    queuedAttachmentFollowUpSeqRef.current += 1;
+    const item: QueuedAttachmentFollowUp = {
+      id: `attachment-follow-up-${queuedAttachmentFollowUpSeqRef.current}`,
+      prepared,
+      attachments: queuedAttachments,
+      status: "queued",
+    };
+    updateQueuedAttachmentFollowUps(sessionId, (items) => [...items, item]);
+  }
+
+  function removeQueuedAttachmentFollowUp(sessionId: string, itemId: string) {
+    updateQueuedAttachmentFollowUps(sessionId, (items) =>
+      items.filter((item) => item.id !== itemId || item.status === "sending"),
+    );
+  }
+
+  function editQueuedAttachmentFollowUp(sessionId: string, itemId: string) {
+    if (sessionId !== selectedHermesSessionIdRef.current) return;
+    if (draftRef.current.trim() || attachmentsRef.current.length) return;
+    const item = queuedAttachmentFollowUpsRef.current[sessionId]?.find(
+      (candidate) => candidate.id === itemId,
+    );
+    if (!item || item.status === "sending") return;
+    removeQueuedAttachmentFollowUp(sessionId, itemId);
+    draftRef.current = item.prepared.typedMessage;
+    categoryRef.current = null;
+    attachmentsRef.current = item.attachments;
+    setDraft(item.prepared.typedMessage);
+    setCategory(null);
+    setAttachments(item.attachments);
+    rememberComposerDraft(
+      composerDraftKeyRef.current,
+      item.prepared.typedMessage,
+      null,
+      item.attachments,
+    );
+    composerEditorRef.current?.setContent(item.prepared.typedMessage);
+  }
+
+  async function deliverQueuedAttachmentFollowUp(
+    sessionId: string,
+    itemId?: string,
+    options: { afterCompletion?: boolean } = {},
+  ) {
+    if (!options.afterCompletion && workingSessionIdsRef.current.has(sessionId)) return false;
+    const queued = queuedAttachmentFollowUpsRef.current[sessionId] ?? [];
+    const item = itemId ? queued.find((candidate) => candidate.id === itemId) : queued[0];
+    if (!item || item.status === "sending") return false;
+    // Automatic advancement (no itemId) stops at a failed head rather than
+    // resending it: the row's UI is an explicit Retry, and silently resending
+    // a message the user watched fail - possibly with an image already
+    // attached - is worse than holding the queue until they decide.
+    if (!itemId && item.status === "failed") return false;
+    const session = hermesSessionItemsRef.current.find((candidate) => candidate.id === sessionId);
+    if (!session) {
+      updateQueuedAttachmentFollowUps(sessionId, (items) =>
+        items.map((candidate) =>
+          candidate.id === item.id
+            ? { ...candidate, status: "failed", error: "This session is no longer available." }
+            : candidate,
+        ),
+      );
+      return false;
+    }
+    updateQueuedAttachmentFollowUps(sessionId, (items) =>
+      items.map((candidate) =>
+        candidate.id === item.id
+          ? { ...candidate, status: "sending", error: undefined }
+          : candidate,
+      ),
+    );
+    try {
+      await submitHermesSession(item.prepared.runtimeContent, session, {
+        displayContent: item.prepared.displayContent,
+        titleContent: item.prepared.titleContent,
+        attachments: item.attachments,
+        selectSession: false,
+        onAttachmentsUpdated: (nextAttachments) => {
+          updateQueuedAttachmentFollowUps(sessionId, (items) =>
+            items.map((candidate) =>
+              candidate.id === item.id ? { ...candidate, attachments: nextAttachments } : candidate,
+            ),
+          );
+        },
+      });
+      updateQueuedAttachmentFollowUps(sessionId, (items) =>
+        items.filter((candidate) => candidate.id !== item.id),
+      );
+      return true;
+    } catch (err) {
+      const failedAttachments = err instanceof AttachBlockedError ? err.attachments : undefined;
+      updateQueuedAttachmentFollowUps(sessionId, (items) =>
+        items.map((candidate) =>
+          candidate.id === item.id
+            ? {
+                ...candidate,
+                ...(failedAttachments ? { attachments: failedAttachments } : {}),
+                status: "failed",
+                error: messageFromError(err),
+              }
+            : candidate,
+        ),
+      );
+      return false;
+    }
+  }
+
+  function continueAfterCompletedTurn(sessionId: string) {
+    if (continuingCompletedTurnSessionIdsRef.current.has(sessionId)) return;
+    continuingCompletedTurnSessionIdsRef.current.add(sessionId);
+    const unconsumedSteers = pendingSteerBySessionIdRef.current[sessionId]?.filter(
+      (entry) => !(entry.accepted && entry.toolDrained),
+    );
+    clearSubmittedSteers(sessionId);
+    window.setTimeout(async () => {
+      if (unconsumedSteers?.length) {
+        const followUpSession = hermesSessionItemsRef.current.find(
+          (session) => session.id === sessionId,
+        );
+        if (!followUpSession) {
+          continuingCompletedTurnSessionIdsRef.current.delete(sessionId);
+          return;
+        }
+        const followUpText = unconsumedSteers.map((entry) => entry.text).join("\n");
+        try {
+          await submitHermesSession(followUpText, followUpSession, { selectSession: false });
+        } catch (err) {
+          setError(messageFromError(err), { sessionId });
+        } finally {
+          continuingCompletedTurnSessionIdsRef.current.delete(sessionId);
+        }
+        return;
+      }
+      try {
+        await deliverQueuedAttachmentFollowUp(sessionId, undefined, { afterCompletion: true });
+      } finally {
+        continuingCompletedTurnSessionIdsRef.current.delete(sessionId);
+      }
+    }, 0);
+  }
+
+  function clearSubmittedSteers(sessionId: string) {
+    delete pendingSteerBySessionIdRef.current[sessionId];
+    clearSteerCards(sessionId);
+  }
+
   // Feature 06: steer a STILL-WORKING session with a mid-run instruction,
   // through the dedicated typed control-plane method (session.steer) — never
   // prompt.submit, which the gateway rejects with 4009 while a turn runs. On a
@@ -7168,22 +7609,166 @@ export function AgentWorkspace({
   async function steerActiveSession(sessionId: string, text: string) {
     const instruction = normalizeSteerText(text);
     if (!instruction) return;
-    // Show the instruction in the transcript right away so the user sees it
-    // landed — the gateway ack can lag a beat behind a fast send, and we never
-    // want a sent message to silently vanish.
-    pushLiveEvent(
-      sessionId,
-      steeringLiveEvent({
-        sessionId,
-        text: instruction,
-        receivedAt: new Date().toISOString(),
-      }),
-    );
+    // The instruction is shown as a read-only steer card tacked to the composer
+    // (see the submit path) rather than a transcript line.
     const gateway = await ensureHermesGateway(sessionUnrestricted(sessionId));
     await createHermesMethods(gateway).steerSession({
       sessionId,
       text: instruction,
     });
+  }
+
+  // Drop every steer card for a session - the turn ended (delivered or resent as
+  // a follow-up) or was stopped, so the submitted-steer history retires.
+  function clearSteerCards(sessionId: string) {
+    setSteerCardsBySessionId((prev) => {
+      if (!prev[sessionId]) return prev;
+      const copy = { ...prev };
+      delete copy[sessionId];
+      return copy;
+    });
+  }
+
+  // Submitted text and locally waiting attachment messages share one compact
+  // follow-up system. session.steer has no recall primitive, so submitted text
+  // remains read-only; transport state stays out of the visual scan line.
+  function renderSteerCard(card: { id: string; text: string }) {
+    return (
+      <div key={card.id} className="agent-follow-up-row" data-kind="steer">
+        <span className="agent-follow-up-icon" aria-hidden>
+          <IconArrowCornerDownRight size={13} />
+        </span>
+        <span className="agent-follow-up-copy">
+          <span className="agent-follow-up-text" title={card.text}>
+            {card.text}
+          </span>
+        </span>
+      </div>
+    );
+  }
+
+  function renderQueuedAttachmentFollowUp(
+    sessionId: string,
+    item: QueuedAttachmentFollowUp,
+    options: { demo?: boolean } = {},
+  ) {
+    const sessionWorking = options.demo || workingSessionIds.has(sessionId);
+    const firstInQueue = queuedAttachmentFollowUpsRef.current[sessionId]?.[0]?.id === item.id;
+    const hasAttachedImage = item.attachments.some(
+      (attachment) => attachment.attach.kind === "image" && attachment.attach.status === "attached",
+    );
+    const locallyEditable = item.status !== "sending" && !hasAttachedImage;
+    const editable = locallyEditable && !draft.trim() && attachments.length === 0;
+    const statusLabel =
+      item.status === "sending"
+        ? "Sending"
+        : item.status === "failed"
+          ? hasAttachedImage
+            ? "Image attached; message not sent"
+            : "Couldn't send"
+          : sessionWorking
+            ? "Waiting for June to finish"
+            : "Ready to send";
+    return (
+      <div
+        key={item.id}
+        className="agent-follow-up-row"
+        data-kind="attachment"
+        data-status={item.status}
+        title={item.error ?? undefined}
+      >
+        <div className="agent-follow-up-attachments">
+          {item.attachments.length > 1 ? (
+            <span className="agent-attachment-chip" data-kind="file" aria-hidden>
+              <span className="agent-attachment-file-icon">
+                <IconFiles size={14} />
+              </span>
+            </span>
+          ) : (
+            item.attachments
+              .slice(0, 1)
+              .map((attachment) => (
+                <AgentAttachmentTile key={attachment.id} attachment={attachment} />
+              ))
+          )}
+        </div>
+        <div className="agent-follow-up-copy">
+          <span className="agent-follow-up-text">{item.prepared.typedMessage || "Attachment"}</span>
+          <span className="agent-follow-up-announcement" aria-live="polite">
+            {statusLabel}
+          </span>
+          {item.error ? <span className="agent-follow-up-announcement">{item.error}</span> : null}
+        </div>
+        {item.status === "sending" ? null : (
+          <div className="agent-follow-up-actions">
+            {item.status === "failed" && firstInQueue ? (
+              <button
+                type="button"
+                aria-label="Retry queued message"
+                title="Retry"
+                disabled={sessionWorking}
+                onClick={() => void deliverQueuedAttachmentFollowUp(sessionId, item.id)}
+              >
+                <IconArrowRotateClockwise size={14} />
+              </button>
+            ) : !sessionWorking && firstInQueue ? (
+              <button
+                type="button"
+                aria-label="Send queued message"
+                title="Send now"
+                onClick={() => void deliverQueuedAttachmentFollowUp(sessionId, item.id)}
+              >
+                <IconArrowUp size={14} />
+              </button>
+            ) : null}
+            {locallyEditable ? (
+              <>
+                <button
+                  type="button"
+                  aria-label="Edit queued message"
+                  title={editable ? "Edit" : "Clear the composer before editing"}
+                  disabled={!editable}
+                  onClick={() => {
+                    if (options.demo) {
+                      setUpNextDemoFollowUpsBySessionId((current) => ({
+                        ...current,
+                        [sessionId]: (current[sessionId] ?? []).filter(
+                          (followUp) => followUp.id !== item.id,
+                        ),
+                      }));
+                      draftRef.current = item.prepared.typedMessage;
+                      setDraft(item.prepared.typedMessage);
+                      composerEditorRef.current?.setContent(item.prepared.typedMessage);
+                      return;
+                    }
+                    editQueuedAttachmentFollowUp(sessionId, item.id);
+                  }}
+                >
+                  <IconPencil size={14} />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Remove queued message"
+                  title="Remove"
+                  onClick={() =>
+                    options.demo
+                      ? setUpNextDemoFollowUpsBySessionId((current) => ({
+                          ...current,
+                          [sessionId]: (current[sessionId] ?? []).filter(
+                            (followUp) => followUp.id !== item.id,
+                          ),
+                        }))
+                      : removeQueuedAttachmentFollowUp(sessionId, item.id)
+                  }
+                >
+                  <IconTrashCan size={14} />
+                </button>
+              </>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
   }
 
   async function startNewTask(
@@ -7251,6 +7836,7 @@ export function AgentWorkspace({
       status: "starting",
       summary: "Starting June.",
     });
+    setSubmittingHermesSessionId(null);
     setSubmitting(true);
     try {
       await submitHermesSession(initialPrompt);
@@ -7269,6 +7855,7 @@ export function AgentWorkspace({
       });
     } finally {
       setSubmitting(false);
+      setSubmittingHermesSessionId(null);
     }
   }
 
@@ -7490,7 +8077,7 @@ export function AgentWorkspace({
     // reaches the terminal handler, so clear the delivery-guarantee steers here
     // too -- otherwise a steer typed-then-stopped lingers and could auto-submit
     // as a follow-up after a later run in the same session.
-    delete pendingSteerBySessionIdRef.current[sessionId];
+    clearSubmittedSteers(sessionId);
     const activityCounts = clearSessionActivity(sessionId, "cancelled");
     dispatchAgentSessionStatus({
       sessionId,
@@ -7701,6 +8288,7 @@ export function AgentWorkspace({
     scrubHermesSessionState(sessionId);
     pendingIssueReportsRef.current.delete(sessionId);
     setReviewableIssueReport(sessionId, null);
+    updateQueuedAttachmentFollowUps(sessionId, () => []);
     forgetComposerDraft(sessionComposerDraftKey(sessionId));
     // Every deletion funnels through here (the in-workspace delete and the
     // sidebar/sessions-list AGENT_DELETE_SESSION_EVENT), so this is the one
@@ -7930,6 +8518,83 @@ export function AgentWorkspace({
     window.addEventListener(AGENT_GALLERY_EVENT, onGallery);
     return () => window.removeEventListener(AGENT_GALLERY_EVENT, onGallery);
   }, []);
+
+  // Reopen the steer queue whenever the open session changes — collapsing it
+  // is a per-session, per-glance affordance, not a sticky mode.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on session switch only
+  useEffect(() => {
+    setSteerQueueOpen(true);
+  }, [selectedHermesSessionId]);
+
+  // Re-measure the follow-up-list fade when the queue opens or the count changes —
+  // data-driven size changes the hook's scroll/resize listeners can miss.
+  useEffect(() => {
+    steerCardsFade.update();
+  }, [steerQueueOpen, selectedFollowUpCount, steerCardsFade.update]);
+
+  // Dev-only composer steer-state driver (window.__composerSteerDemo): pick up
+  // the desired state on mount and follow live toggles via the window event.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    setComposerSteerDemo(composerSteerDemoDesired);
+    const onDemo = (event: Event) => {
+      setComposerSteerDemo(Boolean((event as CustomEvent<{ show: boolean }>).detail?.show));
+    };
+    window.addEventListener(COMPOSER_STEER_DEMO_EVENT, onDemo);
+    return () => window.removeEventListener(COMPOSER_STEER_DEMO_EVENT, onDemo);
+  }, []);
+
+  // Dev-only: preview the working-composer follow-up system without starting a
+  // real turn. __steerSubmitDemo shows one submitted text steer; __upNextDemo
+  // shows every queue shape at once (two steers, a single-attachment message,
+  // a multi-attachment message) and parks the composer in steer state.
+  useEffect(() => {
+    if (!import.meta.env.DEV || typeof window === "undefined") return;
+    const w = window as unknown as Record<string, unknown>;
+    w.__steerSubmitDemo = (text = "Focus on the mobile layout first") => {
+      if (!selectedHermesSessionId || selectedHermesSessionIsProvisional) {
+        return "Open a real session first, then run __steerSubmitDemo().";
+      }
+      steerCardSeqRef.current += 1;
+      const id = `steer-demo-${steerCardSeqRef.current}`;
+      setSteerCardsBySessionId((prev) => ({
+        ...prev,
+        [selectedHermesSessionId]: [...(prev[selectedHermesSessionId] ?? []), { id, text }],
+      }));
+      return `Tacked a steer card "${text}" onto the composer.`;
+    };
+    w.__upNextDemo = (show: boolean = true) => {
+      if (!selectedHermesSessionId || selectedHermesSessionIsProvisional) {
+        return "Open a real session first, then run __upNextDemo().";
+      }
+      setComposerSteerDemoDesired(show);
+      const demoSteers = [
+        { id: "steer-up-next-demo", text: "Check the API boundary" },
+        { id: "steer-up-next-demo-2", text: "Keep the migration additive" },
+      ];
+      const demoSteerIds = new Set(demoSteers.map((card) => card.id));
+      setSteerCardsBySessionId((prev) => {
+        const others = (prev[selectedHermesSessionId] ?? []).filter(
+          (card) => !demoSteerIds.has(card.id),
+        );
+        return {
+          ...prev,
+          [selectedHermesSessionId]: show ? [...others, ...demoSteers] : others,
+        };
+      });
+      setUpNextDemoFollowUpsBySessionId((current) => ({
+        ...current,
+        [selectedHermesSessionId]: show ? buildUpNextDemoFollowUps() : [],
+      }));
+      return show
+        ? "Up next preview shown. Run __upNextDemo(false) to hide it."
+        : "Up next preview hidden.";
+    };
+    return () => {
+      delete w.__steerSubmitDemo;
+      delete w.__upNextDemo;
+    };
+  }, [selectedHermesSessionId, selectedHermesSessionIsProvisional]);
 
   // Hoisted so the trailing "Thinking…" indicator only shows in the gap after a
   // send (last turn is the user's) — once an assistant turn exists it carries
@@ -8405,38 +9070,65 @@ export function AgentWorkspace({
             </motion.div>
           ) : null}
         </AnimatePresence>
+        {selectedHermesSessionId && selectedFollowUpCount ? (
+          // One surface for the user's single intent: follow up while June is
+          // working. Text may steer the current turn while attachments wait,
+          // but that transport distinction belongs in row status, not in two
+          // competing queue cards.
+          <section className="agent-steer-queue" aria-label="Up next">
+            <div className="agent-steer-queue-header">
+              <button
+                type="button"
+                className="agent-steer-queue-trigger"
+                aria-expanded={steerQueueOpen}
+                onClick={() => setSteerQueueOpen((open) => !open)}
+              >
+                Up next
+                {steerQueueOpen ? null : (
+                  <span className="status-pill agent-steer-queue-count">
+                    {selectedFollowUpCount}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                className="agent-steer-queue-chevron-button"
+                aria-label={steerQueueOpen ? "Collapse up next" : "Expand up next"}
+                aria-expanded={steerQueueOpen}
+                onClick={() => setSteerQueueOpen((open) => !open)}
+              >
+                <IconChevronDownSmall
+                  size={13}
+                  className="agent-steer-queue-chevron"
+                  data-expanded={steerQueueOpen}
+                  aria-hidden
+                />
+              </button>
+            </div>
+            {steerQueueOpen ? (
+              <div className="agent-steer-cards-scroll scroll-fade" {...steerCardsFade.props}>
+                <div ref={steerCardsListRef} className="agent-steer-cards-list">
+                  {selectedSteerCards.map((card) => renderSteerCard(card))}
+                  {selectedQueuedAttachmentFollowUps.map((item) =>
+                    renderQueuedAttachmentFollowUp(selectedHermesSessionId, item),
+                  )}
+                  {selectedUpNextDemoFollowUps.map((item) =>
+                    renderQueuedAttachmentFollowUp(selectedHermesSessionId, item, { demo: true }),
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
         <div ref={composerBoxRef} className="agent-composer-box">
           {attachments.length ? (
             <div className="agent-composer-attachments">
               {attachments.map((attachment) => (
-                <span
+                <AgentAttachmentTile
                   key={attachment.id}
-                  className="agent-attachment-chip"
-                  data-attach-status={attachment.attach.status}
-                  title={attachment.attach.error ?? attachment.name}
-                >
-                  {attachment.previewDataUrl ? (
-                    <img src={attachment.previewDataUrl} alt="" aria-hidden="true" />
-                  ) : (
-                    <FileTypeIcon name={attachment.name} size={14} />
-                  )}
-                  <span className="agent-attachment-name">{attachment.name}</span>
-                  {attachmentStatusLabel(attachment.attach) ? (
-                    <span
-                      className="agent-attachment-status"
-                      data-attach-status={attachment.attach.status}
-                    >
-                      {attachmentStatusLabel(attachment.attach)}
-                    </span>
-                  ) : null}
-                  <button
-                    type="button"
-                    aria-label={`Remove ${attachment.name}`}
-                    onClick={() => removeAttachment(attachment.id)}
-                  >
-                    <IconCrossSmall size={12} />
-                  </button>
-                </span>
+                  attachment={attachment}
+                  onRemove={() => removeAttachment(attachment.id)}
+                />
               ))}
             </div>
           ) : null}
@@ -8520,9 +9212,15 @@ export function AgentWorkspace({
                   ? "Generating image…"
                   : importingFiles
                     ? "Attaching file…"
-                    : heroMode
-                      ? "Ask June anything, run / commands"
-                      : "Send a message"
+                    : composerInSteerState
+                      ? // June is mid-run: a typed message steers this turn
+                        // immediately (it is not staged), so the copy names the
+                        // outcome - a follow-up folded into the running work -
+                        // rather than a queue that doesn't exist.
+                        "Ask for follow-up changes"
+                      : heroMode
+                        ? "Ask June anything, run / commands"
+                        : "Send a message"
             }
             onChange={(text, nextCategory) => {
               draftRef.current = text;
@@ -8616,21 +9314,53 @@ export function AgentWorkspace({
               >
                 <IconMicrophone size={18} />
               </button>
-              {selectedHermesSessionId &&
-              !selectedHermesSessionIsProvisional &&
-              workingSessionIds.has(selectedHermesSessionId) ? (
-                // While June works, stop owns the send slot — sending would
-                // only bounce off the gateway's busy guard anyway.
-                <button
-                  type="button"
-                  className="agent-composer-stop"
-                  aria-label="Stop June"
-                  title="Stop June"
-                  disabled={stoppingSessionIds.has(selectedHermesSessionId)}
-                  onClick={() => void stopHermesSession(selectedHermesSessionId)}
-                >
-                  <IconStop size={16} />
-                </button>
+              {selectedHermesSessionId && composerInSteerState ? (
+                // June is working (or a follow-up is landing): the slot flips
+                // to stop the instant a message fires — no spinner in between.
+                // Typing a follow-up swaps stop for a steer-send in place (the
+                // same one-slot scale trade every send/stop swap uses), which
+                // redirects the run mid-flight (session.steer) without
+                // interrupting it. Stop returns when the draft clears, and
+                // Escape interrupts the turn at any time.
+                draft.trim().length > 0 || attachments.length > 0 ? (
+                  // Keyed so the swap remounts (button-for-button in one slot
+                  // would be updated in place) and the scale-in trade plays.
+                  <button
+                    key="steer-send"
+                    type="submit"
+                    className="agent-composer-send"
+                    disabled={imageSlashBlockedByModel}
+                    title={
+                      imageSlashBlockedByModel
+                        ? "Switch to a vision model before using /image."
+                        : attachments.length
+                          ? "Queue next message"
+                          : "Send to steer June"
+                    }
+                    aria-label={attachments.length ? "Queue next message" : "Send to steer June"}
+                  >
+                    <IconArrowUp size={18} />
+                  </button>
+                ) : (
+                  <button
+                    key="steer-stop"
+                    type="button"
+                    className="agent-composer-stop"
+                    aria-label="Stop June"
+                    title={
+                      workingSessionIds.has(selectedHermesSessionId)
+                        ? "Stop June"
+                        : "June is starting"
+                    }
+                    disabled={
+                      stoppingSessionIds.has(selectedHermesSessionId) ||
+                      !workingSessionIds.has(selectedHermesSessionId)
+                    }
+                    onClick={() => void stopHermesSession(selectedHermesSessionId)}
+                  >
+                    <IconStop size={16} />
+                  </button>
+                )
               ) : (
                 <button
                   type="submit"
@@ -13714,6 +14444,70 @@ function attachmentStatusLabel(state: HermesAttachmentState): string {
     default:
       return "";
   }
+}
+
+function attachmentFileTypeLabel(name: string): string {
+  const filename = name.split(/[\\/]/).pop() ?? name;
+  const extensionIndex = filename.lastIndexOf(".");
+  if (extensionIndex <= 0 || extensionIndex === filename.length - 1) return "File";
+  return filename.slice(extensionIndex + 1).toUpperCase();
+}
+
+function AgentAttachmentTile({
+  attachment,
+  onRemove,
+}: {
+  attachment: AgentAttachment;
+  onRemove?: () => void;
+}) {
+  const statusLabel = attachmentStatusLabel(attachment.attach);
+  return (
+    <span
+      className="agent-attachment-chip"
+      data-kind={attachment.previewDataUrl ? "image" : "file"}
+      data-attach-status={attachment.attach.status}
+      title={attachment.attach.error ?? attachment.name}
+    >
+      {attachment.previewDataUrl ? (
+        <img src={attachment.previewDataUrl} alt="" aria-hidden="true" />
+      ) : (
+        <>
+          <span className="agent-attachment-file-icon" aria-hidden="true">
+            <FileTypeIcon name={attachment.name} size={18} />
+          </span>
+          <span className="agent-attachment-file-details">
+            <span className="agent-attachment-name">{attachment.name}</span>
+            <span className="agent-attachment-file-meta">
+              <span className="agent-attachment-file-type">
+                {attachmentFileTypeLabel(attachment.name)}
+              </span>
+              {statusLabel ? (
+                <span
+                  className="agent-attachment-status"
+                  data-attach-status={attachment.attach.status}
+                >
+                  {statusLabel}
+                </span>
+              ) : null}
+            </span>
+          </span>
+        </>
+      )}
+      {attachment.previewDataUrl ? (
+        <span className="agent-attachment-name">{attachment.name}</span>
+      ) : null}
+      {attachment.previewDataUrl && statusLabel ? (
+        <span className="agent-attachment-status" data-attach-status={attachment.attach.status}>
+          {statusLabel}
+        </span>
+      ) : null}
+      {onRemove ? (
+        <button type="button" aria-label={`Remove ${attachment.name}`} onClick={onRemove}>
+          {attachment.previewDataUrl ? <IconCrossMedium size={14} /> : <IconCrossSmall size={12} />}
+        </button>
+      ) : null}
+    </span>
+  );
 }
 
 function commandTokensForResolutions(

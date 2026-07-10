@@ -10,6 +10,7 @@ import {
   AgentWorkspace,
   HERO_GREETINGS,
   SkillsToolsPanel,
+  composerInSteerStateFor,
   projectAgentActivityLevels,
   resetAgentSessionContinuity,
   seedAgentComposerDraftForTest,
@@ -556,6 +557,19 @@ describe("AgentWorkspace", () => {
     expect(second.toolCallSessionIds).toBe(first.toolCallSessionIds);
   });
 
+  it("scopes an in-flight submit's steer state to its owning session", () => {
+    const base = {
+      provisional: false,
+      working: false,
+      submitting: true,
+      submittingSessionId: "session-1",
+      demo: false,
+    };
+
+    expect(composerInSteerStateFor({ ...base, selectedSessionId: "session-1" })).toBe(true);
+    expect(composerInSteerStateFor({ ...base, selectedSessionId: "session-2" })).toBe(false);
+  });
+
   it("lets users cancel a clean skill editor without making changes", async () => {
     const user = userEvent.setup();
 
@@ -1019,6 +1033,649 @@ describe("AgentWorkspace", () => {
     await act(async () => {
       resolveSubmit?.();
     });
+  });
+
+  it("keeps Stop disabled until an existing-session send is actually running", async () => {
+    const user = userEvent.setup();
+    let resolveResume: (() => void) | undefined;
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.resume") {
+        return new Promise((resolve) => {
+          resolveResume = () => resolve({ session_id: "runtime-session-1" });
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Message June" }), "start carefully");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    const stopWhileStarting = await screen.findByRole("button", { name: "Stop June" });
+    expect(stopWhileStarting).toBeDisabled();
+    expect(stopWhileStarting).toHaveAttribute("title", "June is starting");
+    await user.click(stopWhileStarting);
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.interrupt", expect.anything());
+
+    await act(async () => resolveResume?.());
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start carefully",
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Stop June" })).toBeEnabled();
+  });
+
+  it("renders submitted steers as read-only while retaining delivery tracking", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    const composer = screen.getByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+
+    await user.type(composer, "focus on the API boundary");
+    await user.click(screen.getByRole("button", { name: "Send to steer June" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.steer", {
+        session_id: "session-1",
+        text: "focus on the API boundary",
+      }),
+    );
+
+    expect(screen.getByRole("region", { name: "Up next" })).toBeInTheDocument();
+    expect(screen.queryByText("Steering current turn")).toBeNull();
+    expect(screen.queryByText("Queued")).toBeNull();
+    expect(screen.getByTitle("focus on the API boundary")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /revise steer/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /dismiss steer/i })).toBeNull();
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "focus on the API boundary",
+      }),
+    );
+  });
+
+  it("combines steering text and waiting attachments in one Up next surface", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await user.type(composer, "check the API boundary");
+    await user.click(screen.getByRole("button", { name: "Send to steer June" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.steer", {
+        session_id: "session-1",
+        text: "check the API boundary",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/brief.pdf"] },
+    });
+    await user.type(composer, "review the brief next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    const upNext = await screen.findByRole("region", { name: "Up next" });
+    // The count numeral only shows while the queue is collapsed.
+    expect(within(upNext).queryByText("2")).toBeNull();
+    expect(within(upNext).getByText("check the API boundary")).toBeInTheDocument();
+    expect(within(upNext).queryByText("Steering current turn")).toBeNull();
+    expect(within(upNext).getByText("review the brief next")).toBeInTheDocument();
+    expect(within(upNext).getByText("Waiting for June to finish")).toHaveClass(
+      "agent-follow-up-announcement",
+    );
+    expect(within(upNext).getByText("brief.pdf")).toBeInTheDocument();
+    expect(screen.getAllByRole("region", { name: "Up next" })).toHaveLength(1);
+    expect(screen.queryByText("Queued")).toBeNull();
+  });
+
+  it("previews the unified Up next composer state without submitting a message", async () => {
+    render(<AgentWorkspace initialSession={existingSession} />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    const upNextDemo = (window as unknown as { __upNextDemo?: (show?: boolean) => string })
+      .__upNextDemo;
+    expect(upNextDemo).toBeTypeOf("function");
+    act(() => {
+      upNextDemo?.();
+    });
+
+    const upNext = await screen.findByRole("region", { name: "Up next" });
+    // The count numeral only shows while the queue is collapsed.
+    expect(within(upNext).queryByText("4")).toBeNull();
+    expect(within(upNext).getByText("Check the API boundary")).toBeInTheDocument();
+    expect(within(upNext).getByText("Keep the migration additive")).toBeInTheDocument();
+    expect(within(upNext).queryByText("Steering current turn")).toBeNull();
+    expect(within(upNext).getByText("Review this attachment next")).toBeInTheDocument();
+    expect(within(upNext).getByText("reference.png")).toBeInTheDocument();
+    expect(within(upNext).getByText("Fold these findings into the report")).toBeInTheDocument();
+    // A multi-attachment message shows the generic files tile, no filename
+    // and no count.
+    expect(within(upNext).queryByText("usability-findings.pdf")).toBeNull();
+    expect(within(upNext).queryByText("3")).toBeNull();
+    expect(screen.getByRole("button", { name: "Stop June" })).toBeInTheDocument();
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.steer", expect.anything());
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+
+    act(() => {
+      upNextDemo?.(false);
+    });
+    expect(screen.queryByRole("region", { name: "Up next" })).toBeNull();
+  });
+
+  it("queues and genuinely removes an attachment follow-up while June is working", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/brief.pdf"] },
+    });
+    expect(await screen.findByText("brief.pdf")).toBeInTheDocument();
+    await user.type(composer, "review the brief next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    expect(await screen.findByText("Up next")).toBeInTheDocument();
+    expect(screen.getByText("review the brief next")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove queued message" })).toBeInTheDocument();
+    expect(composer).toHaveTextContent("");
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(([method]) => method === "prompt.submit"),
+    ).toHaveLength(1);
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.steer", expect.anything());
+
+    await user.click(screen.getByRole("button", { name: "Edit queued message" }));
+    expect(screen.queryByText("Up next")).toBeNull();
+    expect(composer).toHaveTextContent("review the brief next");
+    expect(screen.getByText("brief.pdf")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+    expect(await screen.findByText("Up next")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove queued message" }));
+    expect(screen.queryByText("Up next")).toBeNull();
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(([method]) => method === "prompt.submit"),
+    ).toHaveLength(1);
+  });
+
+  it("keeps queued follow-up identities unique after continuity restores", async () => {
+    const user = userEvent.setup();
+    const first = render(<AgentWorkspace initialSession={existingSession} />);
+
+    let composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/first.pdf"] },
+    });
+    await user.type(composer, "first queued message");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+    expect(await screen.findByText("first queued message")).toBeInTheDocument();
+
+    first.unmount();
+    render(<AgentWorkspace initialSession={existingSession} />);
+    composer = await screen.findByRole("textbox", { name: "Message June" });
+    expect(await screen.findByText("first queued message")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/second.pdf"] },
+    });
+    await user.type(composer, "second queued message");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    expect(await screen.findByText("second queued message")).toBeInTheDocument();
+    const removeButtons = screen.getAllByRole("button", { name: "Remove queued message" });
+    expect(removeButtons).toHaveLength(2);
+    await user.click(removeButtons[0]);
+    expect(screen.queryByText("first queued message")).toBeNull();
+    expect(screen.getByText("second queued message")).toBeInTheDocument();
+  });
+
+  it("sends a queued file follow-up after the current turn completes", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/brief.pdf"] },
+    });
+    expect(await screen.findByText("brief.pdf")).toBeInTheDocument();
+    await user.type(composer, "review the brief next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(([method]) => method === "prompt.submit"),
+    ).toHaveLength(1);
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringMatching(/review the brief next[\s\S]*uploads\/brief\.pdf/),
+      }),
+    );
+    expect(screen.queryByText("Up next")).toBeNull();
+  });
+
+  it("advances a completed turn once and keeps attachment follow-ups behind undrained steers", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await user.type(composer, "check the API boundary");
+    await user.click(screen.getByRole("button", { name: "Send to steer June" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.steer", {
+        session_id: "session-1",
+        text: "check the API boundary",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/brief.pdf"] },
+    });
+    await user.type(composer, "review the brief after that");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        const completed = {
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        };
+        handler(completed);
+        handler(completed);
+      }
+    });
+
+    await waitFor(() =>
+      expect(
+        mocks.gatewayRequest.mock.calls.filter(
+          ([method, params]) =>
+            method === "prompt.submit" && params?.text === "check the API boundary",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(
+      mocks.gatewayRequest.mock.calls.some(
+        ([method, params]) =>
+          method === "prompt.submit" && params?.text?.includes("review the brief after that"),
+      ),
+    ).toBe(false);
+    expect(screen.getByText("review the brief after that")).toBeInTheDocument();
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringContaining("review the brief after that"),
+      }),
+    );
+  });
+
+  it("attaches a queued image only after the current turn completes", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/reference.png"] },
+    });
+    expect(await screen.findByText("reference.png")).toBeInTheDocument();
+    await user.type(composer, "use this reference next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    expect(
+      mocks.gatewayRequest.mock.calls.some(([method]) => method === "image.attach_bytes"),
+    ).toBe(false);
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+
+    await waitFor(() =>
+      expect(
+        mocks.gatewayRequest.mock.calls.some(([method]) => method === "image.attach_bytes"),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringContaining("use this reference next"),
+      }),
+    );
+    const methods = mocks.gatewayRequest.mock.calls.map(([method]) => method);
+    expect(methods.indexOf("image.attach_bytes")).toBeLessThan(
+      methods.lastIndexOf("prompt.submit"),
+    );
+  });
+
+  it("retains a failed queued attachment delivery for retry", async () => {
+    let queuedAttempts = 0;
+    mocks.gatewayRequest.mockImplementation((method: string, params?: { text?: string }) => {
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      if (method === "prompt.submit" && params?.text?.includes("review the brief next")) {
+        queuedAttempts += 1;
+        return queuedAttempts === 1
+          ? Promise.reject(new Error("gateway unavailable"))
+          : Promise.resolve({});
+      }
+      return Promise.resolve({});
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/brief.pdf"] },
+    });
+    expect(await screen.findByText("brief.pdf")).toBeInTheDocument();
+    await user.type(composer, "review the brief next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+
+    const retry = await screen.findByRole("button", { name: "Retry queued message" });
+    expect(screen.getByText("Couldn't send")).toBeInTheDocument();
+    expect(screen.getByText("review the brief next")).toBeInTheDocument();
+    await user.click(retry);
+    await waitFor(() => expect(queuedAttempts).toBe(2));
+    expect(screen.queryByText("Up next")).toBeNull();
+  });
+
+  it("does not auto-send a failed queued follow-up after the turn completes", async () => {
+    let queuedAttempts = 0;
+    mocks.gatewayRequest.mockImplementation((method: string, params?: { text?: string }) => {
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      if (method === "prompt.submit" && params?.text?.includes("review the brief next")) {
+        queuedAttempts += 1;
+        return Promise.reject(new Error("gateway unavailable"));
+      }
+      return Promise.resolve({});
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/brief.pdf"] },
+    });
+    expect(await screen.findByText("brief.pdf")).toBeInTheDocument();
+    await user.type(composer, "review the brief next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    // First completion drains the queue; the delivery fails, so the row flips
+    // to a retry affordance.
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+    expect(await screen.findByRole("button", { name: "Retry queued message" })).toBeInTheDocument();
+    await waitFor(() => expect(queuedAttempts).toBe(1));
+
+    // A fresh turn re-arms the session and completes cleanly. Automatic
+    // advancement must stop at the failed head rather than silently resending
+    // it.
+    await user.type(composer, "keep going");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "keep going",
+      }),
+    );
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+
+    expect(queuedAttempts).toBe(1);
+    expect(screen.getByRole("button", { name: "Retry queued message" })).toBeInTheDocument();
+    expect(screen.getByText("review the brief next")).toBeInTheDocument();
+  });
+
+  it("surfaces an error when queued follow-up preparation fails", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/brief.pdf"] },
+    });
+    expect(await screen.findByText("brief.pdf")).toBeInTheDocument();
+    // No skill is registered, so the slash command cannot resolve and
+    // preparation rejects before anything is enqueued.
+    await user.type(composer, "/nonexistent review the brief next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+
+    expect(await screen.findByText("Could not find skill /nonexistent.")).toBeInTheDocument();
+    expect(screen.queryByText("Up next")).toBeNull();
+    const promptSubmits = mocks.gatewayRequest.mock.calls.filter(
+      ([method]) => method === "prompt.submit",
+    );
+    expect(promptSubmits).toHaveLength(1);
+    expect(composer).toHaveTextContent("review the brief next");
+    expect(screen.getByText("brief.pdf")).toBeInTheDocument();
+  });
+
+  it("does not offer edit or remove after an image was attached but its message failed", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    mocks.gatewayRequest.mockImplementation((method: string, params?: { text?: string }) => {
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      if (method === "image.attach_bytes") {
+        return Promise.resolve({ attachment_id: "attached-image-1" });
+      }
+      if (method === "prompt.submit" && params?.text?.includes("use this reference next")) {
+        return Promise.reject(new Error("gateway unavailable"));
+      }
+      return Promise.resolve({});
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start the audit");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start the audit",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith("tauri://drag-drop", expect.any(Function)),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: { paths: ["/Users/alex/Desktop/reference.png"] },
+    });
+    await user.type(composer, "use this reference next");
+    await user.click(screen.getByRole("button", { name: "Queue next message" }));
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-1",
+          payload: { status: "success" },
+        });
+      }
+    });
+
+    expect(await screen.findByText("Image attached; message not sent")).toBeInTheDocument();
+    expect(screen.getByText("gateway unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry queued message" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit queued message" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove queued message" })).toBeNull();
   });
 
   it("opens report rows from the plus menu without inserting a chip", async () => {
@@ -8475,6 +9132,8 @@ describe("AgentWorkspace", () => {
     });
 
     expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+    expect(screen.getByText("TXT")).toBeInTheDocument();
+    expect(document.querySelector(".agent-attachment-file-icon")).not.toBeNull();
     expect(mocks.importHermesBridgeFileBytes).toHaveBeenCalledWith(
       "notes.txt",
       expect.any(Uint8Array),

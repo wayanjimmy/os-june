@@ -483,7 +483,7 @@ input:focus-visible,
 .agent-task-row:hover,
 .agent-task-row[data-active="true"] {
   border-color: var(--border-subtle);
-  background: var(--surface-subtle);
+  background: var(--card);
 }
 
 .agent-task-row-title {
@@ -5072,13 +5072,13 @@ input:focus-visible,
   min-width: 16ch;
   /* Centers a single line inside the control-height zone the badge and CTA
    * occupy; a wrapped second line grows downward from there. */
-  margin: calc((var(--control-md) - 1.5 * var(--fs-md)) / 2) 0 0;
+  margin: calc((var(--control-md) - 1.5 * var(--fs-sm)) / 2) 0 0;
   /* A shade under full foreground: present, but not competing with the
    * conversation. */
   color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground));
-  /* One step below the conversation text (.agent-markdown at --fs-lg): the
-   * notice annotates the chat, it doesn't speak in it. */
-  font-size: var(--fs-md);
+  /* Two steps below conversation text: this annotates the chat rather than
+   * competing with it, while the CTA remains the clear action at the right. */
+  font-size: var(--fs-sm);
   line-height: 1.5;
 }
 
@@ -5714,6 +5714,243 @@ input:focus-visible,
   gap: var(--sp-1);
 }
 
+/* Follow-ups share one elevated "Up next" surface above the composer. Text
+   steers and locally waiting attachment messages use the same row anatomy;
+   their quiet status copy carries the delivery distinction. */
+.agent-steer-queue {
+  /* One fixed-width leading slot shared by every line: the count pill in the
+     header, the steer arrow, and the attachment tile all occupy this rail, so
+     the text that follows them lands on a single left edge. */
+  --follow-up-rail: 24px;
+  pointer-events: auto;
+  width: 100%;
+  max-width: min(var(--chat-max), var(--content-max));
+  margin-bottom: var(--sp-2);
+  /* A 6px frame all around; the washes inside follow concentrically
+     (r-xl minus this inset = r-md). */
+  padding: var(--sp-2);
+  /* The composer box's surface recipe — solid card with the hairline ring
+     folded into the shadow — so the queue reads at the same elevation. */
+  border: 1px solid transparent;
+  border-radius: var(--r-xl);
+  background: var(--card);
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
+}
+
+/* The header is an inert row holding two subtle triggers: the pill + label
+   at the left, the chevron at the card's right edge. Each hover wash hugs
+   its own button instead of barring the full width. */
+.agent-steer-queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: var(--control-md);
+}
+
+.agent-steer-queue-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--control-md);
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fs-lg);
+  text-align: left;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.agent-steer-queue-chevron-button {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-md);
+  height: var(--control-md);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted-foreground);
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.agent-steer-queue-trigger:hover,
+.agent-steer-queue-chevron-button:hover {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+/* Collapsed-only count after the label: the house badge in its default gray
+   voice (.status-pill, defined later in this stylesheet). */
+
+/* Open, the chevron points down (fold the list away); collapsed it turns up,
+   toward where the queue reopens. */
+.agent-steer-queue-chevron {
+  transition: rotate var(--t-med) var(--ease-out);
+}
+
+.agent-steer-queue-chevron[data-expanded="false"] {
+  rotate: 180deg;
+}
+
+/* Non-scrolling fade host for the capped list below (spec/scroll-fade.md):
+   the shared `.scroll-fade` overlays paint here while the child scrolls. */
+.agent-steer-cards-scroll {
+  --scroll-fade-color: var(--card);
+  --scroll-fade-size: 20px;
+}
+
+.agent-steer-cards-list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(320px, 35vh);
+  /* The rows carry a few px of invisible overhang (widened hit targets, the
+     corner count badge), and overflow-y alone would let that pan the list
+     sideways, sliding rows out from under the card's insets. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* Joins the detail-scroller scrollbar family (the ::-webkit lane + the
+     scroll-driven thumb from attachScrollThumbFade): the opt-out lets the
+     ::-webkit rules engage, and the thumb paints only WHILE SCROLLING (a
+     hover-revealed thumb flashed over the rows). No reserved gutter — the
+     lane appears only once a stack actually scrolls. */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+/* The compact horizontal treatment from the original steering design: optional
+   leading context, flexible message copy, then genuine actions at the end. */
+/* Taller rows so the 24px rail tile sits a perfectly even 6px from the row
+   card's left, top, and bottom edges (36 - 24 = 6 + 6; padding matches). */
+.agent-follow-up-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  min-height: var(--control-xl);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--foreground);
+  font-size: var(--fs-lg);
+}
+
+.agent-follow-up-row:hover {
+  background: var(--secondary);
+}
+
+.agent-follow-up-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--follow-up-rail);
+  color: var(--muted-foreground);
+}
+
+.agent-follow-up-attachments {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.agent-follow-up-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--sp-px);
+}
+
+.agent-follow-up-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--fs-lg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-follow-up-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.agent-follow-up-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.agent-follow-up-row:hover .agent-follow-up-actions,
+.agent-follow-up-row:focus-within .agent-follow-up-actions {
+  opacity: 1;
+}
+
+/* Small rail-sized ghost squares: the 14px glyph gets ~5px of padding, and
+   at rail height they sit the same 6px from the row's top, bottom, and right
+   edges as the tile does from its left - one even inset all around. */
+.agent-follow-up-actions button {
+  display: inline-grid;
+  place-items: center;
+  width: var(--follow-up-rail);
+  height: var(--follow-up-rail);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.agent-follow-up-actions button:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--muted-foreground) 16%, transparent);
+  color: var(--foreground);
+}
+
+.agent-follow-up-actions button:disabled {
+  opacity: 0.35;
+}
+
+@media (hover: none) {
+  .agent-follow-up-actions {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-follow-up-actions {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-steer-queue-trigger,
+  .agent-steer-queue-chevron-button,
+  .agent-steer-queue-chevron {
+    transition: none;
+  }
+}
+
 .agent-composer-actions {
   display: flex;
   align-items: center;
@@ -6324,8 +6561,12 @@ input:focus-visible,
 }
 
 .agent-composer-attachments {
+  --attachment-tile-size: calc(var(--sp-12) + var(--sp-1));
   display: flex;
   flex-wrap: wrap;
+  /* Every attachment shares one visual height; images use the whole square,
+     while documents use that height for an icon well plus metadata. */
+  align-items: center;
   gap: var(--sp-1);
   padding: var(--sp-1) var(--sp-1) 0;
 }
@@ -6383,41 +6624,59 @@ input:focus-visible,
 }
 
 .agent-attachment-chip {
+  --attachment-tile-size: calc(var(--sp-12) + var(--sp-1));
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  max-width: 220px;
-  padding: 2px 2px 2px var(--sp-2);
-  border-radius: var(--r-sm);
-  background: var(--surface-subtle);
+  max-width: min(calc(var(--sp-12) * 7), 100%);
+  height: var(--attachment-tile-size);
+  padding: var(--sp-1);
+  border-radius: var(--r-lg);
+  background: oklch(100% 0 none);
   color: var(--foreground);
   font-size: var(--fs-sm);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 8%);
 }
 
-/* When the chip leads with an image thumb, drop the text-oriented left
- * padding so the thumb sits flush at 2px on all sides, like the button. */
-.agent-attachment-chip:has(> img) {
-  padding-left: 2px;
-}
-
-.agent-attachment-chip > img {
+.agent-attachment-file-icon {
+  display: inline-grid;
+  place-items: center;
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  border-radius: var(--r-xs);
-  object-fit: cover;
-  /* Hairline just inside the thumb so light image edges don't melt into the
-   * chip. Mixed from --foreground so it flips with the theme. */
-  outline: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent);
-  outline-offset: -1px;
+  width: calc(var(--attachment-tile-size) - var(--sp-1) * 2);
+  height: calc(var(--attachment-tile-size) - var(--sp-1) * 2);
+  border-radius: var(--r-md);
+  background: var(--surface-subtle);
+  color: var(--warm-strong);
+  box-shadow: none;
 }
 
-.agent-attachment-chip > svg {
-  flex: 0 0 auto;
-  color: var(--muted-foreground);
+.agent-attachment-file-details {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--sp-px);
 }
 
 .agent-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-attachment-file-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  line-height: 1;
+}
+
+.agent-attachment-file-type {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6449,9 +6708,6 @@ input:focus-visible,
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
-  /* The same square as the image thumb, so it sits flush with the chip's 2px
-   * padding on all three sides — at 18px it floated 3px off the top/bottom
-   * but only 2px off the right edge, reading as off-center. */
   width: 20px;
   height: 20px;
   /* The app never resets UA button padding globally — WebKit's default
@@ -6460,14 +6716,12 @@ input:focus-visible,
    * right and 0.5px high of true center. */
   padding: 0;
   border: 0;
-  /* Concentric with the chip: r-sm (6px) minus the 2px padding. */
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--muted-foreground);
   transition:
     background-color var(--t-fast) var(--ease-out),
-    color var(--t-fast) var(--ease-out),
-    scale var(--t-fast) var(--ease-out);
+    color var(--t-fast) var(--ease-out);
 }
 
 /* The visible square is small; quietly widen the hit target around it
@@ -6484,8 +6738,144 @@ input:focus-visible,
   color: var(--foreground);
 }
 
-.agent-attachment-chip button:active {
-  scale: 0.96;
+/* Image attachments read as a bare rounded thumbnail — no chip chrome, no
+   filename — so a message or steer that carries an image stays scannable and
+   the tile doesn't compete with the steer cards above it. The remove control
+   tucks into the thumb's top-right corner and reveals on hover/focus. */
+.agent-attachment-chip[data-kind="image"] {
+  position: relative;
+  max-width: none;
+  height: var(--attachment-tile-size);
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-attachment-chip[data-kind="image"] > img {
+  width: var(--attachment-tile-size);
+  height: var(--attachment-tile-size);
+  border-radius: var(--r-md);
+  object-fit: cover;
+  outline: 1px solid rgb(0 0 0 / 10%);
+  outline-offset: -1px;
+}
+
+[data-theme="dark"] .agent-attachment-chip {
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 10%);
+}
+
+[data-theme="dark"] .agent-attachment-file-icon {
+  box-shadow: none;
+}
+
+[data-theme="dark"] .agent-attachment-chip[data-kind="image"] {
+  box-shadow: none;
+}
+
+[data-theme="dark"] .agent-attachment-chip[data-kind="image"] > img {
+  outline-color: rgb(255 255 255 / 10%);
+}
+
+.agent-attachment-chip[data-kind="image"] .agent-attachment-name,
+.agent-attachment-chip[data-kind="image"] .agent-attachment-status {
+  display: none;
+}
+
+/* Failed image: the destructive tint has no chip body to sit on, so mark the
+   thumb's own edge instead. */
+.agent-attachment-chip[data-kind="image"][data-attach-status="failed"] {
+  background: transparent;
+}
+
+.agent-attachment-chip[data-kind="image"][data-attach-status="failed"] > img {
+  outline-color: var(--destructive);
+}
+
+/* The remove control set into the thumb's corner: a small squircle in the
+   house ghost-button voice (muted glyph warming to foreground on hover, no
+   ring or border — the solid themed surface is all the separation it needs
+   over the image, in both modes). */
+.agent-attachment-chip[data-kind="image"] button {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--background);
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.agent-attachment-chip[data-kind="image"]:hover button,
+.agent-attachment-chip[data-kind="image"]:focus-within button {
+  opacity: 1;
+}
+
+.agent-attachment-chip[data-kind="image"] button:hover {
+  color: var(--foreground);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-attachment-chip[data-kind="image"] button {
+    transition: none;
+  }
+}
+
+/* Inside an "Up next" row the chip collapses to the shared leading rail: a
+   bare square tile (image thumb or file-type well) whose width matches the
+   header's count pill and the steer arrow slot, so every row's text starts on
+   the same left edge. The row copy carries the message; the filename stays on
+   the chip's title. Placed after the chip's dark-theme rules — this flat
+   stylesheet resolves equal-specificity ties by order. */
+.agent-follow-up-attachments .agent-attachment-chip {
+  --attachment-tile-size: var(--follow-up-rail);
+  max-width: none;
+  padding: 0;
+  /* The chip's r-lg base reads rounder than the image thumb beside it at
+     this size; every rail square shares the thumb's radius. */
+  border-radius: var(--r-md);
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Rail file tiles sit on a white card instead of the gray well - gray on
+   the row's gray hover wash went muddy. Surface and hairline are the
+   composer chip's exact recipe so the two read as one family. The icon
+   rides the card directly. */
+.agent-follow-up-attachments .agent-attachment-chip[data-kind="file"] {
+  background: oklch(100% 0 none);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 8%);
+}
+
+[data-theme="dark"] .agent-follow-up-attachments .agent-attachment-chip[data-kind="file"] {
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 10%);
+}
+
+.agent-follow-up-attachments .agent-attachment-chip[data-kind="file"] .agent-attachment-file-icon {
+  background: transparent;
+}
+
+.agent-follow-up-attachments .agent-attachment-file-icon {
+  width: var(--attachment-tile-size);
+  height: var(--attachment-tile-size);
+}
+
+/* The composer chip's 18px glyph crowds this smaller well until its strokes
+   read as a filled shape; sized down, the outline breathes again. */
+.agent-follow-up-attachments .agent-attachment-file-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.agent-follow-up-attachments .agent-attachment-file-details {
+  display: none;
 }
 
 .agent-composer-box:focus-within {
@@ -7098,7 +7488,10 @@ input:focus-visible,
 
 /* Send is the primary action in the brand terracotta (the logo mark color);
  * dictation stays a ghost. The arrow is always in its slot — it just goes
- * quiet while there's nothing to send, and lights up as the user types. */
+ * quiet while there's nothing to send, and lights up as the user types.
+ * Deliberately NO entrance motion on this button: an arrow nudge on the first
+ * keystroke read as jank, and the box-level version misaligned the disabled
+ * state. The steer-send's slide is the only send motion. */
 .agent-composer-send {
   display: inline-grid;
   place-items: center;
@@ -7141,6 +7534,12 @@ input:focus-visible,
     animation: none;
   }
 }
+
+/* The steer-send needs no CSS of its own: while June works, stop and send
+   TRADE the one corner slot on the draft state (typed = send, empty = stop),
+   the same keyed scale-swap every send/stop trade uses. A two-button
+   choreography (send sliding in beside stop) kept fighting the right-anchored
+   row's geometry; one slot is simpler and matches the app's motion language. */
 
 /* "Responding" affordance pinned to the bottom of the timeline while the agent
  * is working — the dot spinner next to a shimmering label. */
@@ -17158,6 +17557,7 @@ input:focus-visible,
  * and transparent borders clip the painted pill back to the usual 4px,
  * inset 2px from the card edge and the content alike. */
 .agent-scroll::-webkit-scrollbar,
+.agent-steer-cards-list::-webkit-scrollbar,
 .note-detail-scroll::-webkit-scrollbar,
 .command-prompt-results::-webkit-scrollbar,
 .main-panel-body[data-detail-scroller="true"]::-webkit-scrollbar {
@@ -17166,6 +17566,7 @@ input:focus-visible,
 }
 
 .agent-scroll::-webkit-scrollbar-thumb,
+.agent-steer-cards-list::-webkit-scrollbar-thumb,
 .note-detail-scroll::-webkit-scrollbar-thumb,
 .command-prompt-results::-webkit-scrollbar-thumb,
 .main-panel-body[data-detail-scroller="true"]::-webkit-scrollbar-thumb {
@@ -17175,6 +17576,7 @@ input:focus-visible,
 }
 
 .agent-scroll[data-scrollbar-active="true"]::-webkit-scrollbar-thumb,
+.agent-steer-cards-list[data-scrollbar-active="true"]::-webkit-scrollbar-thumb,
 .note-detail-scroll[data-scrollbar-active="true"]::-webkit-scrollbar-thumb,
 .command-prompt-results[data-scrollbar-active="true"]::-webkit-scrollbar-thumb,
 .main-panel-body[data-detail-scroller="true"][data-scrollbar-active="true"]::-webkit-scrollbar-thumb {
@@ -17187,6 +17589,7 @@ input:focus-visible,
 }
 
 .agent-scroll::-webkit-scrollbar-thumb:hover,
+.agent-steer-cards-list::-webkit-scrollbar-thumb:hover,
 .note-detail-scroll::-webkit-scrollbar-thumb:hover,
 .command-prompt-results::-webkit-scrollbar-thumb:hover,
 .main-panel-body[data-detail-scroller="true"]::-webkit-scrollbar-thumb:hover {
