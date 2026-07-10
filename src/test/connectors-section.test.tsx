@@ -68,6 +68,17 @@ describe("ConnectorsSection", () => {
     expect(mocks.listen).toHaveBeenCalledWith("june://connectors-changed", expect.any(Function));
   });
 
+  it("keeps local mode to one account: hides connect once an account exists", async () => {
+    mocks.connectorsList.mockResolvedValue([account()]);
+    render(<ConnectorsSection />);
+    await screen.findByText("alex@example.com");
+
+    // No "add another account" affordance while one is connected; the base
+    // connector servers, triggers, and grants all bind to that single account.
+    expect(screen.queryByRole("button", { name: "Connect Google account" })).toBeNull();
+    expect(screen.getByText(/Local mode uses one Google account at a time/i)).toBeInTheDocument();
+  });
+
   it("connects an account from the feature-bundle dialog and applies the runtime", async () => {
     render(<ConnectorsSection />);
     await screen.findByText(/No Google account connected yet/);

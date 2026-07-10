@@ -331,6 +331,22 @@ pub async fn list_accounts(app: &tauri::AppHandle) -> Result<Vec<ConnectorAccoun
         .collect())
 }
 
+/// The email of an already-stored account that differs from the one being
+/// connected, if any. Local mode is single-account (every connector surface
+/// resolves the one connected account), so a second, distinct account is
+/// refused to avoid a cross-account read/write mix-up. Comparison is
+/// case-insensitive, so reconnecting or adding scope to the same email returns
+/// `None` and is allowed.
+fn conflicting_existing_account<'a>(
+    existing_emails: impl IntoIterator<Item = &'a str>,
+    connecting: &str,
+) -> Option<String> {
+    existing_emails
+        .into_iter()
+        .find(|email| !email.eq_ignore_ascii_case(connecting))
+        .map(str::to_string)
+}
+
 /// Run the full connect flow (browser consent, loopback callback, code
 /// exchange, custody write, DB index upsert) for the requested scope
 /// bundles. With a `login_hint` for an already-connected account whose
@@ -378,6 +394,30 @@ pub async fn begin_connect(
                 "That Google account does not match the one you were reconnecting. Try again and choose that account.",
             ));
         }
+    }
+
+    // Local mode v1 binds every connector surface to a single account: the base
+    // Gmail/Calendar MCP servers, the per-job autonomy servers, and every
+    // trigger all independently resolve "the connected account" (the first
+    // connected row). A second, distinct account would let a routine created
+    // against account B silently read or mutate account A's mail and calendar,
+    // a cross-account privacy leak. Refuse a different account while one is
+    // already stored; reconnecting or adding scope to the same email still
+    // passes (the email matches). Multi-account routing is a documented
+    // follow-up. Checked after auth because the account identity is only known
+    // once Google returns it; the settings UI also hides "add another" so this
+    // guard is the safety net, not the primary path.
+    let existing_accounts = repos.list_connector_accounts().await?;
+    if let Some(existing_email) = conflicting_existing_account(
+        existing_accounts.iter().map(|record| record.email.as_str()),
+        &email,
+    ) {
+        return Err(AppError::new(
+            "connector_single_account_only",
+            format!(
+                "June local mode uses one Google account at a time. Disconnect {existing_email} before connecting another."
+            ),
+        ));
     }
 
     // `include_granted_scopes=true` means the response scope field carries
@@ -529,6 +569,28 @@ mod tests {
         assert_eq!(
             ConnectorAccountStatus::from_db("unexpected"),
             ConnectorAccountStatus::Connected
+        );
+    }
+
+    #[test]
+    fn single_account_guard_blocks_a_different_account_only() {
+        // First-ever connect: nothing stored, nothing conflicts.
+        assert_eq!(conflicting_existing_account([], "a@example.com"), None);
+        // Reconnect or scope-add on the same account (any casing) is allowed.
+        assert_eq!(
+            conflicting_existing_account(["a@example.com"], "A@Example.com"),
+            None
+        );
+        // A second, distinct account is refused, naming the stored one.
+        assert_eq!(
+            conflicting_existing_account(["a@example.com"], "b@example.com"),
+            Some("a@example.com".to_string())
+        );
+        // The stored account is reported even when the new one is also present
+        // in the list (defensive: only the differing email matters).
+        assert_eq!(
+            conflicting_existing_account(["a@example.com", "b@example.com"], "b@example.com"),
+            Some("a@example.com".to_string())
         );
     }
 }

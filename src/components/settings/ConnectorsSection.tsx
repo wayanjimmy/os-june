@@ -222,17 +222,28 @@ export function ConnectorsSection() {
           </ul>
         )}
         <div className="connectors-connect-row">
-          <button
-            type="button"
-            className="primary-action primary-solid"
-            onClick={() => {
-              setBundles([...DEFAULT_CONNECT_BUNDLES]);
-              setConnectOpen(true);
-            }}
-          >
-            <IconPlusMedium size={13} aria-hidden />
-            Connect Google account
-          </button>
+          {accounts && accounts.length > 0 ? (
+            // Local mode v1 binds every connector server, trigger, and grant to
+            // one account, so June keeps it to a single account. Switching means
+            // disconnecting first, which clears that account's triggers and
+            // grants. Multi-account is a documented follow-up.
+            <p className="settings-row-description">
+              Local mode uses one Google account at a time. Disconnect the current one to switch to
+              a different account.
+            </p>
+          ) : accounts ? (
+            <button
+              type="button"
+              className="primary-action primary-solid"
+              onClick={() => {
+                setBundles([...DEFAULT_CONNECT_BUNDLES]);
+                setConnectOpen(true);
+              }}
+            >
+              <IconPlusMedium size={13} aria-hidden />
+              Connect Google account
+            </button>
+          ) : null}
         </div>
       </div>
 
