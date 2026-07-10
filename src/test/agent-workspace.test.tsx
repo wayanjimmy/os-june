@@ -280,19 +280,33 @@ function mockImageGenerationSuccess() {
 function mockVideoSettings({
   imageSafeMode,
   imageSafeModePromptDismissed,
+  videoModel = "wan-2.2-a14b-text-to-video",
+  effectiveVideoModel,
 }: {
   imageSafeMode: boolean;
   imageSafeModePromptDismissed: boolean;
+  videoModel?: string;
+  effectiveVideoModel?: string;
 }) {
   mocks.providerModelSettings.mockResolvedValue({
     settings: {
       transcriptionProvider: "venice",
       transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
       generationModel: "zai-org-glm-5-2",
-      videoModel: "wan-2.2-a14b-text-to-video",
+      videoModel,
       imageSafeMode,
       imageSafeModePromptDismissed,
     },
+    effectiveSettings: effectiveVideoModel
+      ? {
+          transcriptionProvider: "venice",
+          transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+          generationModel: "zai-org-glm-5-2",
+          videoModel: effectiveVideoModel,
+          imageSafeMode,
+          imageSafeModePromptDismissed,
+        }
+      : undefined,
   });
 }
 
@@ -8355,6 +8369,27 @@ describe("AgentWorkspace", () => {
     expect(screen.queryByRole("dialog", { name: "Safe mode is on" })).not.toBeInTheDocument();
     expect(mocks.imagePromptMayBeExplicit).toHaveBeenCalledWith("a red bicycle");
     expect(mocks.videoGenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it("pins the active profile's video model for /video generation", async () => {
+    mockGlmCapabilities(["functionCalling"]);
+    mockVideoSettings({
+      imageSafeMode: false,
+      imageSafeModePromptDismissed: false,
+      effectiveVideoModel: "grok-imagine-text-to-video-private",
+    });
+    mockVideoGenerationSuccess();
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    await user.type(await screen.findByRole("textbox"), "/video a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+
+    await screen.findByRole("button", { name: "Download video" });
+    expect(mocks.videoGenerate).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "grok-imagine-text-to-video-private" }),
+    );
   });
 
   it("removes the persisted /video pending turn after a terminal submit failure", async () => {

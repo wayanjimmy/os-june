@@ -46,6 +46,7 @@ import {
   type ProviderModelMode,
   type VeniceModelDto,
 } from "../../lib/tauri";
+import { VIDEO_GENERATION_ENABLED } from "../../lib/feature-flags";
 import { ProviderLogo } from "./ProviderLogo";
 import { selectedModel } from "./ModelPickerDialog";
 import {
@@ -68,8 +69,8 @@ type ProfileBuilderSectionProps = {
 
 /**
  * June's native guided Profile Builder (spec 20). A five-step wizard that creates
- * an isolated Hermes profile with name, instructions, model/provider, skills,
- * and MCP servers, then optionally makes it active. It validates
+ * an isolated Hermes profile with a name, models, skills, and MCP servers, then
+ * optionally makes it active. It validates
  * the model's tool-calling capability before allowing creation, shows exactly
  * what files/config will change (with risk labels) on the review step, and
  * surfaces success/failure with rollback messaging.
@@ -169,7 +170,7 @@ export function ProfileBuilderView({
       <BuilderShell mode={state.mode ?? mode} profile={state.profile} showModeNote={false}>
         <EmptyState
           title="Hermes is not running"
-          description="Start Hermes to create a profile. A profile gives a task its own model, skills, MCP servers, and instructions."
+          description="Start Hermes to create a profile with its own models, skills, and MCP servers."
         />
       </BuilderShell>
     );
@@ -267,8 +268,9 @@ function BuilderShell({
         title="Profiles"
         blurb={
           <>
-            Create a profile with its own model, skills, MCP servers, and optional instructions.
-            Every profile presents as June.{" "}
+            Create a profile with its own models, skills, and MCP servers. Every profile presents as
+            June, and its notes, note transcriptions, dictation history, and chat sessions stay
+            separate.{" "}
             <ModeNote
               mode={mode}
               profile={profile}
@@ -338,7 +340,7 @@ function ProfilesListView({
       <ProfilesShell mode={mode} profile={undefined} showModeNote={false}>
         <EmptyState
           title="Hermes is not running"
-          description="Start Hermes to create a profile. A profile gives a task its own model, skills, MCP servers, and instructions."
+          description="Start Hermes to create a profile with its own models, skills, and MCP servers."
         />
       </ProfilesShell>
     );
@@ -411,8 +413,8 @@ function ProfilesListView({
             </ul>
             {!hasProfiles || onlyDefault ? (
               <p className="profiles-empty-copy">
-                Create a profile when you want a task to use its own model, skills, MCP servers, or
-                instructions.
+                Create a profile when you want a task to use its own models, skills, and MCP
+                servers.
               </p>
             ) : null}
           </>
@@ -464,7 +466,8 @@ function ProfilesShell({
         title="Profiles"
         blurb={
           <>
-            Manage profiles with their own model, skills, MCP servers, and instructions.{" "}
+            Manage profiles with their own models, skills, and MCP servers. Their notes, note
+            transcriptions, dictation history, and chat sessions stay separate.{" "}
             <ModeNote mode={mode} profile={profile} show={showModeNote} prefix="Showing" />
           </>
         }
@@ -836,20 +839,6 @@ function BasicsStep({ state }: { state: ProfileBuilderState }) {
           onChange={(event) => state.update({ description: event.currentTarget.value })}
         />
       </label>
-
-      <label className="profile-builder-field">
-        <span className="profile-builder-field-label">Custom instructions (SOUL)</span>
-        <textarea
-          value={form.soul}
-          rows={4}
-          placeholder="Optional. Add task-specific guidance."
-          aria-label="Custom instructions"
-          onChange={(event) => state.update({ soul: event.currentTarget.value })}
-        />
-        <span className="profile-builder-field-meta">
-          Appended to June's default instructions for this profile.
-        </span>
-      </label>
     </div>
   );
 }
@@ -880,6 +869,7 @@ function ModelStep({ state }: { state: ProfileBuilderState }) {
   function modelOptionsForMode(mode: ProviderModelMode): VeniceModelDto[] {
     if (mode === "transcription") return [...state.voiceModels];
     if (mode === "image") return [...state.imageModels];
+    if (mode === "video") return [...state.videoModels];
     return textOptions;
   }
 
@@ -889,8 +879,10 @@ function ModelStep({ state }: { state: ProfileBuilderState }) {
       state.update({ provider: picked?.provider ?? "venice", model: modelId });
     } else if (mode === "transcription") {
       state.update({ voiceProvider: picked?.provider ?? "venice", voiceModel: modelId });
-    } else {
+    } else if (mode === "image") {
       state.update({ imageModel: modelId });
+    } else {
+      state.update({ videoModel: modelId });
     }
     closeModelPicker();
   }
@@ -990,6 +982,29 @@ function ModelStep({ state }: { state: ProfileBuilderState }) {
             onSearchChange={setModelSearch}
             onSelect={(modelId) => selectModelFromPicker("image", modelId)}
           />
+          {VIDEO_GENERATION_ENABLED ? (
+            <ProfileModelRow
+              mode="video"
+              title="Video"
+              description="Video generation for this profile. Leave it on June's default unless this profile needs its own choice."
+              value={form.videoModel || state.effectiveModelSettings?.videoModel || ""}
+              options={state.videoModels}
+              open={pickerMode === "video"}
+              flyout={modelPickerFlyout}
+              search={modelSearch}
+              triggerRef={modelPickerTriggerRef}
+              popoverRef={modelPickerPopoverRef}
+              searchRef={modelPickerSearchRef}
+              defaulted={!form.videoModel}
+              onReset={() => state.update({ videoModel: "" })}
+              onToggle={() =>
+                pickerMode === "video" ? closeModelPicker() : openModelPicker("video")
+              }
+              onFlyoutChange={setModelPickerFlyout}
+              onSearchChange={setModelSearch}
+              onSelect={(modelId) => selectModelFromPicker("video", modelId)}
+            />
+          ) : null}
         </>
       )}
       {support && !support.supportsTools ? (
@@ -1252,8 +1267,9 @@ function ReviewStep({ state }: { state: ProfileBuilderState }) {
         generation: state.models,
         transcription: state.voiceModels,
         image: state.imageModels,
+        video: state.videoModels,
       }),
-    [state.form, state.models, state.voiceModels, state.imageModels],
+    [state.form, state.models, state.voiceModels, state.imageModels, state.videoModels],
   );
   return (
     <div className="profile-builder-review">

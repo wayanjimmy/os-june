@@ -1313,7 +1313,7 @@ export function AppSettings({
     ? modelOptions(imageModelCatalog(), displayProviderSettings.imageModel)
     : [];
   const videoOptions = VIDEO_GENERATION_ENABLED
-    ? modelOptions(VIDEO_MODELS, providerSettings.videoModel)
+    ? modelOptions(VIDEO_MODELS, displayProviderSettings.videoModel)
     : [];
   const localDraftBaseUrl = localGenerationDraft.baseUrl.trim();
   const localNonLoopback = localDraftBaseUrl.length > 0 && !isLoopbackUrl(localDraftBaseUrl);
@@ -1420,7 +1420,7 @@ export function AppSettings({
   function modelValueForMode(mode: ProviderModelMode) {
     if (mode === "transcription") return displayProviderSettings.transcriptionModel;
     if (mode === "image") return displayProviderSettings.imageModel;
-    if (mode === "video") return providerSettings.videoModel;
+    if (mode === "video") return displayProviderSettings.videoModel;
     if (showingActiveProfileModels) {
       return activeProfileGenerationModel ?? globalGenerationModelValue();
     }
@@ -2182,7 +2182,7 @@ export function AppSettings({
                         mode="video"
                         title="Video"
                         description="Used when you generate a video from chat."
-                        value={providerSettings.videoModel}
+                        value={modelValueForMode("video")}
                         options={videoOptions}
                         open={pickerMode === "video"}
                         summarySuppressed={pickerMode !== undefined}

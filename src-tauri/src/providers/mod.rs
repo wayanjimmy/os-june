@@ -123,6 +123,8 @@ pub struct ProfileModelOverrides {
     pub transcription_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_model: Option<String>,
 }
 
 /// The client-facing view of provider settings. The Venice API key is never
@@ -181,6 +183,8 @@ pub struct ProfileModelOverridesDto {
     pub transcription_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_model: Option<String>,
 }
 
 impl From<&ProfileModelOverrides> for ProfileModelOverridesDto {
@@ -189,6 +193,7 @@ impl From<&ProfileModelOverrides> for ProfileModelOverridesDto {
             transcription_provider: overrides.transcription_provider.clone(),
             transcription_model: overrides.transcription_model.clone(),
             image_model: overrides.image_model.clone(),
+            video_model: overrides.video_model.clone(),
         }
     }
 }
@@ -201,6 +206,7 @@ impl From<ProfileModelOverridesDto> for ProfileModelOverrides {
             ),
             transcription_model: normalize_optional_model_field(overrides.transcription_model),
             image_model: normalize_optional_model_field(overrides.image_model),
+            video_model: normalize_optional_model_field(overrides.video_model),
         }
     }
 }
@@ -358,7 +364,7 @@ pub fn image_model() -> String {
 }
 
 pub fn video_model() -> String {
-    current_settings().video_model
+    effective_current_settings().video_model
 }
 
 pub fn venice_api_key() -> Option<String> {
@@ -1301,6 +1307,7 @@ fn sanitize_profile_overrides(
                 ),
                 transcription_model: normalize_optional_model_field(overrides.transcription_model),
                 image_model: normalize_optional_model_field(overrides.image_model),
+                video_model: normalize_optional_model_field(overrides.video_model),
             };
             (!profile_overrides_empty(&overrides)).then_some((profile, overrides))
         })
@@ -1420,6 +1427,7 @@ fn profile_overrides_empty(overrides: &ProfileModelOverrides) -> bool {
     overrides.transcription_provider.is_none()
         && overrides.transcription_model.is_none()
         && overrides.image_model.is_none()
+        && overrides.video_model.is_none()
 }
 
 pub(crate) fn active_profile_for_hermes_home(hermes_home: &std::path::Path) -> String {
@@ -1458,6 +1466,9 @@ fn effective_settings_for_profile(
     }
     if let Some(model) = overrides.image_model.as_deref() {
         effective.image_model = model.to_string();
+    }
+    if let Some(model) = overrides.video_model.as_deref() {
+        effective.video_model = model.to_string();
     }
     effective
 }
@@ -2072,12 +2083,14 @@ mod tests {
         settings.transcription_provider = PROVIDER_VENICE.to_string();
         settings.transcription_model = "global-asr".to_string();
         settings.image_model = "global-image".to_string();
+        settings.video_model = "global-video".to_string();
         settings.profile_overrides.insert(
             "writing".to_string(),
             ProfileModelOverrides {
                 transcription_provider: Some(PROVIDER_OPENAI.to_string()),
                 transcription_model: Some("gpt-4o-transcribe".to_string()),
                 image_model: None,
+                video_model: Some("profile-video".to_string()),
             },
         );
 
@@ -2085,12 +2098,14 @@ mod tests {
         assert_eq!(effective.transcription_provider, PROVIDER_OPENAI);
         assert_eq!(effective.transcription_model, "gpt-4o-transcribe");
         assert_eq!(effective.image_model, "global-image");
+        assert_eq!(effective.video_model, "profile-video");
 
         fs::write(state.hermes_home.join("active_profile"), "unknown\n").unwrap();
         let effective = effective_settings_for_hermes_home(&settings, &state.hermes_home);
         assert_eq!(effective.transcription_provider, PROVIDER_VENICE);
         assert_eq!(effective.transcription_model, "global-asr");
         assert_eq!(effective.image_model, "global-image");
+        assert_eq!(effective.video_model, "global-video");
 
         fs::remove_file(state.hermes_home.join("active_profile")).unwrap();
         let effective = effective_settings_for_hermes_home(&settings, &state.hermes_home);
@@ -2107,6 +2122,7 @@ mod tests {
                 transcription_provider: Some(PROVIDER_OPENAI.to_string()),
                 transcription_model: Some("profile-asr".to_string()),
                 image_model: Some("profile-image".to_string()),
+                video_model: Some("profile-video".to_string()),
             },
         );
 
@@ -2127,6 +2143,7 @@ mod tests {
                 transcription_provider: Some(format!(" {PROVIDER_OPENAI} ")),
                 transcription_model: Some(" gpt-4o-transcribe ".to_string()),
                 image_model: Some(" profile-image ".to_string()),
+                video_model: Some(" profile-video ".to_string()),
             },
         )
         .unwrap();
@@ -2147,6 +2164,13 @@ mod tests {
                 .and_then(|overrides| overrides.transcription_model.as_deref()),
             Some("gpt-4o-transcribe")
         );
+        assert_eq!(
+            saved
+                .profile_overrides
+                .get("research")
+                .and_then(|overrides| overrides.video_model.as_deref()),
+            Some("profile-video")
+        );
 
         set_profile_model_overrides_impl(
             &state,
@@ -2155,6 +2179,7 @@ mod tests {
                 transcription_provider: None,
                 transcription_model: Some("whisper-1".to_string()),
                 image_model: None,
+                video_model: None,
             },
         )
         .unwrap();
@@ -2204,6 +2229,7 @@ mod tests {
                 transcription_provider: Some(PROVIDER_OPENAI.to_string()),
                 transcription_model: None,
                 image_model: None,
+                video_model: None,
             },
         )
         .unwrap_err();

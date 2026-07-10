@@ -210,6 +210,7 @@ export type ProfileModelOverridesDto = {
   transcriptionProvider?: string;
   transcriptionModel?: string;
   imageModel?: string;
+  videoModel?: string;
 };
 
 export type LocalGenerationSettingsDto = {
@@ -1715,10 +1716,6 @@ export async function deleteDictationHistoryItem(id: string) {
 
 export async function providerModelSettings() {
   return invoke<ProviderModelSettingsResponse>("provider_model_settings");
-}
-
-export async function juneDefaultSoul() {
-  return invoke<string>("june_default_soul");
 }
 
 export async function profileModelOverrides(profile: string) {

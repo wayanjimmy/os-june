@@ -8,6 +8,7 @@ import {
   canAdvance,
   canCreateProfile,
   emptyProfileForm,
+  installableCatalogEntries,
   nextStep,
   previousStep,
   slugifyProfileName,
@@ -32,7 +33,6 @@ const mocks = vi.hoisted(() => ({
   providerModelSettings: vi.fn(),
   listVeniceModels: vi.fn(),
   hermesBridgeStatus: vi.fn(),
-  juneDefaultSoul: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -41,7 +41,6 @@ vi.mock("../lib/tauri", () => ({
   providerModelSettings: mocks.providerModelSettings,
   listVeniceModels: mocks.listVeniceModels,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
-  juneDefaultSoul: mocks.juneDefaultSoul,
 }));
 
 // ---------------------------------------------------------------------------
@@ -80,7 +79,17 @@ const IMAGE_MODEL = {
   capabilities: [],
 };
 
+const VIDEO_MODEL = {
+  provider: "venice",
+  id: "grok-imagine-text-to-video-private",
+  name: "Grok Imagine",
+  modelType: "video",
+  traits: [],
+  capabilities: [],
+};
+
 const GLOBAL_IMAGE_MODEL = "venice-sd35";
+const GLOBAL_VIDEO_MODEL = "wan-2.2-a14b-text-to-video";
 
 function ctx(overrides: Partial<ProfileBuilderContext> = {}): ProfileBuilderContext {
   return {
@@ -176,13 +185,6 @@ describe("profile builder — wizard state back/next/validation", () => {
     expect(canAdvance("skills", form, ctx())).toBe(true);
     expect(canAdvance("mcps", form, ctx())).toBe(true);
   });
-
-  it("does not warn when custom instructions are empty", () => {
-    const form = validForm({ soul: "" });
-    const idValidation = validateStep("identity", form, ctx());
-    expect(idValidation.error).toBeUndefined();
-    expect(idValidation.warnings).toEqual([]);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -225,15 +227,6 @@ describe("profile builder — create plan + payload", () => {
     expect(plan.some((change) => /sandbox|full mode/i.test(change.detail))).toBe(false);
   });
 
-  it("includes a SOUL change only when a SOUL was written", () => {
-    const without = buildCreatePlan(validForm());
-    expect(without.some((c) => c.target.endsWith("SOUL.md"))).toBe(false);
-    const withSoul = buildCreatePlan(validForm({ soul: "Be terse." }));
-    expect(withSoul.find((c) => c.target.endsWith("SOUL.md"))?.detail).toBe(
-      "Appends your custom instructions to June's default instructions.",
-    );
-  });
-
   it("builds a ProfileCreate payload with the slug, model, and clone flags", () => {
     const payload = buildCreatePayload(validForm({ keepBundledSkills: true, hubSkills: ["foo"] }));
     expect(payload.name).toBe("research-assistant");
@@ -257,49 +250,73 @@ describe("profile builder — create plan + payload", () => {
   it("sets no_skills when bundled skills are dropped", () => {
     const payload = buildCreatePayload(validForm({ keepBundledSkills: false }));
     expect(payload.no_skills).toBe(true);
-    expect(payload.clone_from_default).toBe(false);
-  });
-
-  it("does NOT put the SOUL in the create body (it is written separately)", () => {
-    const payload = buildCreatePayload(validForm({ soul: "Be terse." }));
-    expect(payload).not.toHaveProperty("soul");
-    expect(payload).not.toHaveProperty("content");
+    expect(payload.clone_from_default).toBe(true);
   });
 
   it("does not build profile model overrides for default slots", () => {
     expect(buildProfileModelOverrides(validForm())).toBeNull();
   });
 
-  it("builds profile model overrides only for explicit voice and image picks", () => {
+  it("builds profile model overrides only for explicit voice, image, and video picks", () => {
     expect(
       buildProfileModelOverrides(
         validForm({
           voiceProvider: "venice",
           voiceModel: "voice-fast",
           imageModel: "image-private",
+          videoModel: "grok-imagine-text-to-video-private",
         }),
       ),
     ).toEqual({
       transcriptionProvider: "venice",
       transcriptionModel: "voice-fast",
       imageModel: "image-private",
+      videoModel: "grok-imagine-text-to-video-private",
     });
   });
 
-  it("adds voice and image override rows to the review plan", () => {
+  it("adds voice, image, and video override rows to the review plan", () => {
     const plan = buildCreatePlan(
       validForm({
         voiceProvider: "venice",
         voiceModel: "voice-fast",
         imageModel: "image-private",
+        videoModel: "grok-imagine-text-to-video-private",
       }),
       {
         transcription: [VOICE_MODEL],
         image: [IMAGE_MODEL],
+        video: [VIDEO_MODEL],
       },
     );
     expect(plan.some((change) => change.detail === "Voice model: Voice Fast.")).toBe(true);
     expect(plan.some((change) => change.detail === "Image model: Image Private.")).toBe(true);
+    expect(plan.some((change) => change.detail === "Video model: Grok Imagine.")).toBe(true);
+  });
+
+  it("hides internal June servers from installable MCP catalog entries", () => {
+    const installable = installableCatalogEntries([
+      {
+        id: "june_video",
+        installName: "june_video",
+        name: "June video",
+        transport: "stdio",
+        auth: "none",
+        installed: false,
+        raw: {},
+      },
+      {
+        id: "github",
+        installName: "github",
+        name: "GitHub",
+        transport: "http",
+        auth: "none",
+        installed: false,
+        raw: {},
+      },
+    ]);
+
+    expect(installable.map((entry) => entry.installName)).toEqual(["github"]);
   });
 
   it("does not list June internal MCP servers in the review count", () => {
@@ -321,20 +338,20 @@ describe("profile builder — create plan + payload", () => {
 describe("profile builder — create success/failure + rollback", () => {
   beforeEach(() => {
     mocks.setProfileModelOverrides.mockReset();
-    mocks.juneDefaultSoul.mockReset();
     mocks.setProfileModelOverrides.mockResolvedValue(undefined);
-    mocks.juneDefaultSoul.mockResolvedValue("You are June.\nDefault tools.");
     resetActiveHermesProfileForTests();
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
         transcriptionProvider: "venice",
         transcriptionModel: "global-voice",
         imageModel: GLOBAL_IMAGE_MODEL,
+        videoModel: GLOBAL_VIDEO_MODEL,
       },
       effectiveSettings: {
         transcriptionProvider: "venice",
         transcriptionModel: "active-profile-voice",
         imageModel: "active-profile-image",
+        videoModel: "grok-imagine-text-to-video-private",
       },
     });
     mocks.listVeniceModels.mockImplementation(async (mode) => ({
@@ -345,13 +362,13 @@ describe("profile builder — create success/failure + rollback", () => {
     }));
   });
 
-  it("creates a profile, writes its SOUL, makes it active, and feeds the app store", async () => {
+  it("creates a profile, makes it active, and feeds the app store", async () => {
     const engine = makeBuilderEngine();
     const controller = new ProfileBuilderController(engine);
     await controller.load();
     await flush();
 
-    controller.update(validForm({ soul: "Be terse." }));
+    controller.update(validForm());
     await controller.createProfile({ makeActive: true });
 
     const snapshot = controller.getSnapshot();
@@ -365,16 +382,6 @@ describe("profile builder — create success/failure + rollback", () => {
     expect(profiles.some((p) => p.name === "research-assistant")).toBe(true);
     expect(await engine.client.profiles.active()).toMatchObject({ active: "research-assistant" });
     expect(getActiveHermesProfileName()).toBe("research-assistant");
-
-    // The SOUL was written via a separate PUT, composed from June's default and
-    // the user's custom instructions.
-    expect(mocks.juneDefaultSoul).toHaveBeenCalledTimes(1);
-    const soulPut = engine.server.requestLog.find(
-      (entry) => entry.method === "PUT" && entry.path === "/api/profiles/research-assistant/soul",
-    );
-    expect(soulPut?.body).toMatchObject({
-      content: "You are June.\nDefault tools.\n\nBe terse.\n",
-    });
 
     controller.dispose();
     resetActiveHermesProfileForTests();
@@ -406,25 +413,6 @@ describe("profile builder — create success/failure + rollback", () => {
     controller.dispose();
   });
 
-  it("skips the SOUL write when custom instructions are empty", async () => {
-    const engine = makeBuilderEngine();
-    const controller = new ProfileBuilderController(engine);
-    await controller.load();
-    await flush();
-
-    controller.update(validForm({ soul: "" }));
-    await controller.createProfile();
-
-    expect(mocks.juneDefaultSoul).not.toHaveBeenCalled();
-    expect(
-      engine.server.requestLog.some(
-        (entry) => entry.method === "PUT" && entry.path === "/api/profiles/research-assistant/soul",
-      ),
-    ).toBe(false);
-
-    controller.dispose();
-  });
-
   it("reports a clean failure when create itself fails (nothing was made)", async () => {
     const engine = makeBuilderEngine({
       profileCreateError: { status: 500, error: "boom" },
@@ -439,27 +427,6 @@ describe("profile builder — create success/failure + rollback", () => {
     const snapshot = controller.getSnapshot();
     expect(snapshot.create.phase).toBe("failed");
     expect(snapshot.create.error).toMatch(/no changes were made/i);
-
-    controller.dispose();
-  });
-
-  it("reports a post-create failure when the SOUL write fails after create", async () => {
-    const engine = makeBuilderEngine({
-      profileSoulError: { status: 500, error: "soul boom" },
-    });
-    const controller = new ProfileBuilderController(engine);
-    await controller.load();
-    await flush();
-
-    controller.update(validForm({ soul: "Be terse." }));
-    await controller.createProfile();
-
-    const snapshot = controller.getSnapshot();
-    expect(snapshot.create.phase).toBe("failed");
-    expect(snapshot.create.createdSlug).toBe("research-assistant");
-    // The message must NOT imply a clean rollback — the profile WAS created.
-    expect(snapshot.create.error).toMatch(/created the profile/i);
-    expect(snapshot.create.error).toMatch(/from the profile's settings/i);
 
     controller.dispose();
   });
@@ -509,6 +476,7 @@ describe("profile builder — create success/failure + rollback", () => {
         voiceProvider: "venice",
         voiceModel: "voice-fast",
         imageModel: "image-private",
+        videoModel: "grok-imagine-text-to-video-private",
       }),
     );
     await controller.createProfile();
@@ -517,12 +485,13 @@ describe("profile builder — create success/failure + rollback", () => {
       transcriptionProvider: "venice",
       transcriptionModel: "voice-fast",
       imageModel: "image-private",
+      videoModel: "grok-imagine-text-to-video-private",
     });
 
     controller.dispose();
   });
 
-  it("loads image choices from the frontend catalog when the backend image catalog is empty", async () => {
+  it("loads image and video choices from the frontend catalogs", async () => {
     const engine = makeBuilderEngine();
     const controller = new ProfileBuilderController(engine);
     await controller.load();
@@ -534,6 +503,8 @@ describe("profile builder — create success/failure + rollback", () => {
     const snapshot = controller.getSnapshot();
     expect(snapshot.imageModels.length).toBeGreaterThan(0);
     expect(snapshot.imageModels.some((model) => model.id === GLOBAL_IMAGE_MODEL)).toBe(true);
+    expect(snapshot.videoModels.length).toBeGreaterThan(0);
+    expect(snapshot.videoModels.some((model) => model.id === GLOBAL_VIDEO_MODEL)).toBe(true);
 
     controller.dispose();
   });
@@ -550,6 +521,7 @@ describe("profile builder — create success/failure + rollback", () => {
     expect(controller.getSnapshot().effectiveModelSettings).toMatchObject({
       transcriptionModel: "global-voice",
       imageModel: GLOBAL_IMAGE_MODEL,
+      videoModel: GLOBAL_VIDEO_MODEL,
     });
 
     controller.dispose();
@@ -593,10 +565,12 @@ function stubState(overrides: Partial<ProfileBuilderState> = {}): ProfileBuilder
     models: [TOOL_MODEL, NO_TOOL_MODEL],
     voiceModels: [VOICE_MODEL],
     imageModels: [IMAGE_MODEL],
+    videoModels: [VIDEO_MODEL],
     effectiveModelSettings: {
       transcriptionProvider: "venice",
       transcriptionModel: "voice-fast",
       imageModel: "image-private",
+      videoModel: "grok-imagine-text-to-video-private",
     },
     skills: [],
     mcpServers: [],
@@ -626,15 +600,22 @@ describe("profile builder — view", () => {
   it("renders basics without a radio group", () => {
     render(<ProfileBuilderView state={stubState({ step: "identity", form: validForm() })} />);
     expect(screen.getByLabelText("Profile name")).toBeInTheDocument();
+    expect(screen.getByLabelText("Description")).toBeInTheDocument();
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-    expect(
-      screen.getByText("Appended to June's default instructions for this profile."),
-    ).toBeInTheDocument();
   });
 
   it("surfaces the tool-calling block on the model step", () => {
     render(<ProfileBuilderView state={stubState()} />);
     expect(screen.getByText(/does not support tool calling/i)).toBeInTheDocument();
+  });
+
+  it("shows the per-profile video model slot", () => {
+    render(
+      <ProfileBuilderView state={stubState({ form: validForm({ videoModel: VIDEO_MODEL.id }) })} />,
+    );
+    expect(screen.getByRole("button", { name: "Change video model" })).toHaveTextContent(
+      "Grok Imagine",
+    );
   });
 
   it("shows the created panel with the slug after a successful create", () => {

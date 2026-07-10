@@ -177,7 +177,6 @@ pub fn run() {
             commands::retry_agent_task,
             commands::list_agent_tool_events,
             hermes_bridge::hermes_bridge_status,
-            hermes_bridge::june_default_soul,
             hermes_bridge::ensure_hermes_bridge_gateway,
             hermes_bridge::resolve_agent_recorder_request,
             hermes_bridge::hermes_admin_request,

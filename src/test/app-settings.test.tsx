@@ -2297,6 +2297,7 @@ describe("AppSettings", () => {
         generationModel: "zai-org-glm-5-2",
         remoteGenerationModel: "zai-org-glm-5-2",
         imageModel: "venice-sd35",
+        videoModel: "wan-2.2-a14b-text-to-video",
       },
       effectiveSettings: {
         ...buildProviderSettings(),
@@ -2305,6 +2306,7 @@ describe("AppSettings", () => {
         generationModel: "zai-org-glm-5-2",
         remoteGenerationModel: "zai-org-glm-5-2",
         imageModel: "flux-2-pro",
+        videoModel: "grok-imagine-text-to-video-private",
       },
     });
     mocks.invoke.mockImplementation(async (command, args) => {
@@ -2361,11 +2363,14 @@ describe("AppSettings", () => {
     expect(scopedModels.getByRole("button", { name: "Change transcription model" })).toBeDisabled();
     expect(scopedModels.getByRole("button", { name: "Change text model" })).toBeDisabled();
 
-    // Image and video section: image follows the profile, read-only.
+    // Image and video section: both media models follow the profile, read-only.
     expect(await scopedMedia.findByText("FLUX 2 Pro")).toBeInTheDocument();
     expect(scopedMedia.queryByText("Venice SD3.5")).not.toBeInTheDocument();
+    expect(await scopedMedia.findByText("Grok Imagine")).toBeInTheDocument();
+    expect(scopedMedia.queryByText("Wan 2.2 A14B")).not.toBeInTheDocument();
     expect(scopedMedia.getByText(profileNote)).toBeInTheDocument();
     expect(scopedMedia.getByRole("button", { name: "Change image model" })).toBeDisabled();
+    expect(scopedMedia.getByRole("button", { name: "Change video model" })).toBeDisabled();
 
     expect(mocks.setVeniceModel).not.toHaveBeenCalled();
   });

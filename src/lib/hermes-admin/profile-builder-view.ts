@@ -6,16 +6,15 @@
  * React or Tauri, so the whole flow is unit-testable without a DOM.
  *
  * The builder talks to Hermes through the existing admin REST surface only:
- * `POST /api/profiles` (create), `PUT /api/profiles/{name}/soul` (custom
- * instructions appended to June's default SOUL), and `POST /api/profiles/active`
- * when the new profile should become active. It reuses the already-landed data
- * sources for its step inputs (the model catalog, installed skills, the Skills
- * Hub, MCP servers and the MCP catalog) rather than inventing its own. Profile
- * creation is a documented endpoint, so June never copies directories by hand.
+ * `POST /api/profiles` (create) and `POST /api/profiles/active` when the new
+ * profile should become active. It reuses the already-landed data sources for
+ * its step inputs (the model catalog, installed skills, the Skills Hub, MCP
+ * servers and the MCP catalog) rather than inventing its own. Profile creation
+ * is a documented endpoint, so June never copies directories by hand.
  *
- * June presentation rule: every profile presents as June. A profile can add
- * task-specific instructions, models, skills, and MCP servers, but it never
- * changes what the agent says it is.
+ * June presentation rule: every profile presents as June. A profile can choose
+ * its own models, skills, and MCP servers, but it never changes what the agent
+ * says it is.
  */
 
 import type { HermesCreateProfilePayload } from "./client";
@@ -38,12 +37,13 @@ export type ProfileBuilderModel = {
   capabilities: string[];
 };
 
-export type ProfileModelSlot = "voice" | "image";
+export type ProfileModelSlot = "voice" | "image" | "video";
 
 export type ProfileBuilderModelCatalog = {
   generation: readonly ProfileBuilderModel[];
   transcription: readonly ProfileBuilderModel[];
   image: readonly ProfileBuilderModel[];
+  video: readonly ProfileBuilderModel[];
 };
 
 /** The ordered wizard steps. */
@@ -56,7 +56,7 @@ export const STEP_META: Readonly<Record<ProfileBuilderStep, { title: string; hin
   Object.freeze({
     identity: {
       title: "Basics",
-      hint: "Name the profile and add optional instructions on top of June's default.",
+      hint: "Name the profile and describe what it is for.",
     },
     model: {
       title: "Model",
@@ -81,8 +81,6 @@ export type ProfileBuilderForm = {
   /** Profile name/slug. The slug is derived from this. */
   name: string;
   description: string;
-  /** Optional custom instructions appended to June's default SOUL. */
-  soul: string;
   /** Provider id of the chosen model, empty until picked. */
   provider: string;
   /** Model id of the chosen model, empty until picked. */
@@ -93,6 +91,8 @@ export type ProfileBuilderForm = {
   voiceProvider: string;
   /** Explicit per-profile image model override. Empty keeps June's default. */
   imageModel: string;
+  /** Explicit per-profile video model override. Empty keeps June's default. */
+  videoModel: string;
   /** Keep June's bundled skills (clones them from default). */
   keepBundledSkills: boolean;
   /** Bundled skill names to keep when `keepBundledSkills` is true and the user
@@ -106,18 +106,18 @@ export type ProfileBuilderForm = {
   mcpCatalogInstalls: string[];
 };
 
-/** The fresh form a new wizard starts from. June's default instructions and
- * bundled skills are kept: the safe, June-correct starting point. */
+/** The fresh form a new wizard starts from. June's default profile and bundled
+ * skills are kept as the safe starting point. */
 export function emptyProfileForm(): ProfileBuilderForm {
   return {
     name: "",
     description: "",
-    soul: "",
     provider: "",
     model: "",
     voiceModel: "",
     voiceProvider: "",
     imageModel: "",
+    videoModel: "",
     keepBundledSkills: true,
     keepSkills: [],
     hubSkills: [],
@@ -327,6 +327,7 @@ export type ProfileModelOverrides = {
   transcriptionProvider?: string;
   transcriptionModel?: string;
   imageModel?: string;
+  videoModel?: string;
 };
 
 export function buildProfileModelOverrides(form: ProfileBuilderForm): ProfileModelOverrides | null {
@@ -338,6 +339,9 @@ export function buildProfileModelOverrides(form: ProfileBuilderForm): ProfileMod
   if (form.imageModel) {
     overrides.imageModel = form.imageModel;
   }
+  if (form.videoModel) {
+    overrides.videoModel = form.videoModel;
+  }
   return Object.keys(overrides).length > 0 ? overrides : null;
 }
 
@@ -346,7 +350,8 @@ export function resetProfileModelSlot(
   slot: ProfileModelSlot,
 ): ProfileBuilderForm {
   if (slot === "voice") return { ...form, voiceProvider: "", voiceModel: "" };
-  return { ...form, imageModel: "" };
+  if (slot === "image") return { ...form, imageModel: "" };
+  return { ...form, videoModel: "" };
 }
 
 export function selectedProfileModelOverride(
@@ -354,7 +359,8 @@ export function selectedProfileModelOverride(
   slot: ProfileModelSlot,
   catalog: readonly ProfileBuilderModel[],
 ): ProfileBuilderModel | undefined {
-  const id = slot === "voice" ? form.voiceModel : form.imageModel;
+  const id =
+    slot === "voice" ? form.voiceModel : slot === "image" ? form.imageModel : form.videoModel;
   const provider = slot === "voice" ? form.voiceProvider : undefined;
   if (!id) return undefined;
   return catalog.find(
@@ -387,14 +393,6 @@ export function buildCreatePlan(
     risk: "info",
   });
 
-  if (form.soul.trim()) {
-    changes.push({
-      target: `${root}/SOUL.md`,
-      detail: "Appends your custom instructions to June's default instructions.",
-      risk: "caution",
-    });
-  }
-
   const voiceOverride = selectedProfileModelOverride(form, "voice", catalogs?.transcription ?? []);
   if (form.voiceModel) {
     changes.push({
@@ -409,6 +407,15 @@ export function buildCreatePlan(
     changes.push({
       target: "June profile model overrides",
       detail: `Image model: ${imageOverride?.name ?? form.imageModel}.`,
+      risk: "caution",
+    });
+  }
+
+  const videoOverride = selectedProfileModelOverride(form, "video", catalogs?.video ?? []);
+  if (form.videoModel) {
+    changes.push({
+      target: "June profile model overrides",
+      detail: `Video model: ${videoOverride?.name ?? form.videoModel}.`,
       risk: "caution",
     });
   }
@@ -465,16 +472,13 @@ export function buildCreatePlan(
 // ---------------------------------------------------------------------------
 
 /** Maps the wizard form to the `ProfileCreate` body. The slug is used as the
- * profile name (the create endpoint scopes everything by this id). The SOUL is
- * NOT in this body — it is written by a follow-up `setSoul` call so an empty
- * SOUL never overwrites June's default instructions. */
+ * profile name because the create endpoint scopes everything by this id. */
 export function buildCreatePayload(form: ProfileBuilderForm): HermesCreateProfilePayload {
   const slug = slugifyProfileName(form.name);
   const payload: HermesCreateProfilePayload = {
     name: slug,
-    // clone_from_default brings June's SOUL and bundled skills along. Custom
-    // instructions are composed later so they append to that default.
-    clone_from_default: form.keepBundledSkills,
+    // clone_from_default brings June's default profile and bundled skills along.
+    clone_from_default: true,
     no_skills: !form.keepBundledSkills,
   };
   if (form.description.trim()) payload.description = form.description.trim();
@@ -513,5 +517,5 @@ export function attachableMcpServers(
 export function installableCatalogEntries(
   catalog: readonly HermesMcpCatalogEntry[],
 ): HermesMcpCatalogEntry[] {
-  return catalog.filter((entry) => !entry.installed);
+  return catalog.filter((entry) => !entry.installed && !isInternalMcpServerName(entry.installName));
 }

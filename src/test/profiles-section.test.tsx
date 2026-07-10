@@ -52,6 +52,7 @@ function stubBuilder(overrides: Partial<ProfileBuilderState> = {}): ProfileBuild
     models: [],
     voiceModels: [],
     imageModels: [],
+    videoModels: [],
     skills: [],
     mcpServers: [],
     mcpCatalog: [],

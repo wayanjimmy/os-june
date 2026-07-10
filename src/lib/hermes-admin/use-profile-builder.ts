@@ -2,8 +2,8 @@
  * The data + orchestration hook behind June's guided Profile Builder (spec 20).
  * It owns the wizard's input loading (existing profiles, the generation model
  * catalog, installed skills, MCP servers, the MCP catalog), the create
- * orchestration (`POST /api/profiles` then optional appended SOUL write then
- * optional activation), and the success/failure-with-rollback messaging.
+ * orchestration (`POST /api/profiles`, optional model overrides, then optional
+ * activation), and the success/failure-with-rollback messaging.
  *
  * Everything user-facing and rule-based lives in the framework-free
  * {@link ProfileBuilderController}, so back/next/validation, the model
@@ -20,9 +20,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { setActiveHermesProfileName } from "../active-hermes-profile";
 import { imageModelCatalog } from "../image-models";
+import { VIDEO_MODELS } from "../video-models";
 import {
   hermesBridgeStatus,
-  juneDefaultSoul,
   listVeniceModels,
   providerModelSettings,
   setProfileModelOverrides,
@@ -75,19 +75,19 @@ export type ProfileBuilderEngine = {
 
 export type ProfileBuilderEffectiveModelSettings = Pick<
   ProviderModelSettingsDto,
-  "transcriptionProvider" | "transcriptionModel" | "imageModel"
+  "transcriptionProvider" | "transcriptionModel" | "imageModel" | "videoModel"
 >;
 
 export type ProfileBuilderStatus = "unavailable" | "loading" | "ready" | "error";
 
-/** Where the create flow is. `creating` runs the create + instruction +
+/** Where the create flow is. `creating` runs the create, model override, and
  * activation calls; `created` is the terminal success; `failed` carries a
  * rolled-back message. */
 export type CreatePhase = "idle" | "creating" | "created" | "failed";
 
 export type CreateState = {
   phase: CreatePhase;
-  /** Safe progress message while creating (e.g. "Writing instructions..."). */
+  /** Safe progress message while creating. */
   message?: string;
   /** Safe error message when `phase === "failed"`. */
   error?: string;
@@ -115,6 +115,7 @@ export type ProfileBuilderState = {
   models: readonly ProfileBuilderModel[];
   voiceModels: readonly VeniceModelDto[];
   imageModels: readonly VeniceModelDto[];
+  videoModels: readonly VeniceModelDto[];
   effectiveModelSettings?: ProfileBuilderEffectiveModelSettings;
   skills: readonly HermesSkillInfo[];
   mcpServers: readonly HermesMcpServerInfo[];
@@ -152,6 +153,7 @@ export class ProfileBuilderController {
   private models: readonly ProfileBuilderModel[] = [];
   private voiceModels: readonly VeniceModelDto[] = [];
   private imageModels: readonly VeniceModelDto[] = [];
+  private videoModels: readonly VeniceModelDto[] = [];
   private effectiveModelSettings?: ProfileBuilderEffectiveModelSettings;
   private modelStepInputsLoading = false;
   private modelStepInputsLoaded = false;
@@ -311,19 +313,22 @@ export class ProfileBuilderController {
     this.modelStepInputsLoading = true;
     this.recompute();
     try {
-      const [settings, voice, image] = await Promise.all([
+      const [settings, voice, image, video] = await Promise.all([
         providerModelSettings(),
         listVeniceModels("transcription"),
         Promise.resolve({ models: imageModelCatalog() }),
+        Promise.resolve({ models: VIDEO_MODELS }),
       ]);
       if (this.disposed) return;
       this.effectiveModelSettings = {
         transcriptionProvider: settings.settings.transcriptionProvider,
         transcriptionModel: settings.settings.transcriptionModel,
         imageModel: settings.settings.imageModel,
+        videoModel: settings.settings.videoModel,
       };
       this.voiceModels = voice.models;
       this.imageModels = image.models;
+      this.videoModels = video.models;
       this.modelStepInputsLoaded = true;
     } catch {
       // Keep the wizard usable. Empty catalogs still allow the text model gate
@@ -337,7 +342,7 @@ export class ProfileBuilderController {
   /**
    * Runs the create orchestration:
    *   1. POST /api/profiles (create the isolated profile)
-   *   2. PUT /api/profiles/{slug}/soul when custom instructions were written
+   *   2. Save explicit model overrides when any were chosen
    *   3. POST /api/profiles/active when activation is asked
    *
    * On a step-1 failure nothing was created, so the message is a plain failure.
@@ -378,29 +383,7 @@ export class ProfileBuilderController {
       return;
     }
 
-    // Step 2: SOUL. The profile now exists; a failure here is NOT a clean
-    // rollback, so the message says so.
-    const userText = this.form.soul.trim();
-    if (userText) {
-      this.create = { phase: "creating", message: "Writing instructions..." };
-      this.recompute();
-      try {
-        const base = await juneDefaultSoul();
-        const composed = base.trim() ? `${base.trimEnd()}\n\n${userText}\n` : `${userText}\n`;
-        await this.engine.client.profiles.setSoul(slug, composed);
-      } catch (error) {
-        if (this.disposed) return;
-        const adminError = HermesAdminError.from(`PUT /api/profiles/${slug}/soul`, error);
-        this.create = {
-          phase: "failed",
-          createdSlug: slug,
-          error: `Created the profile "${slug}", but saving its instructions failed: ${adminError.safeMessage} You can add them from the profile's settings.`,
-        };
-        this.recompute();
-        return;
-      }
-    }
-
+    // Step 2: persist June-side model overrides for this profile.
     const overrides = buildProfileModelOverrides(this.form);
     if (overrides) {
       this.create = { phase: "creating", message: "Saving model overrides..." };
@@ -471,6 +454,7 @@ export class ProfileBuilderController {
       models: this.models,
       voiceModels: this.voiceModels,
       imageModels: this.imageModels,
+      videoModels: this.videoModels,
       effectiveModelSettings: this.effectiveModelSettings,
       skills: this.skills,
       mcpServers: this.mcpServers,
@@ -568,6 +552,7 @@ const UNAVAILABLE_STATE: ProfileBuilderState = Object.freeze({
   models: [],
   voiceModels: [],
   imageModels: [],
+  videoModels: [],
   skills: [],
   mcpServers: [],
   mcpCatalog: [],

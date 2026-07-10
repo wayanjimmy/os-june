@@ -4700,7 +4700,8 @@ export function AgentWorkspace({
     try {
       const settingsResponse = await providerModelSettings();
       settings = settingsResponse.settings;
-      pinnedModel = settings.videoModel || undefined;
+      pinnedModel =
+        settingsResponse.effectiveSettings?.videoModel || settings.videoModel || undefined;
     } catch {
       // Non-fatal: generation proceeds with server-resolved settings.
     }
