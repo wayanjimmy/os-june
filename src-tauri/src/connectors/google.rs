@@ -1015,11 +1015,7 @@ struct AttendeeWire {
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
     response_status: Option<String>,
-    #[serde(default)]
-    optional: Option<bool>,
     #[serde(rename = "self", default)]
     is_self: bool,
 }
@@ -1418,6 +1414,33 @@ pub async fn insert_event(
 /// Respond to an invite: events.patch setting the self attendee's
 /// responseStatus (accepted / declined / tentative). The full attendee list
 /// is re-sent because patch replaces the array wholesale.
+/// Build the attendees array for an RSVP PATCH: preserve every attendee object
+/// as-is and change only the authenticated user's `responseStatus`. A PATCH
+/// replaces the whole array, so preserving the raw objects keeps other guests'
+/// fields (comments, additional guests, resource flags) intact.
+fn attendees_with_self_response(
+    attendees: &[serde_json::Value],
+    response: InviteResponse,
+) -> Vec<serde_json::Value> {
+    attendees
+        .iter()
+        .map(|attendee| {
+            let mut attendee = attendee.clone();
+            let is_self =
+                attendee.get("self").and_then(serde_json::Value::as_bool) == Some(true);
+            if is_self {
+                if let Some(object) = attendee.as_object_mut() {
+                    object.insert(
+                        "responseStatus".to_string(),
+                        serde_json::Value::String(response.as_str().to_string()),
+                    );
+                }
+            }
+            attendee
+        })
+        .collect()
+}
+
 pub async fn respond_to_invite(
     access_token: &str,
     calendar_id: Option<&str>,
@@ -1425,7 +1448,12 @@ pub async fn respond_to_invite(
     response: InviteResponse,
 ) -> Result<EventSummary, GoogleApiError> {
     let calendar = calendar_id_or_primary(calendar_id);
-    let current: EventWire = send_request(
+    // Fetch the raw event so the RSVP preserves every attendee object exactly.
+    // A PATCH replaces the whole attendees array, so rebuilding it from a few
+    // parsed fields would strip other guests' data (comments, additional
+    // guests, resource flags); keep the raw objects and change only the
+    // authenticated user's responseStatus.
+    let current: serde_json::Value = send_request(
         http_client()
             .get(format!(
                 "{CALENDAR_BASE}/calendars/{calendar}/events/{event_id}"
@@ -1433,32 +1461,20 @@ pub async fn respond_to_invite(
             .bearer_auth(access_token),
     )
     .await?;
-    if !current.attendees.iter().any(|attendee| attendee.is_self) {
+    let attendees_raw = current
+        .get("attendees")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if !attendees_raw
+        .iter()
+        .any(|attendee| attendee.get("self").and_then(serde_json::Value::as_bool) == Some(true))
+    {
         return Err(GoogleApiError::InvalidInput(
             "You are not an attendee of this event.".to_string(),
         ));
     }
-    let attendees: Vec<serde_json::Value> = current
-        .attendees
-        .iter()
-        .map(|attendee| {
-            let mut value = serde_json::json!({
-                "email": attendee.email,
-                "responseStatus": if attendee.is_self {
-                    Some(response.as_str().to_string())
-                } else {
-                    attendee.response_status.clone()
-                },
-            });
-            if let Some(display_name) = &attendee.display_name {
-                value["displayName"] = serde_json::json!(display_name);
-            }
-            if let Some(optional) = attendee.optional {
-                value["optional"] = serde_json::json!(optional);
-            }
-            value
-        })
-        .collect();
+    let attendees = attendees_with_self_response(attendees_raw, response);
     let wire: EventWire = send_request(
         http_client()
             .patch(format!(
@@ -1952,5 +1968,37 @@ mod tests {
         let body = r#"{"error": {"code": 403, "message": "Rate limit exceeded", "status": "RESOURCE_EXHAUSTED"}}"#;
         assert_eq!(api_error_message(body), "Rate limit exceeded");
         assert_eq!(api_error_message("not json"), "request failed");
+    }
+
+    #[test]
+    fn rsvp_preserves_other_attendees_and_only_changes_self() {
+        let attendees = vec![
+            serde_json::json!({
+                "email": "me@example.com",
+                "self": true,
+                "responseStatus": "needsAction",
+            }),
+            serde_json::json!({
+                "email": "guest@example.com",
+                "responseStatus": "accepted",
+                "comment": "running 5 min late",
+                "additionalGuests": 2,
+            }),
+            serde_json::json!({
+                "email": "room@resource.calendar.google.com",
+                "resource": true,
+                "responseStatus": "accepted",
+            }),
+        ];
+        let out = attendees_with_self_response(&attendees, InviteResponse::Declined);
+        // Only the self attendee's status changes.
+        assert_eq!(out[0]["responseStatus"], "declined");
+        // Every other guest's fields survive the patch untouched.
+        assert_eq!(out[1]["responseStatus"], "accepted");
+        assert_eq!(out[1]["comment"], "running 5 min late");
+        assert_eq!(out[1]["additionalGuests"], 2);
+        // Resource rows are preserved as-is.
+        assert_eq!(out[2]["resource"], true);
+        assert_eq!(out[2]["responseStatus"], "accepted");
     }
 }

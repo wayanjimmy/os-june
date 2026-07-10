@@ -286,6 +286,11 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
     } catch (err) {
       setDetailError(describeRoutineError(err));
       setDetailErrorRetryable(false);
+      // Re-throw so RoutineDetail can roll back the trust/grant change it made
+      // before this cron update. Swallowing the failure would leave the DB
+      // trust and the job's enabled_toolsets inconsistent (a downgrade could
+      // delete the grant while the job kept its old autonomous toolsets).
+      throw err;
     } finally {
       setSaving(false);
     }

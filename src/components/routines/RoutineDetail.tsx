@@ -326,13 +326,14 @@ export function RoutineDetail({
 
     try {
       await onSave(updates);
-    } catch (err) {
-      // The cron job update failed after trust was already persisted and grants
-      // minted or deleted, so the routine's DB trust and the job's toolsets now
-      // disagree. Roll the trust change back to keep them consistent: otherwise
-      // a downgrade to read only would have deleted the grant while the job kept
-      // its autonomous toolsets, and gate_action parks (not denies) an orphaned
-      // grant, so an approval could still let that run act on Google.
+    } catch {
+      // The cron job update failed (onSave rejects and has already surfaced the
+      // error) after trust was persisted and grants minted or deleted, so the
+      // routine's DB trust and the job's toolsets now disagree. Roll the trust
+      // change back to keep them consistent: otherwise a downgrade to read only
+      // would have deleted the grant while the job kept its autonomous toolsets,
+      // and gate_action parks (not denies) an orphaned grant, so an approval
+      // could still let that run act on Google.
       if (trustChanged) {
         await routineTrustSet({
           jobId: routine.job_id,
@@ -343,7 +344,6 @@ export function RoutineDetail({
           .then(setStoredTrust)
           .catch(() => {});
       }
-      toast.error(messageFromError(err));
       return;
     }
 

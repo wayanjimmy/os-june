@@ -704,6 +704,36 @@ describe("RoutinesView detail", () => {
     );
   });
 
+  it("rolls the trust change back when the cron save fails", async () => {
+    // An autonomous routine (autonomy already unlocked) with one granted tool.
+    tauriMocks.routineTrustGet.mockResolvedValue({
+      trustMode: "autonomous",
+      approvalRunCount: 3,
+      autonomousTools: ["create_draft"],
+      autonomousServers: ["june_gmail_auto_x"],
+    });
+    mocks.listRoutines.mockResolvedValue([job()]);
+    renderView();
+    await openDetail("Morning summary");
+
+    // Downgrade to read only, then the Hermes cron update fails.
+    await userEvent.click(screen.getByRole("button", { name: /Read only/ }));
+    mocks.updateRoutine.mockRejectedValueOnce(new Error("gateway down"));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // The failed save surfaces, and the trust is restored to autonomous so the
+    // DB trust and the job's toolsets do not diverge (the read-only attempt is
+    // rolled back rather than left with a deleted grant and stale toolsets).
+    expect(await screen.findByText("gateway down")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(tauriMocks.routineTrustSet).toHaveBeenLastCalledWith({
+        jobId: "abc123",
+        trustMode: "autonomous",
+        autonomousTools: ["create_draft"],
+      }),
+    );
+  });
+
   it("restores a blank local name after saving unrelated changes", async () => {
     mocks.listRoutines.mockResolvedValueOnce([job()]).mockResolvedValueOnce([job()]);
     renderView();
