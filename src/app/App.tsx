@@ -41,7 +41,7 @@ import { PermissionBanner } from "../components/permissions/PermissionBanner";
 import { AppSettings, SETTINGS_TABS, type SettingsTab } from "../components/settings/AppSettings";
 import { Sidebar, type SidebarView } from "../components/sidebar/Sidebar";
 import { TabBar, type TabItem } from "../components/tabs/TabBar";
-import { defaultNav, makeTabId, navEquals, type Tab, type TabNav } from "./tabs/tabs";
+import { defaultNav, makeTabId, navEquals, reorderTabs, type Tab, type TabNav } from "./tabs/tabs";
 import { BreadcrumbBar } from "../components/ui/BreadcrumbBar";
 import { IconNoteText } from "central-icons/IconNoteText";
 import { IconBubble3 } from "central-icons/IconBubble3";
@@ -932,6 +932,12 @@ export function App() {
       setActiveTabId(id);
       applyNav(keep.nav);
     }
+  }
+
+  // Drag-reorder from the tab strip: the visible tabs land in their new order,
+  // overflow tabs stay put (see reorderTabs).
+  function handleReorderTabs(orderedVisibleIds: string[]) {
+    setTabs((prev) => reorderTabs(prev, orderedVisibleIds));
   }
 
   function cycleTab(delta: number) {
@@ -2209,15 +2215,6 @@ export function App() {
     }
     pendingSessionProjectRef.current = null;
     setAgentOrigin(undefined);
-    // The agent view resolves the conversation by this id, so switch straight
-    // in. Backfill the bridge session-list registration in the background (best
-    // effort) so the session also shows in the agent history sidebar even if
-    // the note chat's own registration hadn't landed yet — never blocks the
-    // handoff, so a slow or failed registration can't stall or dead-end it.
-    void ensureHermesBridgeSession({
-      sessionId,
-      title: noteRef.title.trim() || "Note chat",
-    }).catch(() => undefined);
     setActiveAgentSession({ id: sessionId, title: noteRef.title.trim() || undefined });
     setActiveView("agent");
   }
@@ -3160,6 +3157,7 @@ export function App() {
           onClose={closeTab}
           onCloseOthers={closeOtherTabs}
           onNew={openNewChatTab}
+          onReorder={handleReorderTabs}
           layoutFrozen={sidebarResizing}
           onDragRegionPointerDown={handleTitlebarPointerDown}
         />
