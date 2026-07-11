@@ -31,7 +31,6 @@ import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDi
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import { NoteHeaderActions } from "../components/note-editor/NoteHeaderActions";
-import { exportNoteAsPdf } from "../lib/note-pdf";
 import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
 import { useNoteChat } from "../components/note-chat/useNoteChat";
 import { GlobalRecorderPill } from "../components/recorder/GlobalRecorderPill";
@@ -718,7 +717,6 @@ export function App() {
       askJuneOpen={noteChatOpen}
       askJuneWorking={noteChat.working}
       onAskJune={() => setNoteChatOpen((open) => !open)}
-      onExportPdf={() => exportNoteAsPdf(selectedNote.title)}
       onDelete={() => setConfirmDeleteNote(true)}
     />
   ) : null;

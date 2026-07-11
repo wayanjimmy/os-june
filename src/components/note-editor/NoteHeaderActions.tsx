@@ -2,7 +2,6 @@ import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconChainLink1 } from "central-icons/IconChainLink1";
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal";
-import { IconArrowInbox } from "central-icons/IconArrowInbox";
 import { IconTrashCan } from "central-icons/IconTrashCan";
 import { useEffect, useRef, useState } from "react";
 
@@ -17,7 +16,6 @@ export function NoteHeaderActions({
   askJuneOpen,
   askJuneWorking,
   onAskJune,
-  onExportPdf,
   onDelete,
 }: {
   noteId: string;
@@ -28,8 +26,6 @@ export function NoteHeaderActions({
    * the panel is closed, so a fired-off question is visibly still running. */
   askJuneWorking?: boolean;
   onAskJune?: () => void;
-  /** Opens the system print sheet with a PDF-ready version of the note. */
-  onExportPdf?: () => void;
   /** Opens the delete-note confirmation. Omitted → no overflow menu. */
   onDelete?: () => void;
 }) {
@@ -48,20 +44,12 @@ export function NoteHeaderActions({
         {askJuneWorking ? <span className="note-header-ask-dot" aria-hidden /> : null}
       </button>
       <CopyNoteReferenceButton noteId={noteId} title={noteTitle} />
-      {onExportPdf || onDelete ? (
-        <NoteOverflowMenu onExportPdf={onExportPdf} onDelete={onDelete} />
-      ) : null}
+      {onDelete ? <NoteOverflowMenu onDelete={onDelete} /> : null}
     </div>
   );
 }
 
-function NoteOverflowMenu({
-  onExportPdf,
-  onDelete,
-}: {
-  onExportPdf?: () => void;
-  onDelete?: () => void;
-}) {
+function NoteOverflowMenu({ onDelete }: { onDelete: () => void }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -95,33 +83,18 @@ function NoteOverflowMenu({
       </button>
       {open ? (
         <div className="sidebar-identity-menu note-actions-menu" role="menu">
-          {onExportPdf ? (
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onExportPdf();
-              }}
-            >
-              <IconArrowInbox size={14} />
-              Export as PDF
-            </button>
-          ) : null}
-          {onDelete ? (
-            <button
-              type="button"
-              role="menuitem"
-              className="destructive"
-              onClick={() => {
-                setOpen(false);
-                onDelete();
-              }}
-            >
-              <IconTrashCan size={14} />
-              Delete note
-            </button>
-          ) : null}
+          <button
+            type="button"
+            role="menuitem"
+            className="destructive"
+            onClick={() => {
+              setOpen(false);
+              onDelete();
+            }}
+          >
+            <IconTrashCan size={14} />
+            Delete note
+          </button>
         </div>
       ) : null}
     </div>
