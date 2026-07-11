@@ -1,14 +1,16 @@
+import { printCurrentWebview } from "./tauri";
+
 /**
  * Open the platform print sheet with a useful default PDF filename.
  *
- * The native macOS print sheet exposes Save as PDF, while browsers expose
- * their equivalent PDF destination. `window.print()` blocks until that sheet
- * closes, so the app title can be restored immediately afterwards.
+ * The native print sheet exposes Save as PDF on macOS and the equivalent PDF
+ * destination on other platforms. June invokes it through Tauri because
+ * WKWebView does not implement `window.print()`.
  */
 type ExportNoteAsPdfOptions = {
   showNotes?: () => void | Promise<void>;
   waitForPaint?: () => void | Promise<void>;
-  print?: () => void;
+  print?: () => void | Promise<void>;
 };
 
 export async function exportNoteAsPdf(
@@ -17,7 +19,7 @@ export async function exportNoteAsPdf(
     showNotes,
     waitForPaint = () =>
       new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve())),
-    print = () => window.print(),
+    print = printCurrentWebview,
   }: ExportNoteAsPdfOptions = {},
 ) {
   if (showNotes) {
@@ -29,7 +31,7 @@ export async function exportNoteAsPdf(
   document.title = noteTitle.trim() || "Meeting notes";
 
   try {
-    print();
+    await print();
   } finally {
     document.title = previousTitle;
   }
