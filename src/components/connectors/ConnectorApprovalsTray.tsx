@@ -98,9 +98,11 @@ export function ConnectorApprovalsTray() {
   // The list grows and shrinks as approvals arrive or are answered without a
   // scroll or resize, so nudge the shared fade to re-measure on each change.
   useEffect(() => {
+    // Reading the length makes the change signal explicit to the hook linter.
+    void pending.length;
     const id = requestAnimationFrame(fade.update);
     return () => cancelAnimationFrame(id);
-  }, [pending, fade.update]);
+  }, [pending.length, fade.update]);
 
   // Dev console driver (window.__connectorApprovals) that parks synthetic
   // approvals in the tray so its styling can be inspected without a live

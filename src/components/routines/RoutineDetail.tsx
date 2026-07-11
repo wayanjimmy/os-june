@@ -85,6 +85,7 @@ type RoutineDetailProps = {
   onSave: (updates: RoutineUpdates) => Promise<void>;
   onToggleActive: () => void;
   onRunNow: () => Promise<void>;
+  runNowDisabledReason?: string;
   onDelete: () => void;
   onOpenRun: (run: HermesSessionInfo) => void;
   onRetryLoad?: () => void;
@@ -106,6 +107,7 @@ export function RoutineDetail({
   onSave,
   onToggleActive,
   onRunNow,
+  runNowDisabledReason,
   onDelete,
   onOpenRun,
   onRetryLoad,
@@ -488,7 +490,10 @@ export function RoutineDetail({
             <button
               type="button"
               className="btn btn-secondary"
-              disabled={busy || queued || routine.state !== "scheduled"}
+              disabled={
+                Boolean(runNowDisabledReason) || busy || queued || routine.state !== "scheduled"
+              }
+              title={runNowDisabledReason}
               onClick={() => void runNow()}
             >
               <IconPlay size={13} aria-hidden />
