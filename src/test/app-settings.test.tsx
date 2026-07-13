@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   setVeniceApiKey: vi.fn(),
   clearVeniceApiKey: vi.fn(),
   setImageSafeMode: vi.fn(),
+  setCostQuality: vi.fn(),
   setImageSafeModePromptDismissed: vi.fn(),
   saveLocalGenerationSettings: vi.fn(),
   setLocalGenerationEnabled: vi.fn(),
@@ -93,6 +94,7 @@ vi.mock("../lib/tauri", () => ({
   setVeniceApiKey: mocks.setVeniceApiKey,
   clearVeniceApiKey: mocks.clearVeniceApiKey,
   setImageSafeMode: mocks.setImageSafeMode,
+  setCostQuality: mocks.setCostQuality,
   setImageSafeModePromptDismissed: mocks.setImageSafeModePromptDismissed,
   saveLocalGenerationSettings: mocks.saveLocalGenerationSettings,
   setLocalGenerationEnabled: mocks.setLocalGenerationEnabled,
@@ -207,6 +209,7 @@ function buildProviderSettings() {
     },
     imageSafeMode: true,
     imageSafeModePromptDismissed: false,
+    costQuality: 50,
   };
 }
 
@@ -275,6 +278,7 @@ describe("AppSettings", () => {
         },
         imageSafeMode: true,
         imageSafeModePromptDismissed: false,
+        costQuality: 50,
       },
     });
     mocks.p3aSettings.mockResolvedValue({
@@ -432,10 +436,15 @@ describe("AppSettings", () => {
       },
       imageSafeMode: true,
       imageSafeModePromptDismissed: false,
+      costQuality: 50,
     }));
     mocks.setImageSafeMode.mockImplementation(async (enabled: boolean) => ({
       ...buildProviderSettings(),
       imageSafeMode: enabled,
+    }));
+    mocks.setCostQuality.mockImplementation(async (costQuality: number) => ({
+      ...buildProviderSettings(),
+      costQuality,
     }));
     mocks.setVeniceApiKey.mockResolvedValue({
       ...buildProviderSettings(),
@@ -2534,6 +2543,110 @@ describe("AppSettings", () => {
     } finally {
       window.removeEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, modelChanged);
     }
+  });
+
+  it("serializes rapid preset saves and keeps the latest automatic preference", async () => {
+    const autoSettings = {
+      ...buildProviderSettings(),
+      generationModel: "open-software/auto",
+      remoteGenerationModel: "open-software/auto",
+      costQuality: 50,
+    };
+    mocks.providerModelSettings.mockResolvedValueOnce({ settings: autoSettings });
+    let resolveFirst!: (settings: typeof autoSettings) => void;
+    let resolveSecond!: (settings: typeof autoSettings) => void;
+    const first = new Promise<typeof autoSettings>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise<typeof autoSettings>((resolve) => {
+      resolveSecond = resolve;
+    });
+    mocks.setCostQuality.mockReset();
+    mocks.setCostQuality.mockImplementationOnce(() => first).mockImplementationOnce(() => second);
+
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await screen.findByRole("tab", { name: "Models" });
+    fireEvent.click(screen.getByRole("tab", { name: "Models" }));
+    const preference = await screen.findByRole("group", {
+      name: "Auto preference",
+    });
+    const lowerCost = within(preference).getByRole("button", { name: "Lower cost" });
+    const balanced = within(preference).getByRole("button", { name: "Balanced" });
+    const higherQuality = within(preference).getByRole("button", { name: "Higher quality" });
+    expect(balanced).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByText("Choose how June balances model quality and usage cost."),
+    ).toBeVisible();
+
+    fireEvent.click(lowerCost);
+    fireEvent.click(higherQuality);
+
+    await waitFor(() => expect(mocks.setCostQuality).toHaveBeenCalledTimes(1));
+    expect(mocks.setCostQuality).toHaveBeenNthCalledWith(1, 20);
+    expect(higherQuality).toHaveAttribute("aria-pressed", "true");
+
+    await act(async () => {
+      resolveFirst({ ...autoSettings, costQuality: 20 });
+      await first;
+    });
+    await waitFor(() => expect(mocks.setCostQuality).toHaveBeenCalledTimes(2));
+    expect(mocks.setCostQuality).toHaveBeenNthCalledWith(2, 100);
+    expect(higherQuality).toHaveAttribute("aria-pressed", "true");
+
+    await act(async () => {
+      resolveSecond({ ...autoSettings, costQuality: 100 });
+      await second;
+    });
+    await waitFor(() =>
+      expect(screen.getByText("Automatic model preference updated.")).toBeInTheDocument(),
+    );
+    expect(higherQuality).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("restores the last confirmed automatic preference when saving fails", async () => {
+    const autoSettings = {
+      ...buildProviderSettings(),
+      generationModel: "open-software/auto",
+      remoteGenerationModel: "open-software/auto",
+      costQuality: 50,
+    };
+    mocks.providerModelSettings.mockResolvedValueOnce({ settings: autoSettings });
+    mocks.setCostQuality.mockRejectedValueOnce(new Error("Could not save preference."));
+
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Models" }));
+    const preference = await screen.findByRole("group", { name: "Auto preference" });
+    const balanced = within(preference).getByRole("button", { name: "Balanced" });
+    const higherQuality = within(preference).getByRole("button", { name: "Higher quality" });
+
+    fireEvent.click(higherQuality);
+    expect(higherQuality).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(screen.getByText("Could not save preference.")).toBeInTheDocument());
+    expect(balanced).toHaveAttribute("aria-pressed", "true");
   });
 
   it("keeps local endpoint fields hidden until local setup starts", async () => {
