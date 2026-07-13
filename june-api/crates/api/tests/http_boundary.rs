@@ -206,7 +206,7 @@ async fn integration_p3a_report_uses_user_auth_and_forwards_anonymous_bucket()
             "/v1/p3a/reports",
             &serde_json::json!({
                 "schema": 1,
-                "questionId": "dictation.sessions",
+                "questionId": "onboarding.use-case.work",
                 "epoch": "2026-W28",
                 "platform": "macos",
                 "versionSeries": "0.0.x",
@@ -228,7 +228,7 @@ async fn integration_p3a_report_uses_user_auth_and_forwards_anonymous_bucket()
         sink.reports()?,
         vec![P3aReport {
             product_slug: "june".to_string(),
-            question_id: "dictation.sessions".to_string(),
+            question_id: "onboarding.use-case.work".to_string(),
             epoch: "2026-W28".to_string(),
             platform: "macos".to_string(),
             version_series: "0.0.x".to_string(),
