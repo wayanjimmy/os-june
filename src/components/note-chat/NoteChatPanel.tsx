@@ -33,7 +33,13 @@ import {
   ComposerModelPopover,
   type ComposerModelFlyout,
 } from "../agent/composer/ModelPicker";
-import { modelOptions, selectedModel } from "../settings/ModelPickerDialog";
+import {
+  dispatchProviderModelSettingsChanged,
+  PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
+  type ProviderModelSettingsChangedDetail,
+} from "../../lib/model-privacy";
+import { autoPillDesignation } from "../../lib/suggested-models";
+import { AUTO_MODEL_ID, modelOptions, selectedModel } from "../settings/ModelPickerDialog";
 import type { NoteChat, NoteChatAttachment } from "./useNoteChat";
 
 /** Note-tailored presets, shown as the main session view's preset chips (icon
@@ -258,6 +264,24 @@ export function NoteChatPanel({
       stale = true;
     };
   }, []);
+  // The Auto designation mirrors the app-wide preference, which the workspace
+  // and Settings pickers can change while this panel stays mounted — re-read
+  // it whenever a generation model change is announced. The session's model
+  // choice itself stays local on purpose.
+  useEffect(() => {
+    function handleSettingsChanged(event: Event) {
+      const detail = (event as CustomEvent<ProviderModelSettingsChangedDetail>).detail;
+      if (detail?.mode !== "generation") return;
+      void providerModelSettings()
+        .then((settings) => setCostQualityState(settings.settings.costQuality))
+        .catch(() => {
+          // No settings (bridge down, browser preview): keep the last value.
+        });
+    }
+    window.addEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, handleSettingsChanged);
+    return () =>
+      window.removeEventListener(PROVIDER_MODEL_SETTINGS_CHANGED_EVENT, handleSettingsChanged);
+  }, []);
   const model = modelId ? selectedModel(models, modelId) : undefined;
 
   async function selectModel(nextModelId: string, nextCostQuality?: number) {
@@ -265,6 +289,10 @@ export function NoteChatPanel({
       if (nextCostQuality !== undefined) {
         const next = await setCostQuality(nextCostQuality);
         setCostQualityState(next.costQuality);
+        // The preference is app-wide even though the model choice is
+        // session-local: announce it so the workspace pill's designation
+        // refreshes (the mirror of the listener above).
+        dispatchProviderModelSettingsChanged({ mode: "generation", modelId: nextModelId });
       }
       setModelId(nextModelId);
       setSessionModel(nextModelId);
@@ -546,6 +574,9 @@ export function NoteChatPanel({
                 <ComposerModelPicker
                   open={modelOpen}
                   model={model}
+                  detail={
+                    model?.id === AUTO_MODEL_ID ? autoPillDesignation(costQuality) : undefined
+                  }
                   triggerRef={modelTriggerRef}
                   onToggleOpen={() => {
                     setModelFlyout(null);
