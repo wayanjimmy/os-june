@@ -62,6 +62,7 @@ Per-repo config the engineering skills read before acting (see the
 - [hermes-architecture.md](hermes-architecture.md) — the agent runtime: bridge, gateway, control plane, sessions, models
 - [hermes-gateway-gotchas.md](hermes-gateway-gotchas.md) — integration gotchas: restart discipline, config contract, MCP OAuth, event types, upstream tool-schema quirks
 - [browser-computer-use-prd.md](browser-computer-use-prd.md) — PRD: Browser use + Computer use plugins (JUN-278); extension in the user's browser + routines-only managed browser, phase-2 computer use
+- [computer-use-cua-driver-spike.md](computer-use-cua-driver-spike.md) — spike (JUN-288): the bundled cua-driver runs outside the write jail as a broker-owned, separately-signed daemon; private-interface lookups survive the jail, driver state writes do not; pinning + installer-never-runs confirmed
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [june-api-prd.md](june-api-prd.md) — June API: upstream proxy + OS Accounts authorize/charge (the canonical backend spec)
 - [telemetry.md](telemetry.md) — public overview of June telemetry, current behavior, and policies
