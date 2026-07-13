@@ -30,10 +30,6 @@ built-in fallback ← `config.toml` ← the **live Venice catalog at boot**.
 | `OS_ACCOUNTS_LOOPBACK_PORT` | Login redirect loopback port; must match the registered `http://127.0.0.1:<port>/callback` | `8765` |
 | `OS_JUNE_DEV_PLAINTEXT_TOKEN_STORE` | Debug builds: store tokens in a file, not the Keychain (avoids prompts) | `0` |
 | `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Google Desktop OAuth credential for Gmail/Calendar connectors. Google requires both at token exchange; the second value is not confidential in an installed app and grants no user-data access by itself | unset |
-| `NOTION_OAUTH_CLIENT_ID` / `_SECRET` | Notion public connection OAuth credential for the local-mode Notion connector | unset |
-| `NOTION_OAUTH_REDIRECT_URI` | Exact loopback callback registered on the Notion public connection | `http://127.0.0.1:43191/notion/callback` in `.env.example` |
-| `LINEAR_OAUTH_CLIENT_ID` / `_SECRET` | Linear OAuth application id and optional secret for the PKCE local-mode Linear connector | unset |
-| `LINEAR_OAUTH_REDIRECT_URI` | Exact loopback callback registered on the Linear OAuth application | `http://127.0.0.1:43192/linear/callback` in `.env.example` |
 | `VENICE_TRANSCRIPTION_MODEL` / `OPENAI_TRANSCRIPTION_MODEL` | Initial transcription model (Settings can override) | see `.env.example` |
 | `VENICE_GENERATION_MODEL` | Initial note-generation model | `zai-org-glm-5-2` |
 | `VENICE_TITLE_SUGGESTION_MODEL` | Fast model for note-title suggestions | fallback to cleanup model |

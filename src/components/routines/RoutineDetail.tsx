@@ -13,7 +13,6 @@ import {
   routineToolsetsFor,
   triggerConfigFromDraft,
   triggerScopeWarning,
-  triggerProvider,
   type TriggerDraft,
 } from "../../lib/connectors";
 import {
@@ -64,7 +63,6 @@ import { TrustModePicker } from "./TrustModePicker";
  * must build objects in the same shape TriggerPicker emits. */
 function triggerDraftFromStored(stored: ConnectorTrigger): TriggerDraft {
   if (stored.kind === "email_received") return { source: "email_received" };
-  if (stored.kind === "linear_assignment") return { source: "linear_assignment" };
   const lead = stored.config.leadMinutes;
   const external = stored.config.externalOnly;
   return {
@@ -259,16 +257,9 @@ export function RoutineDetail({
     let triggerAccount: ConnectorAccount | undefined;
     const switchingToEvent = triggerChanged && trigger.source !== "schedule";
     if (switchingToEvent) {
-      const provider = triggerProvider(trigger);
-      triggerAccount = accounts.find(
-        (entry) => entry.provider === provider && entry.status === "connected",
-      );
+      triggerAccount = accounts.find((entry) => entry.status === "connected");
       if (!triggerAccount) {
-        toast.error(
-          trigger.source === "linear_assignment"
-            ? "Connect a Linear workspace before using an assignment trigger."
-            : "Connect a Google account before using an email or calendar trigger.",
-        );
+        toast.error("Connect a Google account before using an event trigger.");
         return;
       }
       // The account must hold the scope this trigger's daemon polls, or the
@@ -640,18 +631,10 @@ export function RoutineDetail({
                 <TriggerPicker
                   trigger={trigger}
                   scheduleDraft={draft}
-                  hasAccount={
-                    accounts.some(
-                      (entry) =>
-                        entry.provider === triggerProvider(trigger) && entry.status === "connected",
-                    ) || trigger.source === "schedule"
-                  }
+                  hasAccount={accounts.some((entry) => entry.status === "connected")}
                   scopeWarning={triggerScopeWarning(
                     trigger,
-                    accounts.find(
-                      (entry) =>
-                        entry.provider === triggerProvider(trigger) && entry.status === "connected",
-                    )?.scopes ?? null,
+                    accounts.find((entry) => entry.status === "connected")?.scopes ?? null,
                   )}
                   onTriggerChange={changeTrigger}
                   onScheduleChange={setDraft}

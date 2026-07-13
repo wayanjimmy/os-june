@@ -150,16 +150,7 @@ Design rules: tools return compact structured summaries by default (subject/send
 
 ## Phase 4 — Slack, Notion, Linear (~3 weeks, after Phase 3)
 
-- **Notion and Linear local mode implemented ahead of Phase 3.** They use the
-  same Keychain custody, Rust provider proxy, split read/action MCP servers,
-  approval and autonomy grants, and runtime restart path as Google.
-  `june_notion` searches/reads pages and `june_notion_actions` creates pages.
-  `june_linear` searches/reads issues and lists assignments;
-  `june_linear_actions` creates issues and comments; an app-side poller fires
-  assignment triggers.
-- Slack remains deferred: `june_slack` (read channels/DMs, draft replies
-  gated, mention triggers) requires the away-mode relay for public event
-  delivery.
+- Same `june-connectors` + MCP pattern: `june_slack` (read channels/DMs, draft replies gated, mention triggers — requires relay), `june_notion` (search/read/create pages), `june_linear` (issues, comments, triggers on assignment).
 - Slack app review is its own external dependency (~2–4 weeks) — submit during Phase 3.
 - Notion/Linear are poll-friendly and can ship local-only ahead of Slack if relay slips.
 

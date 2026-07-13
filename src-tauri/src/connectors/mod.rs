@@ -1,9 +1,10 @@
-//! Private connectors, local mode.
+//! Private Google connectors, local mode.
 //!
-//! OAuth (PKCE/loopback where supported), Keychain token custody, provider API
-//! clients, scope routing, and trigger polling. The provider proxy and trigger
-//! daemon consume this module; June API and OpenSoftware infrastructure are
-//! never in the connector data path.
+//! OAuth (PKCE + loopback), Keychain token custody, the scope registry, and
+//! the direct Google REST client. The provider proxy and the trigger daemon
+//! consume this module: they resolve an access token via
+//! [`google_access_token`] and call the [`google`] functions with it. June
+//! API and OpenSoftware infrastructure are never in the connector data path.
 //!
 //! Secrets live ONLY in the keychain ([`store`]); the SQLite index carries
 //! non-secret account metadata (emails, scopes, status) so accounts can be
@@ -13,8 +14,6 @@
 pub mod approvals;
 pub mod commands;
 pub mod google;
-pub mod linear;
-pub mod notion;
 pub mod oauth;
 pub mod scopes;
 pub mod store;
@@ -37,45 +36,17 @@ pub use oauth::ConnectFlow;
 const ACCESS_TOKEN_EXPIRY_BUFFER_SECS: i64 = 60;
 const GOOGLE_OAUTH_CLIENT_ID_ENV: &str = "GOOGLE_OAUTH_CLIENT_ID";
 const GOOGLE_OAUTH_CLIENT_SECRET_ENV: &str = "GOOGLE_OAUTH_CLIENT_SECRET";
-const NOTION_OAUTH_CLIENT_ID_ENV: &str = "NOTION_OAUTH_CLIENT_ID";
-const NOTION_OAUTH_CLIENT_SECRET_ENV: &str = "NOTION_OAUTH_CLIENT_SECRET";
-const NOTION_OAUTH_REDIRECT_URI_ENV: &str = "NOTION_OAUTH_REDIRECT_URI";
-const LINEAR_OAUTH_CLIENT_ID_ENV: &str = "LINEAR_OAUTH_CLIENT_ID";
-const LINEAR_OAUTH_CLIENT_SECRET_ENV: &str = "LINEAR_OAUTH_CLIENT_SECRET";
-const LINEAR_OAUTH_REDIRECT_URI_ENV: &str = "LINEAR_OAUTH_REDIRECT_URI";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorProvider {
-    #[default]
     Google,
-    Notion,
-    Linear,
 }
 
 impl ConnectorProvider {
     pub fn as_str(&self) -> &'static str {
         match self {
             ConnectorProvider::Google => "google",
-            ConnectorProvider::Notion => "notion",
-            ConnectorProvider::Linear => "linear",
-        }
-    }
-
-    pub fn from_db(value: &str) -> Option<Self> {
-        match value {
-            "google" => Some(Self::Google),
-            "notion" => Some(Self::Notion),
-            "linear" => Some(Self::Linear),
-            _ => None,
-        }
-    }
-
-    fn display_name(self) -> &'static str {
-        match self {
-            Self::Google => "Google",
-            Self::Notion => "Notion",
-            Self::Linear => "Linear",
         }
     }
 }
@@ -104,16 +75,13 @@ impl ConnectorAccountStatus {
 }
 
 /// Non-secret account descriptor returned to the frontend and used by the
-/// proxy to enumerate accounts. Google ids are emails; other providers use a
-/// namespaced stable workspace id.
+/// proxy to enumerate accounts. The account id IS the Google account email.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorAccount {
     pub account_id: String,
     pub provider: ConnectorProvider,
-    pub display_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub email: String,
     pub scopes: Vec<String>,
     pub status: ConnectorAccountStatus,
 }
@@ -161,12 +129,6 @@ struct GoogleOAuthClient {
     client_secret: String,
 }
 
-struct OAuthClient {
-    client_id: String,
-    client_secret: String,
-    redirect_uri: String,
-}
-
 fn google_oauth_client() -> GoogleOAuthClient {
     crate::os_accounts::load_local_env();
     GoogleOAuthClient {
@@ -187,62 +149,6 @@ fn require_oauth_client() -> Result<GoogleOAuthClient, AppError> {
         return Err(AppError::new(
             "connector_not_configured",
             "Google connector is not configured in this build.",
-        ));
-    }
-    Ok(client)
-}
-
-fn oauth_client(
-    id_env: &str,
-    secret_env: &str,
-    redirect_env: &str,
-    build_id: Option<&'static str>,
-    build_secret: Option<&'static str>,
-    build_redirect: Option<&'static str>,
-) -> OAuthClient {
-    crate::os_accounts::load_local_env();
-    OAuthClient {
-        client_id: env_or_build_trimmed(id_env, build_id),
-        client_secret: env_or_build_trimmed(secret_env, build_secret),
-        redirect_uri: env_or_build_trimmed(redirect_env, build_redirect),
-    }
-}
-
-fn require_provider_oauth_client(provider: ConnectorProvider) -> Result<OAuthClient, AppError> {
-    let client = match provider {
-        ConnectorProvider::Notion => oauth_client(
-            NOTION_OAUTH_CLIENT_ID_ENV,
-            NOTION_OAUTH_CLIENT_SECRET_ENV,
-            NOTION_OAUTH_REDIRECT_URI_ENV,
-            option_env!("NOTION_OAUTH_CLIENT_ID"),
-            option_env!("NOTION_OAUTH_CLIENT_SECRET"),
-            option_env!("NOTION_OAUTH_REDIRECT_URI"),
-        ),
-        ConnectorProvider::Linear => oauth_client(
-            LINEAR_OAUTH_CLIENT_ID_ENV,
-            LINEAR_OAUTH_CLIENT_SECRET_ENV,
-            LINEAR_OAUTH_REDIRECT_URI_ENV,
-            option_env!("LINEAR_OAUTH_CLIENT_ID"),
-            option_env!("LINEAR_OAUTH_CLIENT_SECRET"),
-            option_env!("LINEAR_OAUTH_REDIRECT_URI"),
-        ),
-        ConnectorProvider::Google => {
-            return Err(AppError::new(
-                "connector_not_configured",
-                "Google uses its Desktop OAuth configuration.",
-            ))
-        }
-    };
-    let missing_required = client.client_id.is_empty()
-        || client.redirect_uri.is_empty()
-        || (provider == ConnectorProvider::Notion && client.client_secret.is_empty());
-    if missing_required {
-        return Err(AppError::new(
-            "connector_not_configured",
-            format!(
-                "{} connector is not configured in this build.",
-                provider.display_name()
-            ),
         ));
     }
     Ok(client)
@@ -387,162 +293,6 @@ async fn refresh_google_access_token_with_freshness_gate(
     }
 }
 
-pub async fn notion_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-) -> Result<String, AppError> {
-    let stored = store::load_tokens(account_id)
-        .await?
-        .ok_or_else(|| provider_not_connected_error(ConnectorProvider::Notion))?;
-    if !stored.access_token.is_empty() {
-        return Ok(stored.access_token.clone());
-    }
-    refresh_notion_access_token(app, account_id).await
-}
-
-pub async fn force_refresh_notion_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-) -> Result<String, AppError> {
-    refresh_notion_access_token(app, account_id).await
-}
-
-async fn refresh_notion_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-) -> Result<String, AppError> {
-    let client = require_provider_oauth_client(ConnectorProvider::Notion)?;
-    let lock = refresh_lock_for(account_id);
-    let _guard = lock.lock().await;
-    let mut stored = store::load_tokens(account_id)
-        .await?
-        .ok_or_else(|| provider_not_connected_error(ConnectorProvider::Notion))?;
-    if stored.refresh_token.is_empty() {
-        mark_reconnect_required(app, account_id).await;
-        return Err(provider_reconnect_error(ConnectorProvider::Notion));
-    }
-    for attempt in 1..=oauth::REFRESH_MAX_ATTEMPTS {
-        match notion::refresh(
-            &client.client_id,
-            &client.client_secret,
-            &stored.refresh_token,
-        )
-        .await
-        {
-            notion::RefreshOutcome::Refreshed(fresh) => {
-                stored.access_token = fresh.access_token.clone();
-                if let Some(refresh) = fresh
-                    .refresh_token
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                {
-                    stored.refresh_token = refresh.to_string();
-                }
-                store::store_tokens(&stored).await?;
-                return Ok(stored.access_token.clone());
-            }
-            notion::RefreshOutcome::InvalidGrant => {
-                mark_reconnect_required(app, account_id).await;
-                return Err(provider_reconnect_error(ConnectorProvider::Notion));
-            }
-            notion::RefreshOutcome::Transient if attempt < oauth::REFRESH_MAX_ATTEMPTS => {
-                tokio::time::sleep(oauth::REFRESH_RETRY_BACKOFF * attempt as u32).await;
-            }
-            notion::RefreshOutcome::Transient => break,
-        }
-    }
-    Err(AppError::new(
-        "connector_refresh_unavailable",
-        "Couldn't reach Notion to refresh access. Try again in a moment.",
-    ))
-}
-
-pub async fn linear_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-) -> Result<String, AppError> {
-    let stored = store::load_tokens(account_id)
-        .await?
-        .ok_or_else(|| provider_not_connected_error(ConnectorProvider::Linear))?;
-    if access_token_is_fresh(stored.expires_at_unix, now_unix()) {
-        return Ok(stored.access_token.clone());
-    }
-    refresh_linear_access_token(app, account_id, true).await
-}
-
-pub async fn force_refresh_linear_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-) -> Result<String, AppError> {
-    refresh_linear_access_token(app, account_id, false).await
-}
-
-async fn refresh_linear_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-    accept_fresh: bool,
-) -> Result<String, AppError> {
-    let client = require_provider_oauth_client(ConnectorProvider::Linear)?;
-    let lock = refresh_lock_for(account_id);
-    let _guard = lock.lock().await;
-    let mut stored = store::load_tokens(account_id)
-        .await?
-        .ok_or_else(|| provider_not_connected_error(ConnectorProvider::Linear))?;
-    if accept_fresh && access_token_is_fresh(stored.expires_at_unix, now_unix()) {
-        return Ok(stored.access_token.clone());
-    }
-    for attempt in 1..=oauth::REFRESH_MAX_ATTEMPTS {
-        match linear::refresh(&client.client_id, &stored.refresh_token).await {
-            linear::RefreshOutcome::Refreshed(fresh) => {
-                stored.access_token = fresh.access_token.clone();
-                if let Some(refresh) = fresh
-                    .refresh_token
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                {
-                    stored.refresh_token = refresh.to_string();
-                }
-                stored.expires_at_unix = now_unix() + fresh.expires_in.max(0);
-                let scopes = linear::granted_scopes(&fresh.scope);
-                if !scopes.is_empty() {
-                    stored.scopes = scopes;
-                }
-                store::store_tokens(&stored).await?;
-                return Ok(stored.access_token.clone());
-            }
-            linear::RefreshOutcome::InvalidGrant => {
-                mark_reconnect_required(app, account_id).await;
-                return Err(provider_reconnect_error(ConnectorProvider::Linear));
-            }
-            linear::RefreshOutcome::Transient if attempt < oauth::REFRESH_MAX_ATTEMPTS => {
-                tokio::time::sleep(oauth::REFRESH_RETRY_BACKOFF * attempt as u32).await;
-            }
-            linear::RefreshOutcome::Transient => break,
-        }
-    }
-    Err(AppError::new(
-        "connector_refresh_unavailable",
-        "Couldn't reach Linear to refresh access. Try again in a moment.",
-    ))
-}
-
-fn provider_not_connected_error(provider: ConnectorProvider) -> AppError {
-    AppError::new(
-        "connector_not_connected",
-        format!("This {} account is not connected.", provider.display_name()),
-    )
-}
-
-fn provider_reconnect_error(provider: ConnectorProvider) -> AppError {
-    AppError::new(
-        "connector_reconnect_required",
-        format!(
-            "{} access expired. Reconnect it in settings.",
-            provider.display_name()
-        ),
-    )
-}
-
 /// Fired whenever an account's connection state changes (connect, disconnect,
 /// or a background `reconnect_required` transition) so an open settings page
 /// refreshes without a remount. The frontend `CONNECTORS_CHANGED_EVENT`
@@ -592,16 +342,12 @@ pub async fn list_accounts(app: &tauri::AppHandle) -> Result<Vec<ConnectorAccoun
     let records = repos.list_connector_accounts().await?;
     Ok(records
         .into_iter()
-        .filter_map(|record| {
-            let provider = ConnectorProvider::from_db(&record.provider)?;
-            Some(ConnectorAccount {
-                account_id: record.account_id,
-                provider,
-                display_name: record.email.clone(),
-                email: (provider == ConnectorProvider::Google).then_some(record.email),
-                scopes: record.scopes,
-                status: ConnectorAccountStatus::from_db(&record.status),
-            })
+        .map(|record| ConnectorAccount {
+            account_id: record.account_id,
+            provider: ConnectorProvider::Google,
+            email: record.email,
+            scopes: record.scopes,
+            status: ConnectorAccountStatus::from_db(&record.status),
         })
         .collect())
 }
@@ -630,22 +376,6 @@ fn conflicting_existing_account<'a>(
 pub async fn begin_connect(
     app: &tauri::AppHandle,
     flow: &ConnectFlow,
-    provider: ConnectorProvider,
-    bundles: &[scopes::ScopeBundle],
-    expected_account_id: Option<&str>,
-) -> Result<ConnectorAccount, AppError> {
-    match provider {
-        ConnectorProvider::Google => {
-            begin_google_connect(app, flow, bundles, expected_account_id).await
-        }
-        ConnectorProvider::Notion => begin_notion_connect(app, flow, expected_account_id).await,
-        ConnectorProvider::Linear => begin_linear_connect(app, flow, expected_account_id).await,
-    }
-}
-
-async fn begin_google_connect(
-    app: &tauri::AppHandle,
-    flow: &ConnectFlow,
     bundles: &[scopes::ScopeBundle],
     login_hint: Option<&str>,
 ) -> Result<ConnectorAccount, AppError> {
@@ -662,8 +392,7 @@ async fn begin_google_connect(
                 return Ok(ConnectorAccount {
                     account_id: record.account_id,
                     provider: ConnectorProvider::Google,
-                    display_name: record.email.clone(),
-                    email: Some(record.email),
+                    email: record.email,
                     scopes: record.scopes,
                     status: ConnectorAccountStatus::Connected,
                 });
@@ -708,10 +437,7 @@ async fn begin_google_connect(
     // guard is the safety net, not the primary path.
     let existing_accounts = repos.list_connector_accounts().await?;
     if let Some(existing_email) = conflicting_existing_account(
-        existing_accounts
-            .iter()
-            .filter(|record| record.provider == ConnectorProvider::Google.as_str())
-            .map(|record| record.email.as_str()),
+        existing_accounts.iter().map(|record| record.email.as_str()),
         &email,
     ) {
         return Err(AppError::new(
@@ -776,145 +502,10 @@ async fn begin_google_connect(
     Ok(ConnectorAccount {
         account_id: email.clone(),
         provider: ConnectorProvider::Google,
-        display_name: email.clone(),
-        email: Some(email),
+        email,
         scopes: granted_scopes,
         status: ConnectorAccountStatus::Connected,
     })
-}
-
-async fn begin_notion_connect(
-    app: &tauri::AppHandle,
-    flow: &ConnectFlow,
-    expected_account_id: Option<&str>,
-) -> Result<ConnectorAccount, AppError> {
-    let client = require_provider_oauth_client(ConnectorProvider::Notion)?;
-    let grant = notion::authorize(
-        flow,
-        &client.client_id,
-        &client.client_secret,
-        &client.redirect_uri,
-    )
-    .await?;
-    let account_id = format!("notion:{}", grant.workspace_id);
-    ensure_expected_account(ConnectorProvider::Notion, expected_account_id, &account_id)?;
-    ensure_single_provider_account(app, ConnectorProvider::Notion, &account_id).await?;
-    let scopes = vec!["content:read".to_string(), "content:insert".to_string()];
-    let refresh_token = grant.tokens.refresh_token.clone().unwrap_or_default();
-    let stored = store::StoredConnectorTokens {
-        access_token: grant.tokens.access_token.clone(),
-        refresh_token,
-        expires_at_unix: i64::MAX,
-        scopes: scopes.clone(),
-        email: account_id.clone(),
-    };
-    store::store_tokens(&stored).await?;
-    let repos = crate::commands::repositories(app).await?;
-    repos
-        .upsert_connector_account(
-            &account_id,
-            ConnectorProvider::Notion.as_str(),
-            &grant.display_name,
-            &scopes,
-            ConnectorAccountStatus::Connected.as_str(),
-        )
-        .await?;
-    emit_connectors_changed(app);
-    Ok(ConnectorAccount {
-        account_id,
-        provider: ConnectorProvider::Notion,
-        display_name: grant.display_name,
-        email: grant.email,
-        scopes,
-        status: ConnectorAccountStatus::Connected,
-    })
-}
-
-async fn begin_linear_connect(
-    app: &tauri::AppHandle,
-    flow: &ConnectFlow,
-    expected_account_id: Option<&str>,
-) -> Result<ConnectorAccount, AppError> {
-    let client = require_provider_oauth_client(ConnectorProvider::Linear)?;
-    let grant = linear::authorize(
-        flow,
-        &client.client_id,
-        &client.client_secret,
-        &client.redirect_uri,
-    )
-    .await?;
-    let account_id = format!("linear:{}", grant.organization_id);
-    ensure_expected_account(ConnectorProvider::Linear, expected_account_id, &account_id)?;
-    ensure_single_provider_account(app, ConnectorProvider::Linear, &account_id).await?;
-    let scopes = linear::granted_scopes(&grant.tokens.scope);
-    let stored = store::StoredConnectorTokens {
-        access_token: grant.tokens.access_token.clone(),
-        refresh_token: grant.tokens.refresh_token.clone().unwrap_or_default(),
-        expires_at_unix: now_unix() + grant.tokens.expires_in.max(0),
-        scopes: scopes.clone(),
-        email: account_id.clone(),
-    };
-    store::store_tokens(&stored).await?;
-    let repos = crate::commands::repositories(app).await?;
-    repos
-        .upsert_connector_account(
-            &account_id,
-            ConnectorProvider::Linear.as_str(),
-            &grant.organization_name,
-            &scopes,
-            ConnectorAccountStatus::Connected.as_str(),
-        )
-        .await?;
-    emit_connectors_changed(app);
-    Ok(ConnectorAccount {
-        account_id,
-        provider: ConnectorProvider::Linear,
-        display_name: grant.organization_name,
-        email: grant.email,
-        scopes,
-        status: ConnectorAccountStatus::Connected,
-    })
-}
-
-fn ensure_expected_account(
-    provider: ConnectorProvider,
-    expected: Option<&str>,
-    connected: &str,
-) -> Result<(), AppError> {
-    if expected.is_some_and(|expected| expected != connected) {
-        return Err(AppError::new(
-            "connector_account_mismatch",
-            format!(
-                "That {} workspace does not match the one you were reconnecting.",
-                provider.display_name()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-async fn ensure_single_provider_account(
-    app: &tauri::AppHandle,
-    provider: ConnectorProvider,
-    connecting: &str,
-) -> Result<(), AppError> {
-    let repos = crate::commands::repositories(app).await?;
-    if let Some(existing) = repos
-        .list_connector_accounts()
-        .await?
-        .into_iter()
-        .find(|record| record.provider == provider.as_str() && record.account_id != connecting)
-    {
-        return Err(AppError::new(
-            "connector_single_account_only",
-            format!(
-                "June local mode uses one {} workspace at a time. Disconnect {} before connecting another.",
-                provider.display_name(),
-                existing.email
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// Abort an in-flight connect (drains the browser-handoff wait).
@@ -922,20 +513,14 @@ pub fn cancel_connect(flow: &ConnectFlow) {
     flow.cancel();
 }
 
-/// Disconnect an account: optionally revoke the provider grant (best-effort),
-/// always remove local custody, and drop the account from the DB index along
-/// with its triggers and cursors.
+/// Disconnect an account: optionally revoke the grant at Google
+/// (best-effort), always remove local custody, and drop the account from
+/// the DB index along with its triggers and cursors.
 pub async fn disconnect(
     app: &tauri::AppHandle,
     account_id: &str,
     revoke_grant: bool,
 ) -> Result<(), AppError> {
-    let repos = crate::commands::repositories(app).await?;
-    let provider = repos
-        .get_connector_account(account_id)
-        .await?
-        .and_then(|record| ConnectorProvider::from_db(&record.provider))
-        .unwrap_or(ConnectorProvider::Google);
     if revoke_grant {
         if let Ok(Some(stored)) = store::load_tokens(account_id).await {
             // Revoking either token of the pair invalidates the whole grant;
@@ -946,25 +531,12 @@ pub async fn disconnect(
                 stored.refresh_token.clone()
             };
             if !token.is_empty() {
-                match provider {
-                    ConnectorProvider::Google => {
-                        let _ = oauth::revoke(&token).await;
-                    }
-                    ConnectorProvider::Notion => {
-                        if let Ok(client) = require_provider_oauth_client(provider) {
-                            let _ =
-                                notion::revoke(&client.client_id, &client.client_secret, &token)
-                                    .await;
-                        }
-                    }
-                    ConnectorProvider::Linear => {
-                        let _ = linear::revoke(&token).await;
-                    }
-                }
+                let _ = oauth::revoke(&token).await;
             }
         }
     }
     store::delete_tokens(account_id).await?;
+    let repos = crate::commands::repositories(app).await?;
     repos.delete_connector_account(account_id).await?;
     emit_connectors_changed(app);
     Ok(())
@@ -981,14 +553,6 @@ mod tests {
             "\"google\""
         );
         assert_eq!(
-            serde_json::to_string(&ConnectorProvider::Notion).unwrap(),
-            "\"notion\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ConnectorProvider::Linear).unwrap(),
-            "\"linear\""
-        );
-        assert_eq!(
             serde_json::to_string(&ConnectorAccountStatus::ReconnectRequired).unwrap(),
             "\"reconnect_required\""
         );
@@ -1003,14 +567,12 @@ mod tests {
         let account = ConnectorAccount {
             account_id: "user@example.com".to_string(),
             provider: ConnectorProvider::Google,
-            display_name: "user@example.com".to_string(),
-            email: Some("user@example.com".to_string()),
+            email: "user@example.com".to_string(),
             scopes: vec!["openid".to_string()],
             status: ConnectorAccountStatus::Connected,
         };
         let json = serde_json::to_value(&account).unwrap();
         assert_eq!(json["accountId"], "user@example.com");
-        assert_eq!(json["displayName"], "user@example.com");
         assert_eq!(json["provider"], "google");
         assert_eq!(json["status"], "connected");
     }

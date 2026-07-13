@@ -9,7 +9,6 @@ const SOURCE_OPTIONS = [
   { value: "schedule", label: "On a schedule" },
   { value: "email_received", label: TRIGGER_META.email_received.label },
   { value: "event_upcoming", label: TRIGGER_META.event_upcoming.label },
-  { value: "linear_assignment", label: TRIGGER_META.linear_assignment.label },
 ];
 
 /**
@@ -29,7 +28,7 @@ export function TriggerPicker({
 }: {
   trigger: TriggerDraft;
   scheduleDraft: ScheduleDraft;
-  /** Whether the provider required by the selected trigger is connected. */
+  /** Whether any Google account is connected; event triggers require one. */
   hasAccount: boolean;
   /** Set when an account is connected but lacks the scope the selected trigger
    * needs, so the routine could be saved yet never fire. Null otherwise. */
@@ -41,7 +40,6 @@ export function TriggerPicker({
     if (source === trigger.source) return;
     if (source === "schedule") onTriggerChange({ source: "schedule" });
     else if (source === "email_received") onTriggerChange({ source: "email_received" });
-    else if (source === "linear_assignment") onTriggerChange({ source: "linear_assignment" });
     else {
       onTriggerChange({
         source: "event_upcoming",
@@ -103,17 +101,13 @@ export function TriggerPicker({
       {trigger.source !== "schedule" && !hasAccount ? (
         <InlineNotice
           tone="warning"
-          body={`${trigger.source === "linear_assignment" ? "Linear assignment triggers need a connected Linear workspace" : "Email and calendar triggers need a connected Google account"}. Connect one in Settings under Connectors.`}
-          aria-label="Connector account required"
+          body="Event triggers need a connected Google account. Connect one in Settings under Connectors."
+          aria-label="Google account required"
         />
       ) : null}
 
       {trigger.source !== "schedule" && hasAccount && scopeWarning ? (
-        <InlineNotice
-          tone="warning"
-          body={scopeWarning}
-          aria-label="More connector access needed"
-        />
+        <InlineNotice tone="warning" body={scopeWarning} aria-label="More Google access needed" />
       ) : null}
     </div>
   );

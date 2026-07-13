@@ -132,25 +132,3 @@ account.
   crate, not a workspace; connectors are a module (`src-tauri/src/connectors/`),
   matching the house pattern. No behavior change; recorded here so the
   discrepancy with the plan doc is not mistaken for an omission.
-
-## 2026-07-10 addendum: Notion and Linear local mode
-
-Notion and Linear now use the same local-mode boundary before the away-mode
-relay ships. Slack remains deferred because mention/event delivery requires a
-public webhook receiver.
-
-- Account routing is one account or workspace per provider. Google, Notion,
-  and Linear may be connected simultaneously; every MCP server, trigger, and
-  autonomy grant carries its provider-specific account id end to end.
-- Notion uses a public connection with an exact pre-registered loopback
-  redirect. It exposes read tools for title search and page content, plus an
-  approval-gated page-create action. Page access remains bounded by the pages
-  the user selects in Notion's authorization flow.
-- Linear uses OAuth PKCE with `read`, `issues:create`, and `comments:create`
-  rather than the broad `write` scope. It exposes issue search/read tools,
-  approval-gated issue/comment actions, and an app-side polling trigger for a
-  newly assigned issue.
-- The provider credentials required to identify each installed OAuth client
-  ship in the desktop build and are not user-data bearer credentials. User
-  access and refresh tokens remain Keychain-only and provider traffic still
-  bypasses June API.

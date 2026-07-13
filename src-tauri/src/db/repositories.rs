@@ -77,7 +77,7 @@ pub struct ConnectorTriggerRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectorGrant {
     pub job_id: String,
-    /// "gmail" | "gcal" | "notion" | "linear".
+    /// "gmail" | "gcal".
     pub provider: String,
     /// Deterministic per-job server name: `june_<provider>_auto_<jobid8>`.
     pub server_name: String,

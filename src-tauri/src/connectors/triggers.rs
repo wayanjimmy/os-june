@@ -1,6 +1,6 @@
 //! Connector trigger daemon.
 //!
-//! A background tokio task that polls providers for the events routines subscribe
+//! A background tokio task that polls Google for the events routines subscribe
 //! to and wakes the matching routine through the bridge cron `trigger` action.
 //! The event is a wake-up only: the routine re-reads state through its tools.
 //!
@@ -20,14 +20,13 @@ use crate::connectors::google::{self, GoogleApiError, ListEventsParams};
 use crate::db::repositories::{ConnectorTriggerRecord, Repositories};
 use crate::domain::types::AppError;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 const STARTUP_DELAY: Duration = Duration::from_secs(30);
 const GMAIL_PERIOD: Duration = Duration::from_secs(90);
 const CALENDAR_PERIOD: Duration = Duration::from_secs(300);
-const LINEAR_PERIOD: Duration = Duration::from_secs(180);
 /// Cadence when the machine is on battery below the threshold and discharging,
 /// or when there is nothing to poll.
 const BACKOFF_PERIOD: Duration = Duration::from_secs(300);
@@ -36,7 +35,6 @@ const BATTERY_LOW_PERCENT: u32 = 20;
 const DEFAULT_LEAD_MINUTES: i64 = 15;
 const EMAIL_KIND: &str = "email_received";
 const EVENT_KIND: &str = "event_upcoming";
-const LINEAR_ASSIGNMENT_KIND: &str = "linear_assignment";
 
 /// Spawn the trigger daemon. Called once from app setup after the bridge init.
 pub fn start(app: &AppHandle) {
@@ -50,7 +48,6 @@ pub fn start(app: &AppHandle) {
 async fn run(app: AppHandle) {
     let mut next_gmail = Instant::now();
     let mut next_calendar = Instant::now();
-    let mut next_linear = Instant::now();
     // Last-known "is anything subscribed" per kind, refreshed each time that
     // kind is polled. A kind not due this iteration keeps its prior value, so
     // the idle backoff below reflects triggers across BOTH kinds, not just the
@@ -59,7 +56,6 @@ async fn run(app: AppHandle) {
     // the empty calendar poll came due before the next mail poll.
     let mut gmail_has_triggers = false;
     let mut calendar_has_triggers = false;
-    let mut linear_has_triggers = false;
     loop {
         let backoff = battery_low_and_discharging();
         let now = Instant::now();
@@ -77,23 +73,14 @@ async fn run(app: AppHandle) {
             calendar_has_triggers = poll_kind(&app, EVENT_KIND).await;
             next_calendar = Instant::now() + CALENDAR_PERIOD;
         }
-        if now >= next_linear {
-            linear_has_triggers = poll_kind(&app, LINEAR_ASSIGNMENT_KIND).await;
-            next_linear = Instant::now()
-                + if backoff {
-                    BACKOFF_PERIOD
-                } else {
-                    LINEAR_PERIOD
-                };
-        }
 
         // Idle backoff: with nothing subscribed of either kind, wait a full
         // backoff period before looking again instead of spinning on the short
         // mail cadence. As long as some trigger exists, honor the normal
         // per-kind cadence so due mail polls are not delayed to the idle rate.
-        let soonest = next_gmail.min(next_calendar).min(next_linear);
+        let soonest = next_gmail.min(next_calendar);
         let mut sleep = soonest.saturating_duration_since(Instant::now());
-        if !gmail_has_triggers && !calendar_has_triggers && !linear_has_triggers {
+        if !gmail_has_triggers && !calendar_has_triggers {
             sleep = sleep.max(BACKOFF_PERIOD);
         }
         tokio::time::sleep(sleep.max(MIN_SLEEP)).await;
@@ -133,7 +120,7 @@ async fn poll_kind(app: &AppHandle, kind: &str) -> bool {
                 tracing::warn!(error_code = %error.code, kind, "connector email trigger poll failed");
             }
         }
-    } else if kind == EVENT_KIND {
+    } else {
         // event_upcoming is per job: each carries its own lead time and fired
         // set, so poll each trigger independently.
         for trigger in relevant {
@@ -141,85 +128,8 @@ async fn poll_kind(app: &AppHandle, kind: &str) -> bool {
                 tracing::warn!(error_code = %error.code, kind, "connector event trigger poll failed");
             }
         }
-    } else {
-        let mut by_account: HashMap<String, Vec<String>> = HashMap::new();
-        for trigger in relevant {
-            by_account
-                .entry(trigger.account_id)
-                .or_default()
-                .push(trigger.job_id);
-        }
-        for (account_id, job_ids) in by_account {
-            if let Err(error) = poll_linear_assignments(app, &repos, &account_id, &job_ids).await {
-                tracing::warn!(error_code = %error.code, kind, "connector Linear trigger poll failed");
-            }
-        }
     }
     true
-}
-
-// --- Linear -------------------------------------------------------------------
-
-async fn poll_linear_assignments(
-    app: &AppHandle,
-    repos: &Repositories,
-    account_id: &str,
-    job_ids: &[String],
-) -> Result<(), AppError> {
-    let current = call_linear_assigned(app, account_id).await?;
-    let previous = repos
-        .trigger_cursor(account_id, LINEAR_ASSIGNMENT_KIND)
-        .await?
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok());
-    let Some(previous) = previous else {
-        repos
-            .set_trigger_cursor(
-                account_id,
-                LINEAR_ASSIGNMENT_KIND,
-                &serde_json::to_string(&current).unwrap_or_else(|_| "[]".to_string()),
-            )
-            .await?;
-        return Ok(());
-    };
-    // `current` is fully paginated, so a set difference is a real newly visible
-    // assignment rather than page-order churn. Persisting the current set also
-    // means unassigning and later reassigning the same issue fires again.
-    let previous: HashSet<String> = previous.into_iter().collect();
-    let has_new_assignment = current.iter().any(|id| !previous.contains(id));
-    let mut all_fired = true;
-    if has_new_assignment {
-        for job_id in job_ids {
-            if !fire(app, job_id).await {
-                all_fired = false;
-            }
-        }
-    }
-    if all_fired {
-        repos
-            .set_trigger_cursor(
-                account_id,
-                LINEAR_ASSIGNMENT_KIND,
-                &serde_json::to_string(&current).unwrap_or_else(|_| "[]".to_string()),
-            )
-            .await?;
-    }
-    Ok(())
-}
-
-async fn call_linear_assigned(app: &AppHandle, account_id: &str) -> Result<Vec<String>, AppError> {
-    use crate::connectors::linear::{self, LinearApiError};
-    let token = crate::connectors::linear_access_token(app, account_id).await?;
-    match linear::list_all_assigned_issue_ids(&token).await {
-        Ok(value) => Ok(value),
-        Err(LinearApiError::Unauthorized) => {
-            let token =
-                crate::connectors::force_refresh_linear_access_token(app, account_id).await?;
-            linear::list_all_assigned_issue_ids(&token)
-                .await
-                .map_err(Into::into)
-        }
-        Err(error) => Err(error.into()),
-    }
 }
 
 // --- Email --------------------------------------------------------------------

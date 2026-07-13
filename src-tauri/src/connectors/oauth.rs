@@ -1,4 +1,4 @@
-//! Native-app OAuth helpers for private connectors.
+//! Google native-app OAuth for private connectors.
 //!
 //! PKCE (S256) + loopback redirect on an ephemeral 127.0.0.1 port, for BOTH
 //! debug and release builds: Google desktop-app clients use the loopback
@@ -66,72 +66,6 @@ impl ConnectFlow {
             }
         }
     }
-}
-
-/// Open a provider authorization URL and receive the code on a pre-registered
-/// loopback redirect URI. Providers such as Notion and Linear require the
-/// callback URI to match an application setting exactly, so unlike Google's
-/// Desktop flow this binds the configured fixed port.
-pub(crate) async fn authorize_loopback(
-    flow: &ConnectFlow,
-    provider: &str,
-    redirect_uri: &str,
-    auth_url: &str,
-    expected_state: &str,
-) -> Result<String, AppError> {
-    let (host, port, callback_path) = parse_loopback_redirect(redirect_uri).ok_or_else(|| {
-        AppError::new(
-            "connector_invalid_redirect_uri",
-            format!(
-                "{provider} must use a configured http://127.0.0.1 or http://localhost callback."
-            ),
-        )
-    })?;
-    let listener = TcpListener::bind((host, port)).await.map_err(|error| {
-        AppError::new(
-            "connector_loopback_bind_failed",
-            format!("Could not start the local {provider} connect listener: {error}"),
-        )
-    })?;
-    crate::os_accounts::open_in_browser(auth_url)?;
-
-    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-    if let Ok(mut slot) = flow.cancel.lock() {
-        *slot = Some(cancel_tx);
-    }
-    let outcome = tokio::select! {
-        result = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            await_callback_path(&listener, expected_state, &callback_path, provider),
-        ) => result.unwrap_or_else(|_| Err(AppError::new(
-            "connector_connect_timed_out",
-            format!("Connecting to {provider} timed out. Please try again."),
-        ))),
-        _ = cancel_rx => Err(AppError::new(
-            "connector_connect_canceled",
-            format!("Connecting to {provider} was canceled."),
-        )),
-    };
-    if let Ok(mut slot) = flow.cancel.lock() {
-        *slot = None;
-    }
-    outcome
-}
-
-fn parse_loopback_redirect(redirect_uri: &str) -> Option<(&'static str, u16, String)> {
-    let (host, rest) = if let Some(rest) = redirect_uri.strip_prefix("http://127.0.0.1:") {
-        ("127.0.0.1", rest)
-    } else {
-        let rest = redirect_uri.strip_prefix("http://localhost:")?;
-        ("127.0.0.1", rest)
-    };
-    let (port, path) = rest.split_once('/')?;
-    let port = port.parse::<u16>().ok().filter(|port| *port > 0)?;
-    let path = format!("/{}", path.split(['?', '#']).next().unwrap_or_default());
-    if path == "/" {
-        return None;
-    }
-    Some((host, port, path))
 }
 
 /// Token endpoint response. Secret fields zeroize on drop.
@@ -299,15 +233,6 @@ const SUCCESS_BODY: &str = r##"<!doctype html>
 /// Every per-socket read is bounded so a slow client on the loopback port
 /// cannot stall the listener for the full connect timeout.
 async fn await_callback(listener: &TcpListener, expected_state: &str) -> Result<String, AppError> {
-    await_callback_path(listener, expected_state, "/callback", "Google").await
-}
-
-async fn await_callback_path(
-    listener: &TcpListener,
-    expected_state: &str,
-    callback_path: &str,
-    provider: &str,
-) -> Result<String, AppError> {
     loop {
         let (mut stream, _) = listener
             .accept()
@@ -326,7 +251,7 @@ async fn await_callback_path(
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("");
 
-        if !is_loopback_callback_path(path, callback_path) {
+        if !is_loopback_callback_path(path) {
             write_http(&mut stream, "404 Not Found", "Not found").await;
             continue;
         }
@@ -340,14 +265,14 @@ async fn await_callback_path(
                 write_http(&mut stream, "200 OK", "You can close this tab.").await;
                 return Err(AppError::new(
                     "connector_connect_denied",
-                    format!("{provider} access was declined."),
+                    "Google access was declined.",
                 ));
             }
             CallbackOutcome::MissingCode => {
                 write_http(&mut stream, "400 Bad Request", "Missing authorization code").await;
                 return Err(AppError::new(
                     "connector_missing_code",
-                    format!("{provider}'s response was missing an authorization code."),
+                    "Google's response was missing an authorization code.",
                 ));
             }
             CallbackOutcome::Code(code) => {
@@ -358,8 +283,8 @@ async fn await_callback_path(
     }
 }
 
-fn is_loopback_callback_path(path: &str, expected_path: &str) -> bool {
-    path.split_once('?').map_or(path, |(path, _query)| path) == expected_path
+fn is_loopback_callback_path(path: &str) -> bool {
+    path.split_once('?').map_or(path, |(path, _query)| path) == "/callback"
 }
 
 async fn write_http(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
@@ -611,13 +536,13 @@ async fn fetch_userinfo_email(access_token: &str) -> Result<String, AppError> {
         .ok_or_else(identity_failed)
 }
 
-pub(crate) fn pkce() -> (String, String) {
+fn pkce() -> (String, String) {
     let verifier = random_b64url(32);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     (verifier, challenge)
 }
 
-pub(crate) fn random_b64url(bytes: usize) -> String {
+fn random_b64url(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::thread_rng().fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(&buf)
@@ -696,14 +621,8 @@ mod tests {
 
     #[test]
     fn callback_path_rejects_prefix_matches() {
-        assert!(is_loopback_callback_path(
-            "/callback?code=x&state=y",
-            "/callback"
-        ));
-        assert!(!is_loopback_callback_path(
-            "/callback-extra?code=x&state=y",
-            "/callback"
-        ));
+        assert!(is_loopback_callback_path("/callback?code=x&state=y"));
+        assert!(!is_loopback_callback_path("/callback-extra?code=x&state=y"));
     }
 
     #[test]

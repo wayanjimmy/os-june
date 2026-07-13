@@ -14,12 +14,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OS_ACCOUNTS_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=GOOGLE_OAUTH_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=GOOGLE_OAUTH_CLIENT_SECRET");
-    println!("cargo:rerun-if-env-changed=NOTION_OAUTH_CLIENT_ID");
-    println!("cargo:rerun-if-env-changed=NOTION_OAUTH_CLIENT_SECRET");
-    println!("cargo:rerun-if-env-changed=NOTION_OAUTH_REDIRECT_URI");
-    println!("cargo:rerun-if-env-changed=LINEAR_OAUTH_CLIENT_ID");
-    println!("cargo:rerun-if-env-changed=LINEAR_OAUTH_CLIENT_SECRET");
-    println!("cargo:rerun-if-env-changed=LINEAR_OAUTH_REDIRECT_URI");
     println!("cargo:rerun-if-env-changed=JUNE_API_URL");
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("macos") {
         println!("cargo:rustc-link-lib=framework=AVFoundation");

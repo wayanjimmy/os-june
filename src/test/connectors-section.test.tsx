@@ -36,7 +36,6 @@ function account(overrides: Partial<ConnectorAccount> = {}): ConnectorAccount {
     scopes: [GMAIL_READONLY, CALENDAR_EVENTS],
     status: "connected",
     ...overrides,
-    displayName: overrides.displayName ?? email,
   };
 }
 
@@ -49,8 +48,7 @@ beforeEach(() => {
   mocks.listen.mockResolvedValue(() => {});
 });
 
-/** Waits for the initial connectorsList load to settle: the directory always
- * renders all provider rows, so "loaded" means the connect actions unlock. */
+/** Waits for the initial connectorsList load to settle. */
 async function findEnabledConnect(name: string) {
   const button = await screen.findByRole("button", { name });
   await waitFor(() => expect(button).toBeEnabled());
@@ -58,37 +56,21 @@ async function findEnabledConnect(name: string) {
 }
 
 describe("ConnectorsSection", () => {
-  it("always lists every provider row with a capability blurb", async () => {
+  it("lists Google with a capability blurb", async () => {
     render(<ConnectorsSection />);
     await findEnabledConnect("Connect Google");
 
     expect(screen.getByText("Google")).toBeInTheDocument();
-    expect(screen.getByText("Notion")).toBeInTheDocument();
-    expect(screen.getByText("Linear")).toBeInTheDocument();
     expect(screen.getByText(/mail and calendar for briefings/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect Notion" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect Linear" })).toBeInTheDocument();
   });
 
   it("lists connected accounts with feature labels and status", async () => {
-    mocks.connectorsList.mockResolvedValue([
-      account(),
-      account({
-        accountId: "acc-2",
-        provider: "notion",
-        displayName: "Acme workspace",
-        email: undefined,
-        scopes: [],
-        status: "reconnect_required",
-      }),
-    ]);
+    mocks.connectorsList.mockResolvedValue([account()]);
     render(<ConnectorsSection />);
 
     expect(await screen.findByText(/alex@example\.com/)).toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeInTheDocument();
-    expect(screen.getByText("Reconnect needed")).toBeInTheDocument();
     expect(screen.getByText(/read mail, manage calendar/i)).toBeInTheDocument();
-    expect(screen.getByText(/Acme workspace/)).toBeInTheDocument();
     // Subscribed to the connectors-changed Tauri event to stay fresh.
     expect(mocks.listen).toHaveBeenCalledWith("june://connectors-changed", expect.any(Function));
   });
@@ -102,9 +84,7 @@ describe("ConnectorsSection", () => {
     // connector servers, triggers, and grants all bind to that single account.
     expect(screen.queryByRole("button", { name: "Connect Google" })).toBeNull();
     expect(screen.getByRole("button", { name: "Add access" })).toBeInTheDocument();
-    expect(screen.getByText(/one account or workspace per provider/i)).toBeInTheDocument();
-    // The other providers stay connectable.
-    expect(screen.getByRole("button", { name: "Connect Notion" })).toBeInTheDocument();
+    expect(screen.getByText(/Connect Google in local mode/i)).toBeInTheDocument();
   });
 
   it("connects an account from the feature-bundle dialog and applies the runtime", async () => {
@@ -123,28 +103,12 @@ describe("ConnectorsSection", () => {
 
     await waitFor(() =>
       expect(mocks.connectorsConnect).toHaveBeenCalledWith({
-        provider: "google",
         scopes: ["gmail_read", "gmail_draft", "calendar_read"],
         loginHint: undefined,
       }),
     );
     await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
     expect(await screen.findByText(/alex@example\.com/)).toBeInTheDocument();
-  });
-
-  it("connects Notion and Linear through their provider OAuth flows", async () => {
-    render(<ConnectorsSection />);
-
-    await userEvent.click(await findEnabledConnect("Connect Notion"));
-    await waitFor(() =>
-      expect(mocks.connectorsConnect).toHaveBeenCalledWith({ provider: "notion" }),
-    );
-    await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
-
-    await userEvent.click(await findEnabledConnect("Connect Linear"));
-    await waitFor(() =>
-      expect(mocks.connectorsConnect).toHaveBeenCalledWith({ provider: "linear" }),
-    );
   });
 
   it("shows an inline notice when the connector is not configured in this build", async () => {
@@ -173,7 +137,6 @@ describe("ConnectorsSection", () => {
 
     await waitFor(() =>
       expect(mocks.connectorsConnect).toHaveBeenCalledWith({
-        provider: "google",
         scopes: ["gmail_read", "calendar_events"],
         loginHint: "alex@example.com",
       }),

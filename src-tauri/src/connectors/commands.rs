@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 
 use super::{
     begin_connect, disconnect, list_accounts, scopes::ScopeBundle, ConnectFlow, ConnectorAccount,
-    ConnectorAccountStatus, ConnectorProvider,
+    ConnectorAccountStatus,
 };
 
 /// A routine earns autonomy only after this many completed approval-mode
@@ -18,7 +18,7 @@ use super::{
 const EARNED_AUTONOMY_MIN_APPROVAL_RUNS: i64 = 3;
 
 const TRUST_MODES: &[&str] = &["read_only", "approval", "autonomous"];
-const TRIGGER_KINDS: &[&str] = &["email_received", "event_upcoming", "linear_assignment"];
+const TRIGGER_KINDS: &[&str] = &["email_received", "event_upcoming"];
 
 /// Mutating tools autonomy can grant, grouped by connector provider. The
 /// bridge mints one auto MCP server per provider that has at least one
@@ -26,8 +26,6 @@ const TRIGGER_KINDS: &[&str] = &["email_received", "event_upcoming", "linear_ass
 /// (read-only tools never need a grant).
 const GMAIL_AUTONOMOUS_TOOLS: &[&str] = &["create_draft", "send_email", "modify_labels", "archive"];
 const GCAL_AUTONOMOUS_TOOLS: &[&str] = &["create_event", "respond_to_invite"];
-const NOTION_AUTONOMOUS_TOOLS: &[&str] = &["create_page"];
-const LINEAR_AUTONOMOUS_TOOLS: &[&str] = &["create_issue", "add_comment"];
 
 #[tauri::command]
 pub async fn connectors_list(app: tauri::AppHandle) -> Result<Vec<ConnectorAccount>, AppError> {
@@ -37,19 +35,12 @@ pub async fn connectors_list(app: tauri::AppHandle) -> Result<Vec<ConnectorAccou
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorsConnectRequest {
-    #[serde(default)]
-    pub provider: ConnectorProvider,
     /// Bundle names: "gmail_read" | "gmail_draft" | "gmail_send" |
     /// "calendar_events".
-    #[serde(default)]
     pub scopes: Vec<String>,
     /// Existing account email for incremental scope escalation.
     #[serde(default)]
     pub login_hint: Option<String>,
-    /// Existing provider account/workspace id for reconnects. `login_hint`
-    /// remains accepted for the original Google frontend contract.
-    #[serde(default)]
-    pub account_id: Option<String>,
 }
 
 #[tauri::command]
@@ -58,16 +49,8 @@ pub async fn connectors_connect(
     flow: tauri::State<'_, ConnectFlow>,
     request: ConnectorsConnectRequest,
 ) -> Result<ConnectorAccount, AppError> {
-    let bundles = if request.provider == ConnectorProvider::Google {
-        parse_bundles(&request.scopes)?
-    } else {
-        Vec::new()
-    };
-    let expected_account = request
-        .account_id
-        .as_deref()
-        .or(request.login_hint.as_deref());
-    let account = begin_connect(&app, &flow, request.provider, &bundles, expected_account).await?;
+    let bundles = parse_bundles(&request.scopes)?;
+    let account = begin_connect(&app, &flow, &bundles, request.login_hint.as_deref()).await?;
 
     // Re-mint autonomous grants for routines that still declare autonomous
     // trust. A prior disconnect deletes an account's grants but keeps the
@@ -263,10 +246,6 @@ fn provider_for_tool(tool: &str) -> Option<&'static str> {
         Some("gmail")
     } else if GCAL_AUTONOMOUS_TOOLS.contains(&tool) {
         Some("gcal")
-    } else if NOTION_AUTONOMOUS_TOOLS.contains(&tool) {
-        Some("notion")
-    } else if LINEAR_AUTONOMOUS_TOOLS.contains(&tool) {
-        Some("linear")
     } else {
         None
     }
@@ -323,6 +302,7 @@ async fn mint_autonomy_grants(
     repos: &Repositories,
     record: &RoutineTrustRecord,
 ) -> Result<Vec<String>, AppError> {
+    let account_id = first_connected_account_email(app).await;
     let job_suffix = job_server_suffix(&record.job_id);
 
     // Granted mutating tools grouped by provider (deduped, sorted, ordered).
@@ -365,7 +345,7 @@ async fn mint_autonomy_grants(
             server_name: server_name.clone(),
             token,
             tools: tools.clone(),
-            account_id: connected_account_id_for_grant_provider(app, provider).await,
+            account_id: account_id.clone(),
         };
         repos.set_connector_grant(&grant, &created_at).await?;
         server_names.push(server_name);
@@ -374,23 +354,12 @@ async fn mint_autonomy_grants(
     Ok(server_names)
 }
 
-async fn connected_account_id_for_grant_provider(
-    app: &tauri::AppHandle,
-    grant_provider: &str,
-) -> String {
-    let wanted = match grant_provider {
-        "gmail" | "gcal" => ConnectorProvider::Google,
-        "notion" => ConnectorProvider::Notion,
-        "linear" => ConnectorProvider::Linear,
-        _ => return String::new(),
-    };
+async fn first_connected_account_email(app: &tauri::AppHandle) -> String {
     match list_accounts(app).await {
         Ok(accounts) => accounts
             .into_iter()
-            .find(|account| {
-                account.provider == wanted && account.status == ConnectorAccountStatus::Connected
-            })
-            .map(|account| account.account_id)
+            .find(|account| account.status == ConnectorAccountStatus::Connected)
+            .map(|account| account.email)
             .unwrap_or_default(),
         // Never fail the trust change on an account-enumeration hiccup; the
         // grant is still written and can be re-minted once an account exists.
@@ -451,23 +420,14 @@ pub async fn connector_trigger_set(
 ) -> Result<ConnectorTriggerDto, AppError> {
     validate_trigger_kind(&request.kind)?;
     let repos = crate::commands::repositories(&app).await?;
-    let account = repos.get_connector_account(&request.account_id).await?;
-    let required_provider = if request.kind == "linear_assignment" {
-        "linear"
-    } else {
-        "google"
-    };
-    if !matches!(account.as_ref(), Some(account) if account.provider == required_provider) {
+    if repos
+        .get_connector_account(&request.account_id)
+        .await?
+        .is_none()
+    {
         return Err(AppError::new(
             "connector_account_not_found",
-            format!(
-                "A connected {} account is required for this trigger.",
-                if required_provider == "linear" {
-                    "Linear"
-                } else {
-                    "Google"
-                }
-            ),
+            "That Google account is not connected.",
         ));
     }
     let config = request
@@ -476,18 +436,21 @@ pub async fn connector_trigger_set(
     let config_json = serde_json::to_string(&config)
         .map_err(|e| AppError::new("connector_trigger_invalid_config", e.to_string()))?;
 
-    // Delta-style triggers baseline when the first subscription is created.
-    // Clear a stale per-account cursor left by a previously deleted last
-    // trigger so mail/assignments that arrived while nothing subscribed do not
-    // immediately wake the new routine.
-    let reset_baseline_cursor = matches!(
-        request.kind.as_str(),
-        "email_received" | "linear_assignment"
-    ) && !repos
-        .list_connector_triggers(None)
-        .await?
-        .iter()
-        .any(|trigger| trigger.kind == request.kind && trigger.account_id == request.account_id);
+    // A fresh Gmail subscription must baseline from the current history id, not
+    // from a stale per-account cursor a previous (now deleted) email routine
+    // left behind. When this call establishes the account's first email trigger
+    // (checked before the insert, so an edit of an account that already has one
+    // does not count), clear the cursor: the daemon then reseeds like a
+    // first-time subscription and won't fire for mail that arrived before this
+    // routine existed. Checked before writing the trigger row below.
+    let reset_email_cursor = request.kind == "email_received"
+        && !repos
+            .list_connector_triggers(None)
+            .await?
+            .iter()
+            .any(|trigger| {
+                trigger.kind == "email_received" && trigger.account_id == request.account_id
+            });
 
     let record = repos
         .set_connector_trigger(
@@ -498,9 +461,9 @@ pub async fn connector_trigger_set(
         )
         .await?;
 
-    if reset_baseline_cursor {
+    if reset_email_cursor {
         repos
-            .clear_trigger_cursor(&request.account_id, &request.kind)
+            .clear_trigger_cursor(&request.account_id, "email_received")
             .await?;
     }
     Ok(ConnectorTriggerDto {
@@ -603,7 +566,6 @@ mod tests {
     fn trigger_kind_validation() {
         assert!(validate_trigger_kind("email_received").is_ok());
         assert!(validate_trigger_kind("event_upcoming").is_ok());
-        assert!(validate_trigger_kind("linear_assignment").is_ok());
         assert_eq!(
             validate_trigger_kind("webhook").unwrap_err().code,
             "connector_trigger_invalid_kind"
@@ -626,9 +588,6 @@ mod tests {
         assert_eq!(provider_for_tool("archive"), Some("gmail"));
         assert_eq!(provider_for_tool("create_event"), Some("gcal"));
         assert_eq!(provider_for_tool("respond_to_invite"), Some("gcal"));
-        assert_eq!(provider_for_tool("create_page"), Some("notion"));
-        assert_eq!(provider_for_tool("create_issue"), Some("linear"));
-        assert_eq!(provider_for_tool("add_comment"), Some("linear"));
         // Read-only or unknown tools need no grant.
         assert_eq!(provider_for_tool("read_thread"), None);
         assert_eq!(provider_for_tool("list_events"), None);

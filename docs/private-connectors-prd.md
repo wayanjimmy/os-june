@@ -36,11 +36,6 @@ Town's architecture is their weakness: the whole product only works if you hand 
 
 Gmail and Google Calendar at launch; Slack, Notion, Linear in the fast-follow. Two modes, and the user always knows which one they're in:
 
-**Sequencing update (2026-07-10):** Notion and Linear local mode moved into
-the launch implementation because both work with on-device OAuth and polling.
-Slack remains after the away-mode relay because its event delivery needs a
-public receiver.
-
 - **Local mode (default).** You authorize Google *on your Mac*; the keys stay in your Mac's Keychain; every provider API call comes from your device. OpenSoftware's servers are not in the *connector* data path — we hold no credential that could read your mail even under compulsion. Model inference for routines is a separate, existing path: connector-derived prompts run through the user's selected provider — the TEE-attested June API by default, or fully on-device with a local model — and the claim copy must say so (the "not in the data path" line covers token custody and provider calls, never inference). This covers the large majority of real usage.
 - **Away mode (opt-in, Pro).** For "works while your laptop is closed": events route through the same attested enclave that already runs June API. Nothing is ever stored in plaintext; keys are sealed to published, verifiable code; queued items are encrypted to your device and deleted on delivery. The trust surface grows by exactly three named things (Intel TDX, Phala key management, our upgrade governance) and we say so out loud on a published threat-model page.
 
@@ -105,8 +100,7 @@ follows [telemetry-p3a-prd.md](telemetry-p3a-prd.md).)*
 
 ## 8. Decision asks
 
-1. Approve the phased scope (Google/Notion/Linear local connectors → templates
-   → relay → Slack) and ~12-week plan in the CTO doc.
+1. Approve the phased scope (local connectors → templates → relay → Slack/Notion/Linear) and ~12-week plan in the CTO doc.
 2. Approve away-mode as Pro-gated; local connectors free.
 3. Approve budget for the CASA assessment lab and the external relay security audit (two separate engagements).
 4. Green-light the vs-Town marketing surface (vs-page + comparison rows) to build in parallel with Phase 1, gated on the threat-model page for claims.

@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS connector_grants (
   job_id TEXT NOT NULL,
-  provider TEXT NOT NULL CHECK(provider IN ('gmail','gcal','notion','linear')),
+  provider TEXT NOT NULL CHECK(provider IN ('gmail','gcal')),
   server_name TEXT NOT NULL,
   token TEXT NOT NULL,
   tools TEXT NOT NULL DEFAULT '[]',

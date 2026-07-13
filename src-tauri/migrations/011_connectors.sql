@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS routine_trust (
 CREATE TABLE IF NOT EXISTS connector_triggers (
   id TEXT PRIMARY KEY,
   job_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('email_received', 'event_upcoming', 'linear_assignment')),
+  kind TEXT NOT NULL CHECK (kind IN ('email_received', 'event_upcoming')),
   account_id TEXT NOT NULL,
   config TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL

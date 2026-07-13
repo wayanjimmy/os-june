@@ -16,7 +16,6 @@ import { errorCode } from "./errors";
 import { UNRESTRICTED_ROUTINE_TOOLSETS } from "./hermes-routines";
 import type {
   ConnectorAccountStatus,
-  ConnectorProvider,
   ConnectorScopeBundle,
   ConnectorTriggerKind,
   RoutineTrustMode,
@@ -165,15 +164,8 @@ const STATUS_META: Readonly<Record<ConnectorAccountStatus, ConnectorStatusMeta>>
   },
 });
 
-export function accountStatusMeta(
-  status: ConnectorAccountStatus,
-  provider: ConnectorProvider = "google",
-): ConnectorStatusMeta {
-  const meta = STATUS_META[status];
-  if (status === "connected") return meta;
-  const providerName =
-    provider === "google" ? "Google" : provider === "notion" ? "Notion" : "Linear";
-  return { ...meta, blurb: `${providerName} needs you to sign in again before June can use it.` };
+export function accountStatusMeta(status: ConnectorAccountStatus): ConnectorStatusMeta {
+  return STATUS_META[status];
 }
 
 /** True for the Rust "connector_not_configured" error: this build ships no
@@ -218,12 +210,12 @@ export function autonomyRuntimeNeedsRestart(input: {
 export const TRUST_MODE_META: Readonly<Record<RoutineTrustMode, TrustModeMeta>> = Object.freeze({
   read_only: {
     label: "Read only",
-    description: "The routine can read connected work but never change anything.",
+    description: "The routine can read mail and calendar but never change anything.",
     icon: IconEyeOpen,
   },
   approval: {
     label: "Approval",
-    description: "Connector changes wait for your approval before they run.",
+    description: "Drafts, sends, and event changes wait for your approval before they run.",
     icon: IconChecklist,
   },
   autonomous: {
@@ -281,16 +273,11 @@ export const SANDBOXED_ROUTINE_BASE_TOOLSETS = [
 ];
 
 /** Read-only connector MCP servers: ambient for every routine. */
-export const CONNECTOR_READ_TOOLSETS = ["june_gmail", "june_gcal", "june_notion", "june_linear"];
+export const CONNECTOR_READ_TOOLSETS = ["june_gmail", "june_gcal"];
 
 /** Action connector MCP servers: every mutating call parks for approval in
  * the Rust proxy. */
-export const CONNECTOR_ACTION_TOOLSETS = [
-  "june_gmail_actions",
-  "june_gcal_actions",
-  "june_notion_actions",
-  "june_linear_actions",
-];
+export const CONNECTOR_ACTION_TOOLSETS = ["june_gmail_actions", "june_gcal_actions"];
 
 /** One grantable connector action tool, for the autonomous grant checklist.
  * `id` is the raw tool name the Rust proxy consults grants by. */
@@ -307,9 +294,6 @@ export const CONNECTOR_ACTION_TOOLS: readonly ConnectorActionTool[] = Object.fre
   { id: "archive", server: "june_gmail_actions", label: "Archive mail" },
   { id: "create_event", server: "june_gcal_actions", label: "Create events" },
   { id: "respond_to_invite", server: "june_gcal_actions", label: "Respond to invites" },
-  { id: "create_page", server: "june_notion_actions", label: "Create Notion pages" },
-  { id: "create_issue", server: "june_linear_actions", label: "Create Linear issues" },
-  { id: "add_comment", server: "june_linear_actions", label: "Add Linear comments" },
 ]);
 
 const ACTION_TOOL_LABELS: Readonly<Record<string, string>> = Object.freeze(
@@ -340,13 +324,10 @@ export function actionToolLabel(tool: string): string {
   return ACTION_TOOL_LABELS[tool] ?? tool.replace(/_/g, " ");
 }
 
-/** The provider behind a connector MCP server name (june_gmail_actions,
- * june_gcal, june_notion_auto_x, ...), for provider marks on the approvals
- * surface. Null for non-connector servers. */
-export function providerFromServer(server: string): ConnectorProvider | null {
+/** The provider behind a Google connector MCP server name, for provider marks
+ * on the approvals surface. Null for non-connector servers. */
+export function providerFromServer(server: string): "google" | null {
   if (server.startsWith("june_gmail") || server.startsWith("june_gcal")) return "google";
-  if (server.startsWith("june_notion")) return "notion";
-  if (server.startsWith("june_linear")) return "linear";
   return null;
 }
 
@@ -374,7 +355,7 @@ export function routineToolsetsFor(
   return [...new Set(toolsets)];
 }
 
-const AUTO_SERVER_PATTERN = /^june_(?:gmail|gcal|notion|linear)_auto_/;
+const AUTO_SERVER_PATTERN = /^june_(?:gmail|gcal)_auto_/;
 
 /**
  * Derives the trust mode a stored job's toolset override implies, for the
@@ -413,11 +394,6 @@ export const TRIGGER_META: Readonly<Record<ConnectorTriggerKind, TriggerMeta>> =
     description: "Runs a set number of minutes before a calendar event starts.",
     configFields: ["leadMinutes", "externalOnly"],
   },
-  linear_assignment: {
-    label: "When an issue is assigned to me",
-    description: "Runs when a new Linear issue is assigned to the connected user.",
-    configFields: [],
-  },
 });
 
 /** The routine editor's "When" model: a plain schedule, or a connector event
@@ -426,16 +402,9 @@ export const TRIGGER_META: Readonly<Record<ConnectorTriggerKind, TriggerMeta>> =
 export type TriggerDraft =
   | { source: "schedule" }
   | { source: "email_received" }
-  | { source: "event_upcoming"; leadMinutes: number; externalOnly: boolean }
-  | { source: "linear_assignment" };
+  | { source: "event_upcoming"; leadMinutes: number; externalOnly: boolean };
 
 export const DEFAULT_EVENT_LEAD_MINUTES = 30;
-
-export function triggerProvider(trigger: TriggerDraft): ConnectorProvider | null {
-  if (trigger.source === "linear_assignment") return "linear";
-  if (trigger.source === "email_received" || trigger.source === "event_upcoming") return "google";
-  return null;
-}
 
 /**
  * The connector scope bundle a connector event trigger's daemon must be able to
@@ -452,8 +421,6 @@ export function triggerRequiredBundles(trigger: TriggerDraft): readonly Connecto
       return ["gmail_read"];
     case "event_upcoming":
       return ["calendar_read"];
-    case "linear_assignment":
-      return [];
     default:
       return [];
   }

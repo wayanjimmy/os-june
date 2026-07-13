@@ -1,13 +1,12 @@
-//! Local connector token custody.
+//! Google connector token custody.
 //!
-//! Tokens live in the OS keychain, one entry per provider account id, and NEVER
-//! anywhere else: the SQLite index only carries non-secret account metadata so
-//! accounts can be enumerated without touching the keychain. The service and
-//! serialized `email` field retain their original Google-era names for storage
-//! compatibility; for Notion and Linear that field contains the namespaced
-//! account id. Debug builds can opt into a plaintext token file for local
-//! development via `OS_JUNE_DEV_PLAINTEXT_TOKEN_STORE=1` (also what unit tests
-//! exercise, since the Keychain is unavailable in CI).
+//! Tokens live in the OS keychain, one entry per Google account (user =
+//! account email), and NEVER anywhere else: the SQLite index only carries
+//! non-secret account metadata (emails, scopes, status) so accounts can be
+//! enumerated without touching the keychain. Debug builds use a separate
+//! keychain service, and can opt into a plaintext token file for local
+//! development via `OS_JUNE_DEV_PLAINTEXT_TOKEN_STORE=1` (also what unit
+//! tests exercise, since the Keychain is unavailable in CI).
 
 use crate::domain::types::AppError;
 use serde::{Deserialize, Serialize};
@@ -38,12 +37,12 @@ pub struct StoredConnectorTokens {
 pub async fn store_tokens(tokens: &StoredConnectorTokens) -> Result<(), AppError> {
     let json = serde_json::to_string(tokens)
         .map_err(|e| AppError::new("connector_token_serialize_failed", e.to_string()))?;
-    let account_id = tokens.email.clone();
+    let email = tokens.email.clone();
     #[cfg(debug_assertions)]
     if use_dev_plaintext_token_store() {
-        return store_dev_plaintext_tokens(account_id, json).await;
+        return store_dev_plaintext_tokens(email, json).await;
     }
-    store_platform_tokens(account_id, json).await
+    store_platform_tokens(email, json).await
 }
 
 /// Load the stored tokens for one account. `Ok(None)` means "not connected"
@@ -65,10 +64,10 @@ pub async fn delete_tokens(account_id: &str) -> Result<(), AppError> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-async fn store_platform_tokens(account_id: String, json: String) -> Result<(), AppError> {
+async fn store_platform_tokens(email: String, json: String) -> Result<(), AppError> {
     let service = keychain_service().to_string();
     tokio::task::spawn_blocking(move || {
-        keyring::Entry::new(&service, &account_id).and_then(|entry| entry.set_password(&json))
+        keyring::Entry::new(&service, &email).and_then(|entry| entry.set_password(&json))
     })
     .await
     .map_err(|e| AppError::new("connector_keychain_write_failed", e.to_string()))?
@@ -76,7 +75,7 @@ async fn store_platform_tokens(account_id: String, json: String) -> Result<(), A
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-async fn store_platform_tokens(_account_id: String, _json: String) -> Result<(), AppError> {
+async fn store_platform_tokens(_email: String, _json: String) -> Result<(), AppError> {
     Err(secure_storage_unavailable())
 }
 
@@ -184,17 +183,15 @@ fn dev_plaintext_token_path() -> std::path::PathBuf {
 
 // --- Dev plaintext file store (debug builds only) ---------------------------
 //
-// One JSON object keyed by account id. The pure `dev_file_*` helpers take
+// One JSON object keyed by account email. The pure `dev_file_*` helpers take
 // an explicit path so unit tests can exercise them against a temp dir without
 // mutating process env or the shared target/ file.
 
 #[cfg(debug_assertions)]
-async fn store_dev_plaintext_tokens(account_id: String, json: String) -> Result<(), AppError> {
-    tokio::task::spawn_blocking(move || {
-        dev_file_store(&dev_plaintext_token_path(), &account_id, &json)
-    })
-    .await
-    .map_err(|e| AppError::new("connector_dev_token_store_write_failed", e.to_string()))?
+async fn store_dev_plaintext_tokens(email: String, json: String) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || dev_file_store(&dev_plaintext_token_path(), &email, &json))
+        .await
+        .map_err(|e| AppError::new("connector_dev_token_store_write_failed", e.to_string()))?
 }
 
 #[cfg(debug_assertions)]
@@ -262,11 +259,11 @@ fn dev_file_write_map(
 }
 
 #[cfg(any(debug_assertions, test))]
-fn dev_file_store(path: &std::path::Path, account_id: &str, json: &str) -> Result<(), AppError> {
+fn dev_file_store(path: &std::path::Path, email: &str, json: &str) -> Result<(), AppError> {
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| AppError::new("connector_dev_token_store_write_failed", e.to_string()))?;
     let mut map = dev_file_read_map(path);
-    map.insert(account_id.to_string(), value);
+    map.insert(email.to_string(), value);
     dev_file_write_map(path, &map)
 }
 

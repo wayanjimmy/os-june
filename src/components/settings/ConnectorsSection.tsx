@@ -17,7 +17,6 @@ import {
   connectorsDisconnect,
   connectorsList,
   type ConnectorAccount,
-  type ConnectorProvider,
   type ConnectorScopeBundle,
 } from "../../lib/tauri";
 import { Checkbox } from "../ui/Checkbox";
@@ -31,35 +30,27 @@ import { SettingsPageHeader } from "./AppSettings";
 // never grants mutation authority the user did not ask for.
 const DEFAULT_CONNECT_BUNDLES: readonly ConnectorScopeBundle[] = ["gmail_read", "calendar_read"];
 
-const PROVIDER_ORDER: readonly ConnectorProvider[] = ["google", "notion", "linear"];
+const PROVIDER_ORDER = ["google"] as const;
 
-const PROVIDER_NAMES: Readonly<Record<ConnectorProvider, string>> = {
+const PROVIDER_NAMES = {
   google: "Google",
-  notion: "Notion",
-  linear: "Linear",
-};
+} as const;
 
 /** One-line capability blurb shown while a provider is not connected: what
  * connecting it lets June do, in the provider directory row. */
-const PROVIDER_BLURBS: Readonly<Record<ConnectorProvider, string>> = {
+const PROVIDER_BLURBS = {
   google: "Mail and calendar for briefings, triage, and meeting prep.",
-  notion: "Search, read, and create pages in your workspace.",
-  linear: "Read issues, create issues and comments, and watch assignments.",
-};
+} as const;
 
 function featureSummary(account: ConnectorAccount): string {
-  if (account.provider === "google") {
-    const features = grantedFeatureLabels(account.scopes);
-    return features.length > 0 ? `Can ${features.join(", ").toLowerCase()}.` : "";
-  }
-  if (account.provider === "notion") return "Can search, read, and create pages.";
-  return "Can read issues, create issues and comments, and watch assignments.";
+  const features = grantedFeatureLabels(account.scopes);
+  return features.length > 0 ? `Can ${features.join(", ").toLowerCase()}.` : "";
 }
 
 /** The connected row's one-liner: who is connected, then what June may do. */
 function accountSubtitle(account: ConnectorAccount): string {
   const summary = featureSummary(account);
-  return summary ? `${account.displayName} · ${summary}` : account.displayName;
+  return summary ? `${account.email} · ${summary}` : account.email;
 }
 
 /**
@@ -72,7 +63,7 @@ function accountSubtitle(account: ConnectorAccount): string {
 export function ConnectorsSection() {
   const [accounts, setAccounts] = useState<ConnectorAccount[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [notConfigured, setNotConfigured] = useState<ConnectorProvider | null>(null);
+  const [notConfigured, setNotConfigured] = useState<"google" | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
   const [bundles, setBundles] = useState<ConnectorScopeBundle[]>([...DEFAULT_CONNECT_BUNDLES]);
   // Email of the account we are adding scope to (single-account incremental
@@ -80,7 +71,6 @@ export function ConnectorsSection() {
   // preselects that account and the backend's single-account guard passes.
   const [connectHint, setConnectHint] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [connectingProvider, setConnectingProvider] = useState<ConnectorProvider | null>(null);
   const [reconnectingId, setReconnectingId] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<ConnectorAccount | null>(null);
   const [revoke, setRevoke] = useState(false);
@@ -113,32 +103,12 @@ export function ConnectorsSection() {
     };
   }, [refresh]);
 
-  async function runConnect(input: {
-    provider: ConnectorProvider;
-    scopes?: ConnectorScopeBundle[];
-    loginHint?: string;
-    accountId?: string;
-  }) {
-    await connectorsConnect(input);
+  async function runConnect(input: { scopes: ConnectorScopeBundle[]; loginHint?: string }) {
+    await connectorsConnect({ scopes: input.scopes, loginHint: input.loginHint });
     // A fresh grant only takes effect once the rendered MCP config picks it
     // up; apply immediately so the user's next routine or chat sees it.
     await connectorsApplyRuntime();
     await refresh();
-  }
-
-  async function connectProvider(provider: Exclude<ConnectorProvider, "google">) {
-    if (connectingProvider) return;
-    setNotConfigured(null);
-    setConnectingProvider(provider);
-    try {
-      await runConnect({ provider });
-      toast.success(`${PROVIDER_NAMES[provider]} connected`);
-    } catch (err) {
-      if (isConnectorNotConfiguredError(err)) setNotConfigured(provider);
-      else toast.error(messageFromError(err));
-    } finally {
-      setConnectingProvider(null);
-    }
   }
 
   // Open the connect dialog for a brand-new account (only offered when none is
@@ -153,7 +123,7 @@ export function ConnectorsSection() {
     // Preselect what the account already holds so the dialog reads as "add to
     // these"; the checkboxes the user adds are the new scopes.
     setBundles(bundlesFromScopes(account.scopes));
-    setConnectHint(account.email ?? account.displayName);
+    setConnectHint(account.email);
     setConnectOpen(true);
   }
 
@@ -163,7 +133,6 @@ export function ConnectorsSection() {
     setConnecting(true);
     try {
       await runConnect({
-        provider: "google",
         scopes: bundles,
         loginHint: connectHint ?? undefined,
       });
@@ -185,18 +154,13 @@ export function ConnectorsSection() {
     setNotConfigured(null);
     setReconnectingId(account.accountId);
     try {
-      if (account.provider === "google") {
-        await runConnect({
-          provider: "google",
-          scopes: bundlesFromScopes(account.scopes),
-          loginHint: account.email,
-        });
-      } else {
-        await runConnect({ provider: account.provider, accountId: account.accountId });
-      }
-      toast.success(`${PROVIDER_NAMES[account.provider]} reconnected`);
+      await runConnect({
+        scopes: bundlesFromScopes(account.scopes),
+        loginHint: account.email,
+      });
+      toast.success("Google reconnected");
     } catch (err) {
-      if (isConnectorNotConfiguredError(err)) setNotConfigured(account.provider);
+      if (isConnectorNotConfiguredError(err)) setNotConfigured("google");
       else toast.error(messageFromError(err));
     } finally {
       setReconnectingId(null);
@@ -212,7 +176,7 @@ export function ConnectorsSection() {
       await connectorsApplyRuntime();
       await refresh();
       setDisconnectTarget(null);
-      toast.success(`Disconnected ${account.displayName}`);
+      toast.success(`Disconnected ${account.email}`);
     } catch (err) {
       toast.error(messageFromError(err));
     } finally {
@@ -229,17 +193,12 @@ export function ConnectorsSection() {
     });
   }
 
-  function connectRow(provider: ConnectorProvider) {
-    if (provider === "google") openConnectNew();
-    else void connectProvider(provider);
-  }
-
   return (
     <section className="settings-group" aria-labelledby="connectors-heading">
       <SettingsPageHeader
         id="connectors-heading"
         title="Connectors"
-        blurb="Connect Google, Notion, and Linear in local mode: one account or workspace per provider. Tokens stay in your Mac's Keychain, and provider calls go straight from this device."
+        blurb="Connect Google in local mode. Tokens stay in your Mac's Keychain, provider calls go straight from this device, and OpenSoftware's servers cannot read your mail or calendar."
       />
 
       {notConfigured ? (
@@ -256,9 +215,9 @@ export function ConnectorsSection() {
       <div className="settings-card connectors-card">
         <ul className="connectors-list">
           {PROVIDER_ORDER.map((provider) => {
-            const account = accounts?.find((entry) => entry.provider === provider) ?? null;
+            const account = accounts?.[0] ?? null;
             const name = PROVIDER_NAMES[provider];
-            const status = account ? accountStatusMeta(account.status, provider) : null;
+            const status = account ? accountStatusMeta(account.status) : null;
             const subtitle = account ? accountSubtitle(account) : PROVIDER_BLURBS[provider];
             const reconnecting = account !== null && reconnectingId === account.accountId;
             return (
@@ -287,11 +246,10 @@ export function ConnectorsSection() {
                       type="button"
                       className="btn btn-secondary"
                       aria-label={`Connect ${name}`}
-                      disabled={accounts === null || connectingProvider !== null}
-                      aria-busy={connectingProvider === provider || undefined}
-                      onClick={() => connectRow(provider)}
+                      disabled={accounts === null}
+                      onClick={openConnectNew}
                     >
-                      {connectingProvider === provider ? "Waiting for browser…" : "Connect"}
+                      Connect
                     </button>
                   ) : (
                     <>
@@ -306,7 +264,7 @@ export function ConnectorsSection() {
                         >
                           {reconnecting ? "Waiting for browser…" : "Reconnect"}
                         </button>
-                      ) : provider === "google" ? (
+                      ) : (
                         <button
                           type="button"
                           className="btn btn-secondary"
@@ -314,7 +272,7 @@ export function ConnectorsSection() {
                         >
                           Add access
                         </button>
-                      ) : null}
+                      )}
                       <button
                         type="button"
                         className="btn btn-ghost"
@@ -398,7 +356,7 @@ export function ConnectorsSection() {
         onClose={() => {
           if (!disconnecting) setDisconnectTarget(null);
         }}
-        title={`Disconnect ${disconnectTarget?.displayName ?? ""}?`}
+        title={`Disconnect ${disconnectTarget?.email ?? ""}?`}
         description="June stops using this account and removes its tokens from your Keychain. Routines that rely on it will fail until you reconnect."
         footer={
           <>
@@ -429,8 +387,7 @@ export function ConnectorsSection() {
             disabled={disconnecting}
             onChange={(event) => setRevoke(event.currentTarget.checked)}
           />
-          Also revoke June's access with{" "}
-          {disconnectTarget ? PROVIDER_NAMES[disconnectTarget.provider] : "the provider"}
+          Also revoke June's access with {disconnectTarget ? "Google" : "the provider"}
         </label>
       </Dialog>
     </section>

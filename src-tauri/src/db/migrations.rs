@@ -156,46 +156,11 @@ pub async fn run_migrations(_pool: &SqlitePool) -> Result<(), sqlx::error::Error
             query(statement).execute(_pool).await?;
         }
     }
-    // The first connector schema constrained trigger/grant enums to Google.
-    // Rebuild those two small metadata tables once when upgrading to the
-    // provider-neutral local connector shape.
-    if !table_sql_contains(_pool, "connector_triggers", "linear_assignment").await?
-        || !table_sql_contains(_pool, "connector_grants", "'notion'").await?
-    {
-        // Both tables move together in one transaction. An interrupted app
-        // launch must never leave a renamed `_old` table or only half of the
-        // provider constraints upgraded.
-        let mut tx = _pool.begin().await?;
-        for statement in
-            include_str!("../../migrations/014_connector_provider_checks.sql").split(';')
-        {
-            let statement = statement.trim();
-            if !statement.is_empty() {
-                query(statement).execute(&mut *tx).await?;
-            }
-        }
-        tx.commit().await?;
-    }
     // Marks when a routine most recently entered approval mode; approval-run
     // crediting only counts runs that finished at or after this instant, so
     // earlier read-only runs never retroactively unlock autonomy.
     ensure_column(_pool, "routine_trust", "approval_since", "TEXT").await?;
     Ok(())
-}
-
-async fn table_sql_contains(
-    pool: &SqlitePool,
-    table: &str,
-    needle: &str,
-) -> Result<bool, sqlx::error::Error> {
-    use sqlx::row::Row;
-    let row = query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
-        .bind(table)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row
-        .and_then(|row| row.try_get::<String, _>("sql").ok())
-        .is_some_and(|sql| sql.contains(needle)))
 }
 
 async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool, sqlx::error::Error> {
@@ -242,88 +207,4 @@ async fn drop_index_if_exists(pool: &SqlitePool, index: &str) -> Result<(), sqlx
 
 fn quote_sqlite_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sqlx::row::Row;
-
-    #[tokio::test]
-    async fn upgrades_legacy_connector_checks_without_losing_rows() {
-        let pool = sqlx_sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("sqlite memory");
-        query(
-            "CREATE TABLE connector_triggers (
-              id TEXT PRIMARY KEY, job_id TEXT NOT NULL,
-              kind TEXT NOT NULL CHECK (kind IN ('email_received', 'event_upcoming')),
-              account_id TEXT NOT NULL, config TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("legacy triggers");
-        query(
-            "CREATE TABLE connector_grants (
-              job_id TEXT NOT NULL,
-              provider TEXT NOT NULL CHECK(provider IN ('gmail','gcal')),
-              server_name TEXT NOT NULL, token TEXT NOT NULL,
-              tools TEXT NOT NULL DEFAULT '[]', account_id TEXT NOT NULL,
-              created_at TEXT NOT NULL, PRIMARY KEY (job_id, provider)
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("legacy grants");
-        query(
-            "INSERT INTO connector_triggers
-             (id, job_id, kind, account_id, config, created_at)
-             VALUES ('t1', 'j1', 'email_received', 'user@example.com', '{}', 'now')",
-        )
-        .execute(&pool)
-        .await
-        .expect("legacy trigger row");
-        query(
-            "INSERT INTO connector_grants
-             (job_id, provider, server_name, token, tools, account_id, created_at)
-             VALUES ('j1', 'gmail', 'june_gmail_auto_j1', 'token', '[]', 'user@example.com', 'now')",
-        )
-        .execute(&pool)
-        .await
-        .expect("legacy grant row");
-
-        run_migrations(&pool).await.expect("upgrade migrations");
-
-        query(
-            "INSERT INTO connector_triggers
-             (id, job_id, kind, account_id, config, created_at)
-             VALUES ('t2', 'j2', 'linear_assignment', 'linear:workspace', '{}', 'now')",
-        )
-        .execute(&pool)
-        .await
-        .expect("new trigger kind");
-        query(
-            "INSERT INTO connector_grants
-             (job_id, provider, server_name, token, tools, account_id, created_at)
-             VALUES ('j2', 'notion', 'june_notion_auto_j2', 'token-2', '[]', 'notion:workspace', 'now')",
-        )
-        .execute(&pool)
-        .await
-        .expect("new grant provider");
-        let trigger_count = query("SELECT COUNT(*) AS count FROM connector_triggers")
-            .fetch_one(&pool)
-            .await
-            .expect("count triggers")
-            .get::<i64, _>("count");
-        let grant_count = query("SELECT COUNT(*) AS count FROM connector_grants")
-            .fetch_one(&pool)
-            .await
-            .expect("count grants")
-            .get::<i64, _>("count");
-        assert_eq!(trigger_count, 2);
-        assert_eq!(grant_count, 2);
-    }
 }

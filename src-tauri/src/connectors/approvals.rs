@@ -1,7 +1,7 @@
 //! Trust-mode approval enforcement for connector actions.
 //!
-//! Every mutating connector route passes through [`gate_action`] BEFORE the
-//! mutation runs.
+//! Every mutating connector route (Gmail send/draft/modify/archive, Calendar
+//! create/respond) passes through [`gate_action`] BEFORE the mutation runs.
 //! The decision is made in Rust, at the choke point, never by prompting the
 //! model:
 //!
@@ -19,7 +19,7 @@
 //! Previews stored for the UI contain only mutation-target metadata assembled
 //! by the Rust proxy. Recipient addresses and object identifiers are preserved
 //! because hiding them would make the approval meaningless; message bodies,
-//! event descriptions, grant tokens, and provider tokens never reach here.
+//! event descriptions, grant tokens, and Google tokens never reach here.
 
 use crate::domain::types::AppError;
 use rand::{distributions::Alphanumeric, Rng};
@@ -47,13 +47,12 @@ pub enum ActionDecision {
 }
 
 /// What the proxy hands to [`gate_action`] for one mutating call. `account_id`
-/// is the stable provider account id. `grant_token` is present only for a
+/// is the connected Google account email. `grant_token` is present only for a
 /// per-job earned-autonomy (auto) server; the base action servers and chat
 /// leave it `None`, so their calls always park.
 pub struct ActionRequest<'a> {
     pub grant_token: Option<&'a str>,
     pub account_id: &'a str,
-    pub account_label: &'a str,
     pub server: &'a str,
     pub tool: &'a str,
     pub summary: String,
@@ -139,7 +138,7 @@ async fn park(app: &AppHandle, request: ActionRequest<'_>) -> ActionDecision {
         approval_id: approval_id.clone(),
         tool: request.tool.to_string(),
         server: request.server.to_string(),
-        account_email: request.account_label.to_string(),
+        account_email: request.account_id.to_string(),
         summary: sanitize_preview(&request.summary),
         args_preview: sanitize_preview(&request.args_preview),
         requested_at_ms: now_ms(),

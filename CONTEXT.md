@@ -260,14 +260,13 @@ _Avoid_: using "tool" for all three.
 ### Connectors
 
 **Connector**:
-A private-by-architecture connection between June and a third-party account or
-workspace (Google Gmail + Calendar, Notion, and Linear). The user authorizes
-the provider on their Mac; the grant lives in the Keychain and every provider
-API call originates on-device. June ships each provider as a read MCP server
-plus a separate mutating actions server (`june_gmail*`, `june_gcal*`,
-`june_notion*`, `june_linear*`); none holds the provider token, which stays in
-Rust behind the on-device provider proxy (see
-[ADR-0016](docs/adr/0016-private-connectors-local-mode.md)).
+A private-by-architecture integration between June and a third-party account
+(launch: Google Gmail + Calendar). The user authorizes the provider on their
+Mac; the grant lives in the Keychain and every provider API call originates
+on-device. June ships each connector as a read MCP server (`june_gmail`,
+`june_gcal`) plus a mutating actions server (`june_gmail_actions`,
+`june_gcal_actions`); neither holds the token, which stays in Rust behind the
+on-device provider proxy (see [ADR-0016](docs/adr/0016-private-connectors-local-mode.md)).
 _Avoid_: integration (unqualified), plugin, the Google API.
 
 **Local mode**:

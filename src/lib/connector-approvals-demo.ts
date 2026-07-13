@@ -46,11 +46,11 @@ const SAMPLES: Array<Omit<PendingConnectorApproval, "approvalId" | "requestedAtM
     argsPreview: "Thu 11:15 to 12:00 · Design review prep",
   },
   {
-    tool: "add_comment",
-    server: "june_linear_actions",
-    accountEmail: "alex@lumon.dev",
-    summary: "Comment repro steps on JUN-214",
-    argsPreview: "Repro: open the recorder HUD, switch source mid-take, watch the meter freeze…",
+    tool: "create_draft",
+    server: "june_gmail_actions",
+    accountEmail: "alex@example.com",
+    summary: "Draft a project update for the product team",
+    argsPreview: "To: product@example.com\nSubject: Project update",
   },
   {
     tool: "send_email",
@@ -67,11 +67,11 @@ const SAMPLES: Array<Omit<PendingConnectorApproval, "approvalId" | "requestedAtM
     argsPreview: "",
   },
   {
-    tool: "create_page",
-    server: "june_notion_actions",
-    accountEmail: "Acme workspace",
-    summary: "Create a meeting-notes page for the platform sync",
-    argsPreview: "Parent: Team notes · Title: Platform sync 2026-07-10",
+    tool: "create_event",
+    server: "june_gcal_actions",
+    accountEmail: "alex@example.com",
+    summary: "Schedule a follow-up after the platform sync",
+    argsPreview: "Fri 14:00 to 14:30 · Platform sync follow-up",
   },
   {
     tool: "respond_to_invite",
