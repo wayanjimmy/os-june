@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <title>June</title>
     <style>
+      /* The popup renders inside Chrome, not the June app, so the shared
+         design tokens (src/styles/tokens.css) are out of reach; this local
+         --fw-medium mirrors the app's weight scale (spec/font-weights.md). */
+      :root {
+        --fw-medium: 500;
+      }
       body {
         font-family: -apple-system, system-ui, sans-serif;
         font-size: 13px;
@@ -14,7 +20,7 @@
       }
       h1 {
         font-size: 13px;
-        font-weight: 500;
+        font-weight: var(--fw-medium);
         margin: 0 0 6px;
       }
       p {

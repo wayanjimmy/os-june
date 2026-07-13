@@ -3431,9 +3431,7 @@ describe("AppSettings", () => {
 
     await user.click(screen.getByRole("tab", { name: "Agent" }));
     expect(await screen.findByText("Not paired")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(handlers.has("june://extension-pairing-changed")).toBe(true),
-    );
+    await waitFor(() => expect(handlers.has("june://extension-pairing-changed")).toBe(true));
 
     act(() => {
       handlers.get("june://extension-pairing-changed")?.({

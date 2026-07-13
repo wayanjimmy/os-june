@@ -137,7 +137,12 @@ fn message_type(value: &Value) -> Option<&str> {
 }
 
 fn message_version(value: &Value) -> Option<u32> {
-    value.get("v").and_then(Value::as_u64).map(|v| v as u32)
+    // try_from, not `as`: a pathological v like 2^32 + 1 must read as
+    // unknown, not alias onto an accepted version.
+    value
+        .get("v")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
 }
 
 /// The version gate, pure so tests can drive it: a `hello` at any version
@@ -496,7 +501,17 @@ pub fn extension_pairing_status(state: tauri::State<'_, ExtensionHost>) -> Pairi
 #[tauri::command]
 pub fn register_browser_extension_host(
     app: AppHandle,
+    state: tauri::State<'_, ExtensionHost>,
 ) -> Result<RegisterExtensionHostResult, AppError> {
+    // Registration succeeding while the listener is down would tell the user
+    // "Chrome is set up" and then never pair (the shim gets app_unreachable
+    // on every connect). Refuse instead of lying.
+    if !state.status().listener_running {
+        return Err(AppError::new(
+            "extension_host_not_running",
+            "The extension host is not running yet. Wait a moment and try again, or restart June.",
+        ));
+    }
     let shim_path = shim_candidates(&app)
         .into_iter()
         .find(|path| path.exists())
@@ -689,6 +704,46 @@ mod tests {
             assert_eq!(reply["type"], "hello_incompatible", "version {version:?}");
             assert_eq!(reply["expected"], PROTOCOL_VERSION);
         }
+    }
+
+    #[test]
+    fn message_version_does_not_alias_oversized_values() {
+        // 2^32 + PROTOCOL_VERSION truncated with `as u32` would read as the
+        // accepted version; it must read as unknown instead.
+        let oversized = json!({ "v": (1u64 << 32) + PROTOCOL_VERSION as u64, "type": "hello" });
+        assert_eq!(message_version(&oversized), None);
+        assert_eq!(
+            hello_response(message_version(&oversized), "0.0.32")["type"],
+            "hello_incompatible"
+        );
+    }
+
+    /// EXTENSION_ID and the manifest `key` live in different files and
+    /// languages, kept in sync only by the generate-key.mjs procedure; if
+    /// they drift, Chrome refuses connectNative and pairing silently dies.
+    /// Chrome derives the id as the first 16 bytes of sha256 over the DER
+    /// public key, hex-mapped onto a-p.
+    #[test]
+    fn extension_id_matches_the_pinned_manifest_key() {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../extension/public/manifest.json");
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(manifest_path).expect("manifest read"))
+                .expect("manifest json");
+        let key = manifest["key"].as_str().expect("manifest key");
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(key)
+            .expect("key base64");
+        let digest = Sha256::digest(&der);
+        let derived: String = digest[..16]
+            .iter()
+            .flat_map(|byte| [byte >> 4, byte & 0x0f])
+            .map(|nibble| char::from(b'a' + nibble))
+            .collect();
+        assert_eq!(derived, EXTENSION_ID);
     }
 
     #[test]
