@@ -31,9 +31,11 @@ driver-internal paths across versions. The recommended topology matches the
 dictation-helper precedent: the Rust broker owns a June-bundled,
 separately-signed driver daemon that runs outside the jail with its own stable
 code identity, and the in-jail runtime's stdio client proxies to it over a
-June-controlled socket placed inside a write root. Version pinning is a bundled
-app resource plus binary-path and version env overrides; the upstream network
-installer never runs because nothing in June's spawn path invokes it.
+June-controlled socket, reached through a June wrapper command because the
+pinned runtime passes no socket argument and the driver has no socket env
+(jailed `connect()` to the daemon verified). Version pinning is a bundled app
+resource plus a binary-path override pointing at the wrapper; the upstream
+network installer never runs because nothing in June's spawn path invokes it.
 
 ## What the driver is (provenance and pin)
 
@@ -99,10 +101,26 @@ subcommands and knobs:
 
 - `serve` / `stop` / `status`: explicit daemon lifecycle.
 - `mcp --socket <path>` (also the daemon side): override the daemon Unix-domain
-  socket path used by the proxy.
-- `mcp --no-daemon-relaunch` (`CUA_DRIVER_RS_MCP_NO_RELAUNCH=1`): keep the stdio
-  client from auto-launching the daemon, so June can own daemon lifecycle.
-- `CUA_DRIVER_RS_MCP_FORCE_PROXY=1`: force proxying to the daemon.
+  socket path used by the proxy. CLI flag only - the driver reads no socket env
+  var (none in `cli.rs` at the tag, none in the binary's env string table), and
+  the pinned backend spawns the client with fixed args `["mcp"]`, so a custom
+  socket cannot be injected through env alone. June needs a wrapper command
+  (see topology step 3).
+- `mcp --no-daemon-relaunch` (`CUA_DRIVER_RS_MCP_NO_RELAUNCH=1`): stay
+  in-process; the daemon is bypassed entirely.
+- `CUA_DRIVER_RS_MCP_FORCE_PROXY=1`: always proxy to a daemon. With a daemon
+  already listening on the target socket the client proxies straight to it; with
+  none it fails fast ("FORCE_PROXY=1 but no daemon listening on ...") instead of
+  auto-launching or falling back in-process.
+- Proxy-vs-in-process precedence, verified in `should_use_daemon_proxy`
+  (`cli.rs` at tag `cua-driver-rs-v0.5.0`): `--no-daemon-relaunch` /
+  `NO_RELAUNCH` is checked first and forces in-process; `FORCE_PROXY` is checked
+  second. Setting both selects in-process execution, so the two must never be
+  combined. With neither set, the client proxies only when its resolved
+  executable path contains the hardcoded string `/CuaDriver.app/Contents/MacOS/`
+  (`bundle.rs`); a bare or renamed binary silently runs in-process (the
+  dangerous fallback), and a passing detection with no daemon listening
+  auto-launches by app name via `open -n -g -a CuaDriver`.
 - `CUA_DRIVER_RS_HOME`: relocate `~/.cua-driver`.
 - `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`: disable
   the driver's telemetry (posts to a third-party analytics host) and its GitHub
@@ -270,19 +288,33 @@ tracking driver-internal state paths across driver versions. Concretely:
    `sandbox-exec` runtime, it runs outside the write jail with full access to
    its own state dirs, and holds the privileged window-server, accessibility, and
    screen-capture connections under its own bundle identity.
-3. The in-jail runtime keeps spawning `cua-driver mcp` as its stdio child (as
-   upstream does), pointed at the bundled binary via `HERMES_CUA_DRIVER_CMD`. June
-   forces it onto the proxy path and off self-management with
-   `CUA_DRIVER_RS_MCP_FORCE_PROXY=1`, `CUA_DRIVER_RS_MCP_NO_RELAUNCH=1`, and
-   `--socket` / matching env pointing at the same June-controlled socket, which
-   must live inside a write root so the jailed client can connect to it. The
-   jailed client does no privileged work; it relays to the daemon.
+3. The in-jail runtime keeps spawning its stdio client as upstream does, but
+   `HERMES_CUA_DRIVER_CMD` points at a small June-bundled wrapper, not at the
+   driver binary directly. The wrapper is needed because the pinned backend
+   passes fixed args `["mcp"]` and the socket is a CLI-only flag: the wrapper
+   execs the bundled driver with `mcp --socket <June-controlled path>` appended,
+   and pins the driver env itself (`CUA_DRIVER_RS_HOME=<write-root path>`,
+   `CUA_DRIVER_RS_MCP_FORCE_PROXY=1`, `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`,
+   `CUA_DRIVER_RS_UPDATE_CHECK=0`) so the recipe does not depend on Hermes
+   passing anything through. `FORCE_PROXY` is the load-bearing guard here:
+   without it a re-signed or renamed bundle fails the hardcoded
+   `/CuaDriver.app/Contents/MacOS/` detection and the client silently runs the
+   privileged work in-process inside the jail; with it, the client proxies to
+   the broker's pre-started daemon and hard-fails if the daemon is absent
+   (surfacing a broker bug instead of degrading). `CUA_DRIVER_RS_MCP_NO_RELAUNCH`
+   must not be set: the driver checks it before `FORCE_PROXY`, so combining them
+   selects in-process execution. Because the broker pre-starts the daemon, the
+   client's auto-launch path never runs. The jailed client does no privileged
+   work; it relays to the daemon. (A jailed client's `connect()` was verified
+   against a broker-started daemon: `status --socket` answered "daemon is
+   running" from inside the profile replica, both for a socket inside a write
+   root and for one outside the write roots - the write jail governs file
+   writes, not unix-socket connects, under this profile shape.)
 4. Injection point: extend `apply_isolated_hermes_env()` (and the isolated-env
-   allowlist) to set `HERMES_CUA_DRIVER_CMD`, `HERMES_CUA_DRIVER_VERSION`,
-   `CUA_DRIVER_RS_HOME` (a write-root path), `CUA_DRIVER_RS_MCP_FORCE_PROXY`,
-   `CUA_DRIVER_RS_MCP_NO_RELAUNCH`, `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, and
-   `CUA_DRIVER_RS_UPDATE_CHECK=0` for computer-use-enabled spawns, and add a
-   `computer_use` block to `render_hermes_config()`.
+   allowlist) to set `HERMES_CUA_DRIVER_CMD=<wrapper path>` and
+   `HERMES_CUA_DRIVER_VERSION` for computer-use-enabled spawns, and add a
+   `computer_use` block to `render_hermes_config()`. The driver-specific env
+   lives in the wrapper (step 3), not in the Hermes spawn env.
 
 This keeps the agent runtime itself under the write jail. The one privileged
 process (the daemon) is out of the jail by construction, with a bounded,
@@ -333,12 +365,14 @@ daemon) map directly onto that flow.
 
 ## Open questions for phase-2 planning
 
-- Socket reachability from inside the jail: the daemon binds a write-root
-  socket in-jail (shown above), but the jailed `cua-driver mcp` client's
-  `connect()` to the broker-owned daemon was not exercised; confirm it, keep
-  the socket path under the `SUN_LEN` limit, and settle whether residual
-  client-side writes (the telemetry id was observed written on a plain
-  invocation) are fully covered by `CUA_DRIVER_RS_HOME` plus the disable env.
+- Socket reachability from inside the jail: answered for the control path. A
+  jailed `status --socket` client connected to a broker-started daemon and got
+  "daemon is running", with the socket both inside and outside the write roots;
+  keep the path under the `SUN_LEN` limit. Still open: exercising the actual
+  `mcp` proxy stream end to end through the wrapper, and settling whether
+  residual client-side writes (the telemetry id was observed written on a plain
+  invocation) are fully covered by the wrapper's `CUA_DRIVER_RS_HOME` plus the
+  disable env.
 - Daemon lifecycle and reuse: one daemon per machine (single-instance socket) or
   one per session, and how the broker supervises it (start, health, stop on
   revoke), including whether `serve` or a LaunchServices launch is the cleaner
