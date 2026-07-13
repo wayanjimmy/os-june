@@ -340,6 +340,16 @@ describe("AppSettings", () => {
             ]
           : [
               {
+                provider: "open-software",
+                id: "open-software/auto",
+                name: "Automatic private model",
+                modelType: "text",
+                description: "Routes each request to the best available private model.",
+                privacy: "private",
+                traits: [],
+                capabilities: ["supportsFunctionCalling"],
+              },
+              {
                 provider: "venice",
                 id: "zai-org-glm-5-2",
                 name: "GLM 5.2",
@@ -3206,11 +3216,21 @@ describe("AppSettings", () => {
 
     // Suggested is the default view: only the curated picks present in the
     // catalog show in the compact root menu.
-    expect(await screen.findByRole("option", { name: /GLM 5\.2/ })).toBeInTheDocument();
-    expect(await screen.findByRole("option", { name: /GLM 5\.1/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Kimi K2\.6/ })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("option", { name: /Auto · Higher Quality/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Auto · Balanced/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Auto · Lower Cost/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Venice Uncensored/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "All models" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("option", { name: /Auto · Balanced/ }));
+    await waitFor(() => expect(mocks.setCostQuality).toHaveBeenCalledWith(50));
+    await waitFor(() =>
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "open-software/auto"),
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Change text model" }));
 
     // All models shows the full available catalog in the flyout.
     await user.click(screen.getByRole("button", { name: "All models" }));

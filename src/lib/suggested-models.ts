@@ -3,9 +3,18 @@ import type { ProviderModelMode, VeniceModelDto } from "./tauri";
 
 export type SuggestedModel = {
   id: string;
+  /** Picker-only label. The persisted provider model id is unchanged. */
+  label?: string;
+  /** Auto-router preference selected with this suggestion (0-100). */
+  costQuality?: number;
   /** One-line "why we recommend it", rendered under the model's meta row. */
   reason: string;
 };
+
+// Auto owns the visible text suggestions, but image attachment recovery still
+// needs a concrete vision-capable model. Keep that operational fallback
+// independent from picker curation.
+const PREFERRED_VISION_FALLBACK_IDS = ["kimi-k2-6"];
 
 /**
  * Curated picks for the model picker's "Suggested" tab — the handful of
@@ -14,16 +23,9 @@ export type SuggestedModel = {
  * is zero-retention privacy, so every text pick here is a "private" catalog
  * model that supports tools).
  *
- * Curation snapshot (June 2026), from the live Venice catalog plus public
- * benchmarks (SWE-bench agentic coding, Artificial Analysis intelligence
- * index):
- * - GLM 5.2: latest GLM flagship and June's default text model, with
- *   reasoning effort controls, tool use, 200K context, $1.75/$5.50 per 1M
- *   tokens.
- * - Kimi K2.6: leads the open-weights intelligence rankings, built for long
- *   agentic tool runs, 256K context, $0.85/$4.66.
- * - GLM 5.1: previous GLM flagship, top-tier agentic coding and tool use
- *   among open models, 200K context, $1.75/$5.50 per 1M tokens.
+ * Text suggestions are the three useful ways to run Auto. Auto selects the
+ * best currently available private model for each request; these presets tune
+ * that routing decision without making people understand the provider catalog.
  * - Parakeet: fast, accurate everyday dictation at the lowest price tier.
  * - Whisper Large v3: best multilingual accuracy at the same low price.
  *
@@ -37,19 +39,22 @@ export type SuggestedModel = {
 export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
   generation: [
     {
-      id: "zai-org-glm-5-2",
-      reason:
-        "Default pick: latest GLM flagship with strong reasoning, tool use, structured output, and zero data retention.",
+      id: "open-software/auto",
+      label: "Auto · Higher Quality",
+      costQuality: 100,
+      reason: "Default: prioritize the strongest private model available for each request.",
     },
     {
-      id: "kimi-k2-6",
-      reason:
-        "Best alternate: leads independent intelligence rankings and excels at long tool-driven tasks, with zero data retention.",
+      id: "open-software/auto",
+      label: "Auto · Balanced",
+      costQuality: 50,
+      reason: "Balance response quality and usage cost for everyday work.",
     },
     {
-      id: "zai-org-glm-5-1",
-      reason:
-        "Stable GLM alternate: previous GLM flagship with top-tier agentic coding, tool use, and zero data retention.",
+      id: "open-software/auto",
+      label: "Auto · Lower Cost",
+      costQuality: 20,
+      reason: "Prefer lower-cost private models while preserving June's tool support.",
     },
   ],
   transcription: [
@@ -110,22 +115,20 @@ export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
  * non-vision model is active. The switch must land on a model that can both
  * read images AND run tools — a vision model without function calling would
  * brick the agent the same way the model picker guards against — so we filter
- * on both capabilities. Among the eligible models we prefer a curated
- * suggested pick (Kimi K2.6 is the suggested vision model), so the one-tap fix
+ * on both capabilities. Among the eligible models we prefer a concrete
+ * vision pick (currently Kimi K2.6), so the one-tap fix
  * lands on a sensible default instead of the alphabetically-first vision model
  * (which is otherwise arbitrary — the catalog sorts by display name). If no
- * suggested model is eligible we fall back to the first eligible catalog model
- * so a suggested-list change can never leave the fallback empty. The target is
- * derived entirely from live catalog capabilities: no model id is hardcoded,
- * so a retired model can never become the fallback.
+ * preferred model is eligible we fall back to the first eligible catalog model.
+ * A retired preference is ignored because it is resolved against the live catalog.
  */
 export function preferredVisionFallbackModel(models: VeniceModelDto[]): VeniceModelDto | undefined {
   const eligible = models.filter(
     (model) => modelSupportsImageInput(model) && modelSupportsTools(model),
   );
-  const suggested = SUGGESTED_MODELS.generation
-    .map((pick) => eligible.find((model) => model.id === pick.id))
-    .find((model): model is VeniceModelDto => model !== undefined);
+  const suggested = PREFERRED_VISION_FALLBACK_IDS.map((id) =>
+    eligible.find((model) => model.id === id),
+  ).find((model): model is VeniceModelDto => model !== undefined);
   return suggested ?? eligible[0];
 }
 
@@ -134,9 +137,22 @@ export function preferredVisionFallbackModel(models: VeniceModelDto[]): VeniceMo
 export function suggestedModelsForMode(
   mode: ProviderModelMode,
   options: VeniceModelDto[],
-): Array<{ model: VeniceModelDto; reason: string }> {
-  return SUGGESTED_MODELS[mode].flatMap((suggested) => {
+): Array<{
+  key: string;
+  model: VeniceModelDto;
+  reason: string;
+  costQuality?: number;
+}> {
+  return SUGGESTED_MODELS[mode].flatMap((suggested, index) => {
     const model = options.find((option) => option.id === suggested.id);
-    return model ? [{ model, reason: suggested.reason }] : [];
+    if (!model) return [];
+    return [
+      {
+        key: `${suggested.id}:${suggested.costQuality ?? index}`,
+        model: suggested.label ? { ...model, name: suggested.label } : model,
+        reason: suggested.reason,
+        costQuality: suggested.costQuality,
+      },
+    ];
   });
 }

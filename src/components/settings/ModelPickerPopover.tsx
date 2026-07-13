@@ -37,6 +37,7 @@ export function ModelPickerPopover({
   flyout,
   model,
   options,
+  costQuality,
   search,
   popoverRef,
   searchRef,
@@ -53,6 +54,7 @@ export function ModelPickerPopover({
   flyout: ModelPickerFlyout;
   model?: VeniceModelDto;
   options: VeniceModelDto[];
+  costQuality?: number;
   search: string;
   popoverRef: RefObject<HTMLDivElement>;
   searchRef: RefObject<HTMLInputElement>;
@@ -63,7 +65,7 @@ export function ModelPickerPopover({
   allModelsLabel?: string;
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
-  onSelect: (modelId: string) => void;
+  onSelect: (modelId: string, costQuality?: number) => void;
 }) {
   const flyoutRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -257,7 +259,7 @@ export function ModelPickerPopover({
     ? privacyFiltered.filter((option) => modelMatchesQuery(option, query))
     : privacyFiltered;
   const detail =
-    flyout?.kind === "model" ? suggested.find((item) => item.model.id === flyout.id) : undefined;
+    flyout?.kind === "model" ? suggested.find((item) => item.key === flyout.id) : undefined;
 
   // Latest filtered rows, read by the hand-off closure without re-subscribing
   // the pointer listener on every keystroke.
@@ -428,20 +430,23 @@ export function ModelPickerPopover({
       <p className="agent-composer-model-title">{title}</p>
       <div className="agent-composer-model-menu" role="listbox" aria-label={suggestedListLabel}>
         {suggested.length ? (
-          suggested.map(({ model: option }) => (
+          suggested.map(({ key, model: option, costQuality: presetCostQuality }) => (
             <button
-              key={option.id}
+              key={key}
               type="button"
               className="agent-composer-model-row"
               role="option"
-              aria-selected={option.id === model.id}
-              data-model-id={option.id}
-              data-active={(flyout?.kind === "model" && flyout.id === option.id) || undefined}
+              aria-selected={
+                option.id === model.id &&
+                (presetCostQuality === undefined || presetCostQuality === costQuality)
+              }
+              data-model-id={key}
+              data-active={(flyout?.kind === "model" && flyout.id === key) || undefined}
               onMouseEnter={() => {
                 if (modelBridge.isActive()) {
                   return;
                 }
-                const open = () => onFlyoutChange({ kind: "model", id: option.id });
+                const open = () => onFlyoutChange({ kind: "model", id: key });
                 if (flyout) {
                   cancelHoverIntent();
                   open();
@@ -451,12 +456,13 @@ export function ModelPickerPopover({
               }}
               onFocus={() => {
                 cancelHoverIntent();
-                onFlyoutChange({ kind: "model", id: option.id });
+                onFlyoutChange({ kind: "model", id: key });
               }}
-              onClick={() => onSelect(option.id)}
+              onClick={() => onSelect(option.id, presetCostQuality)}
             >
               <ModelPickerOptionText model={option} />
-              {option.id === model.id ? (
+              {option.id === model.id &&
+              (presetCostQuality === undefined || presetCostQuality === costQuality) ? (
                 <IconCheckmark2Small
                   size={14}
                   aria-hidden
@@ -651,7 +657,7 @@ function ModelPickerOption({
   model: VeniceModelDto;
   selected: boolean;
   active?: boolean;
-  onSelect: (modelId: string) => void;
+  onSelect: (modelId: string, costQuality?: number) => void;
   onHover: (model: VeniceModelDto, row: HTMLElement, immediate: boolean) => void;
 }) {
   return (

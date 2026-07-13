@@ -22,6 +22,7 @@ import {
   importHermesBridgeFile,
   listVeniceModels,
   providerModelSettings,
+  setCostQuality,
   type VeniceModelDto,
 } from "../../lib/tauri";
 import { FileTypeIcon } from "../agent/FileTypeIcon";
@@ -32,7 +33,7 @@ import {
   ComposerModelPopover,
   type ComposerModelFlyout,
 } from "../agent/composer/ModelPicker";
-import { modelOptions } from "../settings/ModelPickerDialog";
+import { modelOptions, selectedModel } from "../settings/ModelPickerDialog";
 import type { NoteChat, NoteChatAttachment } from "./useNoteChat";
 
 /** Note-tailored presets, shown as the main session view's preset chips (icon
@@ -232,6 +233,7 @@ export function NoteChatPanel({
   // at session.create or as a /model switch before the next message).
   const [models, setModels] = useState<VeniceModelDto[]>([]);
   const [modelId, setModelId] = useState("");
+  const [costQuality, setCostQualityState] = useState<number | undefined>();
   const [modelOpen, setModelOpen] = useState(false);
   const [modelFlyout, setModelFlyout] = useState<ComposerModelFlyout>(null);
   const [modelSearch, setModelSearch] = useState("");
@@ -248,6 +250,7 @@ export function NoteChatPanel({
       if (stale) return;
       setModels(catalog.models);
       setModelId(settings.settings.generationModel || catalog.selectedModel);
+      setCostQualityState(settings.settings.costQuality);
     })().catch(() => {
       // No catalog (bridge down, browser preview): the picker simply hides.
     });
@@ -255,7 +258,22 @@ export function NoteChatPanel({
       stale = true;
     };
   }, []);
-  const model = models.find((candidate) => candidate.id === modelId);
+  const model = modelId ? selectedModel(models, modelId) : undefined;
+
+  async function selectModel(nextModelId: string, nextCostQuality?: number) {
+    try {
+      if (nextCostQuality !== undefined) {
+        const next = await setCostQuality(nextCostQuality);
+        setCostQualityState(next.costQuality);
+      }
+      setModelId(nextModelId);
+      setSessionModel(nextModelId);
+      setModelOpen(false);
+      setComposerError(null);
+    } catch (err) {
+      setComposerError(messageFromError(err));
+    }
+  }
 
   useEffect(() => {
     if (!modelOpen) return;
@@ -583,16 +601,15 @@ export function NoteChatPanel({
               flyout={modelFlyout}
               model={model}
               options={modelOptions(models, model?.id ?? "")}
+              costQuality={costQuality}
               search={modelSearch}
               popoverRef={modelPopoverRef}
               searchRef={modelSearchRef}
               onFlyoutChange={setModelFlyout}
               onSearchChange={setModelSearch}
-              onSelect={(nextModelId) => {
-                setModelId(nextModelId);
-                setSessionModel(nextModelId);
-                setModelOpen(false);
-              }}
+              onSelect={(nextModelId, nextCostQuality) =>
+                void selectModel(nextModelId, nextCostQuality)
+              }
             />
           ) : null}
         </footer>

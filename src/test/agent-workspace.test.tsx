@@ -64,6 +64,7 @@ const mocks = vi.hoisted(() => ({
   openFileDialog: vi.fn(),
   setImageSafeMode: vi.fn(),
   setImageSafeModePromptDismissed: vi.fn(),
+  setCostQuality: vi.fn(),
   setVeniceModel: vi.fn(),
   setLocalGenerationEnabled: vi.fn(),
   providerModelSettings: vi.fn(),
@@ -136,6 +137,7 @@ vi.mock("../lib/tauri", () => ({
   setHermesAgentCliAccess: mocks.setHermesAgentCliAccess,
   setImageSafeMode: mocks.setImageSafeMode,
   setImageSafeModePromptDismissed: mocks.setImageSafeModePromptDismissed,
+  setCostQuality: mocks.setCostQuality,
   setLocalGenerationEnabled: mocks.setLocalGenerationEnabled,
   setVeniceModel: mocks.setVeniceModel,
   saveAgentAssistantMessage: mocks.saveAgentAssistantMessage,
@@ -417,6 +419,7 @@ describe("AgentWorkspace", () => {
         transcriptionProvider: "venice",
         transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
         generationModel: "zai-org-glm-5-2",
+        costQuality: 100,
       },
     });
     mocks.imagePromptMayBeExplicit.mockResolvedValue(false);
@@ -440,6 +443,15 @@ describe("AgentWorkspace", () => {
       selectedModel: "zai-org-glm-5-2",
       models: [
         {
+          provider: "open-software",
+          id: "open-software/auto",
+          name: "Automatic private model",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling"],
+        },
+        {
           provider: "venice",
           id: "zai-org-glm-5-2",
           name: "GLM 5.2",
@@ -459,6 +471,12 @@ describe("AgentWorkspace", () => {
         },
       ],
     });
+    mocks.setCostQuality.mockImplementation(async (costQuality: number) => ({
+      transcriptionProvider: "venice",
+      transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+      generationModel: "open-software/auto",
+      costQuality,
+    }));
     mocks.getAgentTask.mockResolvedValue(existingTask);
     mocks.hermesBridgeStatus.mockResolvedValue({
       running: true,
@@ -3655,6 +3673,36 @@ describe("AgentWorkspace", () => {
       sessionId: expect.any(String),
       model: "anonymous-only",
     });
+  });
+
+  it("offers the three Auto presets and persists the selected routing preference", async () => {
+    mocks.listAgentTasks.mockResolvedValue({ items: [] });
+    mocks.listHermesSessions.mockResolvedValue([]);
+    mocks.setVeniceModel.mockImplementation(async () => {
+      const settings = {
+        transcriptionProvider: "venice",
+        transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+        generationModel: "open-software/auto",
+        costQuality: 20,
+      };
+      mocks.providerModelSettings.mockResolvedValue({ settings });
+      return settings;
+    });
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace />);
+
+    await user.click(await screen.findByRole("button", { name: "Model: GLM 5.2" }));
+    const dialog = await screen.findByRole("dialog", { name: "Choose text model" });
+    expect(within(dialog).getByRole("option", { name: /Auto · Higher Quality/ })).toBeVisible();
+    expect(within(dialog).getByRole("option", { name: /Auto · Balanced/ })).toBeVisible();
+    expect(within(dialog).getByRole("option", { name: /Auto · Lower Cost/ })).toBeVisible();
+
+    await user.click(within(dialog).getByRole("option", { name: /Auto · Lower Cost/ }));
+
+    await waitFor(() => expect(mocks.setCostQuality).toHaveBeenCalledWith(20));
+    expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "open-software/auto");
+    expect(await screen.findByRole("button", { name: "Model: Auto" })).toBeInTheDocument();
   });
 
   it("ignores a stale pending New Session marker left over from a reload", async () => {
@@ -11623,7 +11671,9 @@ describe("AgentWorkspace", () => {
       const dialog = await screen.findByRole("dialog", {
         name: "Choose text model",
       });
-      await user.click(within(dialog).getByRole("option", { name: /Kimi K2\.6/ }));
+      await user.click(within(dialog).getByRole("button", { name: "All models" }));
+      const panel = await screen.findByRole("group", { name: "All text models" });
+      await user.click(within(panel).getByRole("option", { name: /Kimi K2\.6/ }));
 
       await waitFor(() =>
         expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "kimi-k2-6"),

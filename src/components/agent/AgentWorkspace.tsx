@@ -121,6 +121,7 @@ import {
   setImageSafeMode,
   setImageSafeModePromptDismissed,
   setLocalGenerationEnabled,
+  setCostQuality,
   setVeniceModel,
   startHermesBridge,
   submitIssueReport,
@@ -2532,6 +2533,7 @@ export function AgentWorkspace({
   // each chat's stored model. A selection missing from the catalog still
   // shows as a name-only stub so the pill never goes blank while configured.
   const [defaultGenerationModelId, setDefaultGenerationModelId] = useState("");
+  const [generationCostQuality, setGenerationCostQuality] = useState<number | undefined>();
   const defaultGenerationModelIdRef = useRef("");
   const [generationModels, setGenerationModels] = useState<VeniceModelDto[]>([]);
   const generationModelsRef = useRef<VeniceModelDto[]>([]);
@@ -3582,6 +3584,7 @@ export function AgentWorkspace({
       setGenerationProvider(provider);
       defaultGenerationModelIdRef.current = selectedModelId;
       setDefaultGenerationModelId(selectedModelId);
+      setGenerationCostQuality(settings.costQuality);
       return selectedModelId;
     },
     [],
@@ -3734,7 +3737,7 @@ export function AgentWorkspace({
   // exists. It writes the app-wide text-model default (Settings' model rows and
   // this pill refresh through the same changed event), and new sessions inherit
   // that choice at creation time.
-  async function handleSelectGenerationModel(modelId: string) {
+  async function handleSelectGenerationModel(modelId: string, costQuality?: number) {
     setComposerModelOpen(false);
     if (composerModelSelectionLocked()) {
       showComposerModelLockedNotice();
@@ -3758,6 +3761,10 @@ export function AgentWorkspace({
       return false;
     }
     try {
+      if (costQuality !== undefined) {
+        const next = await setCostQuality(costQuality);
+        setGenerationCostQuality(next.costQuality);
+      }
       await setVeniceModel("generation", modelId);
       markRemoteGenerationSelected(modelId);
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId });
@@ -9513,12 +9520,15 @@ export function AgentWorkspace({
             flyout={composerModelFlyout}
             model={generationModel}
             options={modelOptions(generationModelOptions, generationModel?.id ?? "")}
+            costQuality={generationCostQuality}
             search={modelSearch}
             popoverRef={composerModelPopoverRef}
             searchRef={composerModelSearchRef}
             onFlyoutChange={setComposerModelFlyout}
             onSearchChange={setModelSearch}
-            onSelect={(modelId) => void handleSelectGenerationModel(modelId)}
+            onSelect={(modelId, costQuality) =>
+              void handleSelectGenerationModel(modelId, costQuality)
+            }
           />
         ) : null}
         {heroMode && sandboxMenuOpen ? (

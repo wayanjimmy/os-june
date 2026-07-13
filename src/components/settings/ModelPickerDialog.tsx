@@ -17,6 +17,13 @@ import { ProviderLogo } from "./ProviderLogo";
 
 const AUTO_MODEL_ID = "open-software/auto";
 
+type ModelPickerEntry = {
+  key: string;
+  model: VeniceModelDto;
+  reason?: string;
+  costQuality?: number;
+};
+
 function withJuneModelName(model: VeniceModelDto): VeniceModelDto {
   return model.id === AUTO_MODEL_ID && model.name !== "Auto" ? { ...model, name: "Auto" } : model;
 }
@@ -81,6 +88,7 @@ export function ModelPickerDialog({
   mode,
   value,
   options,
+  costQuality,
   search,
   onSearchChange,
   onClose,
@@ -90,10 +98,11 @@ export function ModelPickerDialog({
   mode: ProviderModelMode;
   value: string;
   options: VeniceModelDto[];
+  costQuality?: number;
   search: string;
   onSearchChange: (value: string) => void;
   onClose: () => void;
-  onSelect: (modelId: string) => void;
+  onSelect: (modelId: string, costQuality?: number) => void;
 }) {
   // "Suggested" leads with the few models we actually recommend (benchmarks,
   // price, tool use, privacy — see SUGGESTED_MODELS); "All" is the full
@@ -114,26 +123,24 @@ export function ModelPickerDialog({
   );
   const query = search.trim().toLowerCase();
   const searching = query.length > 0;
-  const reasonsById = useMemo(
-    () => new Map(suggested.map((item) => [item.model.id, item.reason])),
-    [suggested],
-  );
-  const filteredOptions = useMemo(() => {
+  const filteredOptions = useMemo<ModelPickerEntry[]>(() => {
     if (searching) {
-      return availableOptions.filter((model) =>
-        [model.name, model.id, model.description, model.privacy, ...model.traits]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .includes(query),
-      );
+      return availableOptions
+        .filter((model) =>
+          [model.name, model.id, model.description, model.privacy, ...model.traits]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase()
+            .includes(query),
+        )
+        .map((model) => ({ key: model.id, model }));
     }
     // No suggestions in the catalog (drift, still loading): the empty tab
     // would read as "no models", so fall through to the full list.
     if (tab === "suggested" && suggested.length > 0) {
-      return suggested.map((item) => item.model);
+      return suggested;
     }
-    return availableOptions;
+    return availableOptions.map((model) => ({ key: model.id, model }));
   }, [availableOptions, query, searching, suggested, tab]);
   const showReasons = !searching && tab === "suggested" && suggested.length > 0;
   const title =
@@ -185,22 +192,26 @@ export function ModelPickerDialog({
         </div>
       ) : null}
       <div className="model-picker-list" role="listbox" aria-label={title}>
-        {filteredOptions.map((model) => {
-          const selected = model.id === value;
-          const reason = showReasons ? reasonsById.get(model.id) : undefined;
+        {filteredOptions.map((item) => {
+          const { model } = item;
+          const presetCostQuality = item.costQuality;
+          const selected =
+            model.id === value &&
+            (presetCostQuality === undefined || presetCostQuality === costQuality);
+          const reason = showReasons ? item.reason : undefined;
           // A local (bring-your-own) endpoint is selectable, but its tool
           // support can't be verified from here, so it carries a non-blocking
           // caveat rather than the disabling no-tools treatment.
           const localCaveat = mode === "generation" && model.provider === "local";
           return (
             <button
-              key={model.id}
+              key={item.key}
               type="button"
               className="model-picker-option"
               role="option"
               aria-selected={selected}
               data-selected={selected}
-              onClick={() => onSelect(model.id)}
+              onClick={() => onSelect(model.id, presetCostQuality)}
             >
               <span className="model-picker-logo" aria-hidden>
                 <ProviderLogo provider={model.provider} id={model.id} name={model.name} />

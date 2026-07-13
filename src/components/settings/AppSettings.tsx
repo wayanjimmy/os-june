@@ -1025,8 +1025,12 @@ export function AppSettings({
     setModelSearch("");
   }
 
-  function selectModelFromPicker(mode: ProviderModelMode, modelId: string) {
+  function selectModelFromPicker(mode: ProviderModelMode, modelId: string, costQuality?: number) {
     const picked = modelOptionsForMode(mode).find((model) => model.id === modelId);
+    if (mode === "generation" && costQuality !== undefined) {
+      setProviderSettings((current) => ({ ...current, costQuality }));
+      saveCostQuality(costQuality);
+    }
     if (mode === "generation" && picked?.provider === "local") {
       enableLocalGenerationFromPicker();
     } else {
@@ -1886,6 +1890,7 @@ export function AppSettings({
                     description="Used for generated notes and agent responses."
                     value={modelValueForMode("generation")}
                     options={generationOptions}
+                    costQuality={providerSettings.costQuality}
                     open={pickerMode === "generation"}
                     summarySuppressed={pickerMode !== undefined}
                     flyout={modelPickerFlyout}
@@ -1900,7 +1905,9 @@ export function AppSettings({
                     }
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
-                    onSelect={(modelId) => selectModelFromPicker("generation", modelId)}
+                    onSelect={(modelId, costQuality) =>
+                      selectModelFromPicker("generation", modelId, costQuality)
+                    }
                   />
                   {providerSettings.generationModel === "open-software/auto" ? (
                     <div className="settings-row">
@@ -2602,6 +2609,7 @@ function ModelRow({
   description,
   value,
   options,
+  costQuality,
   open,
   flyout,
   search,
@@ -2619,6 +2627,7 @@ function ModelRow({
   description: string;
   value: string;
   options: VeniceModelDto[];
+  costQuality?: number;
   open: boolean;
   flyout: ModelPickerFlyout;
   search: string;
@@ -2628,7 +2637,7 @@ function ModelRow({
   onToggle: () => void;
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
-  onSelect: (modelId: string) => void;
+  onSelect: (modelId: string, costQuality?: number) => void;
   summarySuppressed?: boolean;
 }) {
   const model = selectedModel(options, value);
@@ -2670,6 +2679,7 @@ function ModelRow({
             flyout={flyout}
             model={model}
             options={options}
+            costQuality={costQuality}
             search={search}
             popoverRef={popoverRef}
             searchRef={searchRef}
