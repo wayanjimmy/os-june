@@ -7,7 +7,7 @@ export type SuggestedModel = {
   label?: string;
   /** Auto-router preference selected with this suggestion (0-100). */
   costQuality?: number;
-  /** One-line "why we recommend it", rendered under the model's meta row. */
+  /** One-line "when to choose it" guidance shown in the suggested model card. */
   reason: string;
 };
 
@@ -55,19 +55,19 @@ export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
       id: "open-software/auto",
       label: "Auto · Higher Quality",
       costQuality: 100,
-      reason: "Default: prioritize the strongest private model available for each request.",
+      reason: "Best for complex questions and important work where response quality matters most.",
     },
     {
       id: "open-software/auto",
       label: "Auto · Balanced",
       costQuality: 50,
-      reason: "Balance response quality and usage cost for everyday work.",
+      reason: "Best for everyday work when you want a practical balance of quality and credit use.",
     },
     {
       id: "open-software/auto",
       label: "Auto · Lower Cost",
       costQuality: 20,
-      reason: "Prefer lower-cost private models while preserving June's tool support.",
+      reason: "Best for quick or routine tasks when minimizing credit use matters most.",
     },
   ],
   transcription: [
@@ -146,7 +146,8 @@ export function preferredVisionFallbackModel(models: VeniceModelDto[]): VeniceMo
 }
 
 /** The curated picks that are actually present in the live catalog, in
- * curated order, with their recommendation reasons attached. */
+ * curated order. Picker-only labels and guidance replace the generic catalog
+ * name and description without changing the persisted model id. */
 export function suggestedModelsForMode(
   mode: ProviderModelMode,
   options: VeniceModelDto[],
@@ -162,7 +163,10 @@ export function suggestedModelsForMode(
     return [
       {
         key: `${suggested.id}:${suggested.costQuality ?? index}`,
-        model: suggested.label ? { ...model, name: suggested.label } : model,
+        model: {
+          ...model,
+          ...(suggested.label ? { name: suggested.label, description: suggested.reason } : {}),
+        },
         reason: suggested.reason,
         costQuality: suggested.costQuality,
       },
