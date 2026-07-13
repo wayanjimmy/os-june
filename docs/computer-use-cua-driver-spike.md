@@ -288,6 +288,19 @@ tracking driver-internal state paths across driver versions. Concretely:
    `sandbox-exec` runtime, it runs outside the write jail with full access to
    its own state dirs, and holds the privileged window-server, accessibility, and
    screen-capture connections under its own bundle identity.
+
+   Env-hygiene invariant, both paths: every June-originated driver invocation -
+   this broker-started daemon exactly like the jailed client below - starts
+   from a cleared `CUA_DRIVER_RS_*` namespace and sets only the approved
+   variables (`CUA_DRIVER_RS_HOME=<June-controlled path>`,
+   `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`, plus
+   the client-side proxy vars in step 3). Inherited values must never reach
+   the privileged process: they could re-enable telemetry or update checks,
+   redirect driver state, or skip its permissions gate, and future upstream
+   additions to the namespace inherit the same protection. The JUN-293 build
+   should carry regression tests that preload hostile `CUA_DRIVER_RS_*` values
+   before constructing BOTH the daemon command and the client wrapper env and
+   prove they are stripped.
 3. The in-jail runtime keeps spawning its stdio client as upstream does, but
    `HERMES_CUA_DRIVER_CMD` points at a small June-bundled wrapper, not at the
    driver binary directly. The wrapper is needed because the pinned backend
