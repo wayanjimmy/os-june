@@ -301,8 +301,8 @@ export function ConnectorsSection() {
         title={connectHint ? "Add Google access" : "Connect Google account"}
         description={
           connectHint
-            ? `Add to what June may do with ${connectHint}. You approve everything in Google's own sign-in, and you can disconnect any time.`
-            : "Pick what June may do with this account. You approve everything in Google's own sign-in, and you can disconnect any time."
+            ? `Add to what June may do with ${connectHint}. You approve everything in Google's own sign-in, and you can disconnect any time. When a feature uses AI, selected mail or calendar content goes to your chosen model provider. Choose a local model to keep inference on this device.`
+            : "Pick what June may do with this account. You approve everything in Google's own sign-in, and you can disconnect any time. When a feature uses AI, selected mail or calendar content goes to your chosen model provider. Choose a local model to keep inference on this device."
         }
         footer={
           <>
