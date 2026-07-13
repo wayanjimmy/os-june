@@ -22,7 +22,7 @@ built-in fallback ← `config.toml` ← the **live Venice catalog at boot**.
 
 | Var | Purpose | Default |
 |-----|---------|---------|
-| `JUNE_API_URL` | Backend base URL the app calls | `http://127.0.0.1:8080` |
+| `JUNE_API_URL` | June API base URL the app calls | `https://june-api.opensoftware.co` in code; `.env` (from `.env.example`) sets `http://127.0.0.1:8080` for local dev |
 | `OS_JUNE_LOCAL_DEV` | Use a local bearer token instead of Login with Open Software | `1` (example) |
 | `OS_JUNE_LOCAL_DEV_BEARER_TOKEN` / `_USER_ID` | The local-mode identity | `local-dev-token` / `usr_local_dev` |
 | `OS_ACCOUNTS_URL` / `OS_ACCOUNTS_API_URL` | OS Accounts portal + API (optional in local mode) | unset |
@@ -55,7 +55,7 @@ Non-secret (usually left to `config.toml`): `JUNE__SERVER__HOST` / `PORT`,
 
 ## Backend knobs (`june-api/config.toml`)
 
-- **Server:** `request_timeout_secs` 600, `max_audio_bytes` 25 MiB, `max_json_bytes` 512 KiB, `max_image_edit_bytes` sized for a 50 MiB source image after base64 expansion.
+- **Server:** `request_timeout_secs` 600, `max_audio_bytes` 25 MiB, `max_json_bytes` 512 KiB, `max_issue_report_bytes` 301 MiB total (one 300 MiB os-platform attachment plus multipart overhead), `max_image_edit_bytes` sized for a 50 MiB source image after base64 expansion.
 - **Metering estimate:** `flat_estimate_credits` 250 — the flat credit Hold per metered action; skips per-request estimation.
 - **Hold TTLs (secs):** `note_transcribe` 60, `note_generate` 300, `dictate_transcribe` 30, `dictate_cleanup` 30, `web` 30, `image` defaults to `request_timeout_secs` + 30 (630) — validation rejects an image TTL that cannot outlive the request timeout, so a slow generation can still settle its charge.
 - **Web tools:** `web_search_credits` 20, `web_fetch_credits` 20 (flat).

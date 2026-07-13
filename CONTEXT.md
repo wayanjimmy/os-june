@@ -173,11 +173,29 @@ _Avoid_: permission, profile.
 A named Hermes configuration (its own home subtree, SOUL, model default,
 skills, MCP servers) a session runs under; `default` always exists. The
 **active profile** is the sticky default new sessions pick up — June writes
-it on switch and also threads it explicitly on `session.create` (ADR 0016).
+it on switch and also threads it explicitly on `session.create` (ADR 0018).
 Managed in Settings under Profiles. A profile may specialize June, but the
 agent still presents as June.
 _Avoid_: "profile" for Runtime mode, the Seatbelt sandbox profile, or the
 Account snapshot; account profile.
+
+**Browser use**:
+The consent-gated capability (JUN-278, ADR 0017) that lets the agent operate
+a live browser. Attended sessions drive the user's own Chromium-family
+browser through the June extension, in task-owned or explicitly user-shared
+tabs; sandboxed routines get a June-managed, anonymous, ephemeral headless
+browser limited to the public web. All actions flow through the Rust browser
+broker; consequential actions park for approval.
+_Avoid_: web browsing (that is `june_web` search/fetch), browser toolset
+(the upstream runtime feature June does not expose).
+
+**Computer use**:
+The consent-gated capability (JUN-278 phase 2) that lets the agent operate
+Mac apps in the background - no cursor, focus, or Space theft - via the
+pinned runtime's computer-use toolset and a June-bundled pinned cua-driver.
+Every mutating action requires approval; requires a vision-capable model.
+_Avoid_: desktop automation (vague), computer_use toolset (that is the
+upstream mechanism, not the June capability).
 
 **Stored session id** vs **runtime session id**:
 The persistent id June keys all UI and history on, versus the live process's
@@ -226,8 +244,10 @@ inferred from marketing `traits` (see
 _Avoid_: trait (`traits` is a separate, non-authoritative Venice field).
 
 **Attachment**:
-A file or image imported into the Hermes workspace and referenced by path;
-images additionally get a structured `image.attach_bytes`.
+A file or image referenced by path. Agent-composer attachments and DOM-dropped
+report attachments are imported into the Hermes workspace; native-picker
+issue-report attachments keep their original local paths. Composer images
+additionally get a structured `image.attach_bytes`.
 _Avoid_: upload (unqualified).
 
 **Note reference**:
