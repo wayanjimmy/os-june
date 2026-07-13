@@ -3,7 +3,9 @@
 // events; it answers with the next state and any message to post on the
 // native port.
 
-import { helloMessage, parseHostMessage, type HelloMessage } from "./protocol";
+import { helloMessage, parseHostMessage, PROTOCOL_VERSION, type HelloMessage } from "./protocol";
+
+export type IncompatibleRemedy = "updateJune" | "updateExtension" | "updateBoth";
 
 export type PairingState =
   | { status: "disconnected" }
@@ -11,8 +13,8 @@ export type PairingState =
   /** Port open, hello sent, waiting for the app's verdict. */
   | { status: "handshaking" }
   | { status: "paired"; appVersion?: string }
-  /** Protocol mismatch: the app told us to prompt for an extension update. */
-  | { status: "incompatible"; expected?: number }
+  /** Protocol mismatch, including which independently updated half is older. */
+  | { status: "incompatible"; expected?: number; remedy: IncompatibleRemedy }
   /** The shim could not reach the app (June is not running). */
   | { status: "unreachable" };
 
@@ -28,6 +30,13 @@ export type PairingTransition = {
 };
 
 export const initialPairingState: PairingState = { status: "disconnected" };
+
+function incompatibleRemedy(appProtocolVersion?: number): IncompatibleRemedy {
+  if (appProtocolVersion === undefined || appProtocolVersion === PROTOCOL_VERSION) {
+    return "updateBoth";
+  }
+  return appProtocolVersion < PROTOCOL_VERSION ? "updateJune" : "updateExtension";
+}
 
 export function reducePairing(
   state: PairingState,
@@ -52,7 +61,13 @@ export function reducePairing(
         case "hello_ok":
           return { state: { status: "paired", appVersion: message.appVersion } };
         case "hello_incompatible":
-          return { state: { status: "incompatible", expected: message.expected } };
+          return {
+            state: {
+              status: "incompatible",
+              expected: message.expected,
+              remedy: incompatibleRemedy(message.expected),
+            },
+          };
         case "error":
           if (message.code === "app_unreachable") {
             return { state: { status: "unreachable" } };

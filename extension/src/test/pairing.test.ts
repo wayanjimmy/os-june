@@ -31,12 +31,20 @@ describe("pairing handshake", () => {
     expect(state).toEqual({ status: "paired", appVersion: "0.0.32" });
   });
 
-  it("surfaces a protocol mismatch as the update prompt state", () => {
+  it("prompts to update June when the extension protocol is newer", () => {
+    const state = drive([
+      { kind: "connect" },
+      { kind: "message", message: { v: 0, type: "hello_incompatible", expected: 0 } },
+    ]);
+    expect(state).toEqual({ status: "incompatible", expected: 0, remedy: "updateJune" });
+  });
+
+  it("prompts to update the extension when the app protocol is newer", () => {
     const state = drive([
       { kind: "connect" },
       { kind: "message", message: { v: 2, type: "hello_incompatible", expected: 2 } },
     ]);
-    expect(state).toEqual({ status: "incompatible", expected: 2 });
+    expect(state).toEqual({ status: "incompatible", expected: 2, remedy: "updateExtension" });
   });
 
   it("keeps the incompatible verdict when the port then disconnects", () => {

@@ -273,10 +273,11 @@ dictation-helper style, and keeps it out of the write jail; the in-jail runtime
 talks to it as a proxy client. This is a recommendation, not a necessity - the
 relocation experiment shows an in-jail daemon can start - and it is preferred
 because it matches the existing out-of-jail precedents (the dictation helper,
-the gateway daemon), gives the daemon a stable bundle identity for TCC
-attribution instead of an unresolved in-jail identity, puts daemon lifecycle in
-the broker's hands independent of per-session runtime spawns, and avoids June
-tracking driver-internal state paths across driver versions. Concretely:
+the launchd-spawned Hermes gateway process), gives the daemon a stable bundle
+identity for TCC attribution instead of an unresolved in-jail identity, puts
+daemon lifecycle in the broker's hands independent of per-session runtime
+spawns, and avoids June tracking driver-internal state paths across driver
+versions. Concretely:
 
 1. Bundle `CuaDriver.app` 0.5.0 as an app resource and re-sign it under June's
    Developer ID and a June bundle id (for example `co.opensoftware.june.cua-driver`),
@@ -288,7 +289,7 @@ tracking driver-internal state paths across driver versions. Concretely:
    verifying that grants actually persist across two June-signed driver
    versions is an open question below.
 2. The Rust broker (the unsandboxed host, the same layer that already spawns the
-   dictation helper via `spawn_helper()` and the gateway daemon via
+   dictation helper via `spawn_helper()` and the Hermes gateway process via
    `build_hermes_gateway_start_command`, both deliberately outside the Seatbelt
    wrapper) starts the driver daemon directly, for example
    `cua-driver serve --socket <june-controlled path>`, or through LaunchServices.
@@ -360,7 +361,7 @@ tracking driver-internal state paths across driver versions. Concretely:
 This keeps the agent runtime itself under the write jail. The one privileged
 process (the daemon) is out of the jail by construction, with a bounded,
 auditable trust surface, which is the same trade already accepted for the
-dictation helper and the gateway daemon.
+dictation helper and the Hermes gateway process.
 
 ### The approval boundary cannot be the tool-dispatch layer (gates JUN-293)
 

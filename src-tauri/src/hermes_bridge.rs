@@ -490,8 +490,37 @@ struct SharedProviderProxy {
     port: u16,
     token: String,
     recorder_token: String,
-    browser_token: String,
+    browser_token: BrowserProxyToken,
     shutdown: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Clone)]
+struct BrowserProxyToken {
+    value: Arc<Mutex<String>>,
+}
+
+impl BrowserProxyToken {
+    fn new(value: String) -> Self {
+        Self {
+            value: Arc::new(Mutex::new(value)),
+        }
+    }
+
+    fn current(&self) -> String {
+        self.value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn rotate(&self) -> String {
+        let next = random_token();
+        *self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next.clone();
+        next
+    }
 }
 
 #[derive(Clone)]
@@ -504,7 +533,7 @@ struct ProviderProxyState {
     /// Browser routes require this dedicated secret, handed only to the
     /// `june_browser` MCP: browser control must not be reachable with either the
     /// general provider token or the recorder token.
-    browser_token: String,
+    browser_token: BrowserProxyToken,
     /// The browser broker, shared with `HermesBridge`, so `/v1/browser/status`
     /// reads the live Browser access grant and active session count.
     browser_broker: Arc<BrowserBroker>,
@@ -1305,13 +1334,13 @@ async fn ensure_provider_proxy(
                 port: proxy.port,
                 token: proxy.token.clone(),
                 recorder_token: proxy.recorder_token.clone(),
-                browser_token: proxy.browser_token.clone(),
+                browser_token: proxy.browser_token.current(),
             });
         }
     }
     let token = random_token();
     let recorder_token = random_token();
-    let browser_token = random_token();
+    let browser_token = BrowserProxyToken::new(random_token());
     let app_data_dir = crate::app_paths::app_data_dir(app)
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
     let image_sources = ImageSourceCapabilities {
@@ -1348,7 +1377,7 @@ async fn ensure_provider_proxy(
         port: started.port,
         token,
         recorder_token,
-        browser_token,
+        browser_token: browser_token.current(),
     })
 }
 
@@ -2425,7 +2454,21 @@ pub fn set_hermes_browser_access(
             "Could not resolve the app data directory.",
         )
     })?;
-    if request.enabled {
+    apply_browser_access_transition(
+        &bridge.browser_broker,
+        request.enabled,
+        || persist_browser_access(&path, request.enabled),
+        || rotate_browser_proxy_token(&bridge),
+    )?;
+    stop_hermes_mode(&bridge, false)?;
+    stop_hermes_mode(&bridge, true)?;
+    Ok(BrowserAccessStatus {
+        enabled: request.enabled,
+    })
+}
+
+fn persist_browser_access(path: &Path, enabled: bool) -> Result<(), AppError> {
+    if enabled {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| AppError::new("browser_access_failed", error.to_string()))?;
@@ -2437,15 +2480,39 @@ pub fn set_hermes_browser_access(
             return Err(AppError::new("browser_access_failed", error.to_string()));
         }
     }
-    // Apply the grant transition to broker state immediately. On revoke this
-    // refuses new broker commands before clearing every session (see
-    // `BrowserBroker::set_enabled`).
-    bridge.browser_broker.set_enabled(request.enabled);
-    stop_hermes_mode(&bridge, false)?;
-    stop_hermes_mode(&bridge, true)?;
-    Ok(BrowserAccessStatus {
-        enabled: request.enabled,
-    })
+    Ok(())
+}
+
+fn apply_browser_access_transition(
+    browser_broker: &BrowserBroker,
+    enabled: bool,
+    persist: impl FnOnce() -> Result<(), AppError>,
+    rotate_token: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if enabled {
+        persist()?;
+        rotate_token()?;
+        browser_broker.set_enabled(true);
+    } else {
+        // Revocation is an ordered handshake: close the in-memory gate and
+        // clear sessions before touching persisted state, so no concurrent
+        // command can enter after revoke begins.
+        browser_broker.set_enabled(false);
+        persist()?;
+        rotate_token()?;
+    }
+    Ok(())
+}
+
+fn rotate_browser_proxy_token(bridge: &HermesBridge) -> Result<(), AppError> {
+    let proxy = bridge
+        .provider_proxy
+        .lock()
+        .map_err(|_| AppError::new("hermes_bridge_unavailable", "Hermes bridge lock failed."))?;
+    if let Some(proxy) = proxy.as_ref() {
+        proxy.browser_token.rotate();
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Clone)]
@@ -6431,7 +6498,7 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let runtime_dir = managed_hermes_runtime_dir(app).ok()?;
     let app_data_dir = crate::app_paths::app_data_dir(app).ok()?;
-    let image_source_key_path = image_source_capability_secret_path(&app_data_dir);
+    let secret_read_paths = sandbox_secret_read_paths(&app_data_dir);
     let write_roots = sandbox_write_roots(hermes_home, &runtime_dir);
     let config_write_path = sandbox_config_write_path(hermes_home);
     let config_temp_prefix = sandbox_config_temp_prefix(hermes_home);
@@ -6440,7 +6507,7 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
         &write_roots,
         &config_write_path,
         &config_temp_prefix,
-        std::slice::from_ref(&image_source_key_path),
+        &secret_read_paths,
         agent_cli_access,
     );
     if std::fs::create_dir_all(&app_data_dir).is_err() {
@@ -6454,6 +6521,14 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
             None
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_secret_read_paths(app_data_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        image_source_capability_secret_path(app_data_dir),
+        crate::extension_host::descriptor_path(app_data_dir),
+    ]
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -7850,7 +7925,7 @@ fn yaml_string(value: &str) -> String {
 async fn start_june_provider_proxy(
     token: String,
     recorder_token: String,
-    browser_token: String,
+    browser_token: BrowserProxyToken,
     browser_broker: Arc<BrowserBroker>,
     image_sources: ImageSourceCapabilities,
     videos_dir: PathBuf,
@@ -7940,11 +8015,12 @@ async fn handle_june_provider_connection(
             return Ok(());
         }
     };
+    let browser_token = state.browser_token.current();
     let required_token = provider_proxy_required_token(
         &request.path,
         &state.token,
         &state.recorder_token,
-        &state.browser_token,
+        &browser_token,
     );
     if !provider_proxy_authorized(&request, required_token) {
         write_json_response(
@@ -9830,7 +9906,7 @@ mod tests {
         let state = Arc::new(ProviderProxyState {
             token: "proxy-token".to_string(),
             recorder_token: "recorder-token".to_string(),
-            browser_token: "browser-token".to_string(),
+            browser_token: BrowserProxyToken::new("browser-token".to_string()),
             browser_broker: Arc::new(BrowserBroker::default()),
             image_sources: ImageSourceCapabilities {
                 images_dir: home.path().join("images"),
@@ -10408,7 +10484,7 @@ mod tests {
         let state = Arc::new(ProviderProxyState {
             token: "proxy-token".to_string(),
             recorder_token: "recorder-token".to_string(),
-            browser_token: "browser-token".to_string(),
+            browser_token: BrowserProxyToken::new("browser-token".to_string()),
             browser_broker: broker,
             image_sources: ImageSourceCapabilities {
                 images_dir: home.path().join("images"),
@@ -10577,6 +10653,65 @@ mod tests {
         broker.set_enabled(false);
         assert!(!broker.is_enabled());
         assert_eq!(broker.active_session_count(), 0);
+    }
+
+    #[test]
+    fn revoking_browser_access_closes_the_gate_before_removing_persisted_state() {
+        let broker = BrowserBroker::default();
+        broker.set_enabled(true);
+        let mut gate_was_closed_during_persist = false;
+
+        apply_browser_access_transition(
+            &broker,
+            false,
+            || {
+                gate_was_closed_during_persist = !broker.is_enabled();
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .expect("revoke transition");
+
+        assert!(
+            gate_was_closed_during_persist,
+            "new broker commands must be refused before persisted grant removal begins"
+        );
+    }
+
+    #[test]
+    fn browser_proxy_token_rotates_across_every_grant_transition_and_refuses_stale_tokens() {
+        let broker = BrowserBroker::default();
+        let browser_token = BrowserProxyToken::new("stale-browser-token".to_string());
+
+        for enabled in [true, false] {
+            let stale = browser_token.current();
+            let stale_request = request_with_authorization(&format!("Bearer {stale}"));
+            let token_to_rotate = browser_token.clone();
+
+            apply_browser_access_transition(
+                &broker,
+                enabled,
+                || Ok(()),
+                || {
+                    token_to_rotate.rotate();
+                    Ok(())
+                },
+            )
+            .expect("grant transition");
+
+            let current = browser_token.current();
+            assert_ne!(current, stale, "enabled={enabled}");
+            let required = provider_proxy_required_token(
+                "/v1/browser/status",
+                "provider-token",
+                "recorder-token",
+                &current,
+            );
+            assert!(
+                !provider_proxy_authorized(&stale_request, required),
+                "enabled={enabled}: a credential captured before the transition must be refused"
+            );
+        }
     }
 
     #[test]
@@ -12642,6 +12777,35 @@ mcp_servers:
         assert!(!profile.contains(".codex"));
         assert!(!profile.contains(".gemini"));
         assert!(!profile.contains("opencode"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_profile_denies_reads_of_the_extension_host_descriptor() {
+        let home = PathBuf::from("/Users/test");
+        let app_data_dir =
+            PathBuf::from("/Users/test/Library/Application Support/co.opensoftware.june");
+        let workspace = app_data_dir.join("hermes");
+        let config_path = sandbox_config_write_path(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&workspace);
+        let descriptor_path = crate::extension_host::descriptor_path(&app_data_dir);
+        let secret_read_paths = sandbox_secret_read_paths(&app_data_dir);
+        let profile = build_sandbox_profile(
+            &home,
+            std::slice::from_ref(&workspace),
+            &config_path,
+            &config_temp_prefix,
+            &secret_read_paths,
+            false,
+        );
+
+        assert!(
+            profile.contains(&format!(
+                "(literal {})",
+                sbpl_quote(&descriptor_path.to_string_lossy())
+            )),
+            "the jailed runtime must not read its extension listener credential"
+        );
     }
 
     #[cfg(target_os = "macos")]

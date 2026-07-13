@@ -50,6 +50,10 @@ const APP_BUNDLE_IDENTIFIER: &str = "co.opensoftware.june";
 
 const DESCRIPTOR_FILE_NAME: &str = "extension-host.json";
 
+pub(crate) fn descriptor_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join(DESCRIPTOR_FILE_NAME)
+}
+
 /// Chrome caps extension -> host messages at 1 MiB; the contract keeps every
 /// message small (large payloads become file references), so the same cap is
 /// enforced on both legs and in both directions.
@@ -181,7 +185,7 @@ fn write_descriptor(
     descriptor: &HostDescriptor,
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(data_dir)?;
-    let path = data_dir.join(DESCRIPTOR_FILE_NAME);
+    let path = descriptor_path(data_dir);
     let body = serde_json::to_vec_pretty(descriptor)?;
     std::fs::write(&path, body)?;
     #[cfg(unix)]
@@ -552,14 +556,13 @@ pub fn register_browser_extension_host(
 /// frame, and then pumps frames in both directions unchanged.
 pub mod shim {
     use super::{
-        json, read_frame, shim_data_dir, write_frame, HostDescriptor, Value, DESCRIPTOR_FILE_NAME,
-        PROTOCOL_VERSION,
+        json, read_frame, shim_data_dir, write_frame, HostDescriptor, Value, PROTOCOL_VERSION,
     };
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
     pub fn descriptor_path() -> Option<std::path::PathBuf> {
-        shim_data_dir().map(|dir| dir.join(DESCRIPTOR_FILE_NAME))
+        shim_data_dir().map(|dir| super::descriptor_path(&dir))
     }
 
     fn read_descriptor() -> Result<HostDescriptor, String> {
@@ -615,7 +618,7 @@ pub mod shim {
             &json!({ "v": PROTOCOL_VERSION, "type": "auth", "token": token }),
         )?;
 
-        let to_socket = std::thread::spawn(move || -> std::io::Result<()> {
+        std::thread::spawn(move || -> std::io::Result<()> {
             let mut chrome_in = chrome_in;
             while let Some(frame) = read_frame(&mut chrome_in)? {
                 write_frame(&mut socket_writer, &frame)?;
@@ -643,7 +646,10 @@ pub mod shim {
             }
         }
         let _ = socket_reader.shutdown(std::net::Shutdown::Both);
-        let _ = to_socket.join();
+        // Do not join the Chrome-input pump: Chrome owns stdin and may keep it
+        // open after the app socket closes. Returning lets `run` exit the shim
+        // process immediately, which closes the native port and tells the
+        // extension to detach debugger control and clear task state.
         result
     }
 }
@@ -651,6 +657,28 @@ pub mod shim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn css_token_value<'a>(css: &'a str, token: &str) -> Option<&'a str> {
+        let declaration = format!("--{token}:");
+        let start = css.find(&declaration)? + declaration.len();
+        let end = css[start..].find(';')? + start;
+        Some(css[start..end].trim())
+    }
+
+    struct BlockingReader {
+        started: Option<std::sync::mpsc::Sender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Read for BlockingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            let _ = self.release.recv();
+            Ok(0)
+        }
+    }
 
     #[test]
     fn frame_roundtrip_preserves_json() {
@@ -796,5 +824,90 @@ mod tests {
             let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn extension_popup_tokens_match_the_app_source() {
+        let app_tokens = include_str!("../../src/styles/tokens.css");
+        let extension_tokens = include_str!("../../extension/src/tokens.css");
+        for token in [
+            "font-sans",
+            "font-scale",
+            "fs-md",
+            "fw-medium",
+            "sp-1",
+            "sp-2",
+            "sp-3",
+            "sp-4",
+            "sp-5",
+            "sp-6",
+            "r-sm",
+            "r-pill",
+            "brand-wash",
+            "foreground",
+            "card",
+            "secondary",
+            "muted-foreground",
+            "destructive",
+            "success",
+            "shadow-inset",
+        ] {
+            assert_eq!(
+                css_token_value(extension_tokens, token),
+                css_token_value(app_tokens, token),
+                "extension token --{token} drifted from src/styles/tokens.css"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_terminates_when_app_closes_while_chrome_stdin_is_live() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+        let address = listener.local_addr().expect("listener address");
+        let (close_app_tx, close_app_rx) = std::sync::mpsc::channel();
+        let app = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept shim");
+            let auth = read_frame(&mut socket)
+                .expect("read auth")
+                .expect("auth frame");
+            assert_eq!(auth["type"], "auth");
+            close_app_rx.recv().expect("close app signal");
+            socket
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close app socket");
+        });
+
+        let socket = std::net::TcpStream::connect(address).expect("connect shim");
+        let (stdin_started_tx, stdin_started_rx) = std::sync::mpsc::channel();
+        let (release_stdin_tx, release_stdin_rx) = std::sync::mpsc::channel();
+        let (relay_done_tx, relay_done_rx) = std::sync::mpsc::channel();
+        let relay = std::thread::spawn(move || {
+            let result = shim::relay(
+                BlockingReader {
+                    started: Some(stdin_started_tx),
+                    release: release_stdin_rx,
+                },
+                Vec::new(),
+                socket,
+                "test-token",
+            );
+            let _ = relay_done_tx.send(result);
+        });
+
+        stdin_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Chrome stdin reader must be live");
+        close_app_tx.send(()).expect("close app");
+        app.join().expect("app listener");
+        let terminated = relay_done_rx.recv_timeout(Duration::from_millis(250));
+
+        // Always release the fixture's blocking reader so a failing assertion
+        // does not leak the relay thread into the rest of the suite.
+        let _ = release_stdin_tx.send(());
+        relay.join().expect("relay thread");
+        assert!(
+            terminated.is_ok(),
+            "the shim must terminate without waiting for Chrome stdin to close"
+        );
     }
 }
