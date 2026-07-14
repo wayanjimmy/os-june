@@ -2557,15 +2557,15 @@ pub struct SetBrowserAccessRequest {
 }
 
 /// Records (or clears) the Browser access grant and applies the transition to
-/// broker state at once. Revoke first refuses new broker commands (the gate
-/// flips false) and then terminates every broker session; extension detach and
-/// native-messaging teardown are JUN-287's, not this slice's. Both currently
+/// broker state at once. Revoke first refuses new broker commands, waits for
+/// in-flight commands, then closes every broker session so the extension
+/// detaches debugger control before credentials rotate. Both currently
 /// registered runtime mode slots are retired so the next spawn regenerates
 /// `config.yaml` with the `june_browser` `enabled` leaf following the new grant.
 /// An in-flight spawn that registers after teardown may keep its spawn-time
 /// config, but the broker re-checks the persisted grant on every request.
 #[tauri::command]
-pub fn set_hermes_browser_access(
+pub async fn set_hermes_browser_access(
     app: AppHandle,
     bridge: State<'_, HermesBridge>,
     request: SetBrowserAccessRequest,
@@ -2582,7 +2582,8 @@ pub fn set_hermes_browser_access(
         request.enabled,
         || persist_browser_access(&path, request.enabled),
         || rotate_browser_proxy_token(&bridge),
-    )?;
+    )
+    .await?;
     stop_hermes_mode(&bridge, false)?;
     stop_hermes_mode(&bridge, true)?;
     Ok(BrowserAccessStatus {
@@ -2606,7 +2607,7 @@ fn persist_browser_access(path: &Path, enabled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-fn apply_browser_access_transition(
+async fn apply_browser_access_transition(
     browser_broker: &BrowserBroker,
     enabled: bool,
     persist: impl FnOnce() -> Result<(), AppError>,
@@ -2615,18 +2616,18 @@ fn apply_browser_access_transition(
     if enabled {
         persist()?;
         rotate_token()?;
-        browser_broker.set_enabled(true);
+        browser_broker.set_enabled(true).await?;
     } else {
         // Revocation is an ordered handshake: close the in-memory gate and
         // clear sessions before touching persisted state, so no concurrent
         // command can enter after revoke begins.
-        browser_broker.set_enabled(false);
+        browser_broker.set_enabled(false).await?;
         persist()?;
         rotate_token()?;
         // The persisted flag is now the steady-state gate. Release the
         // transition-only deny override so any later explicit grant is read
         // directly from disk without requiring a respawn.
-        browser_broker.set_enabled(true);
+        browser_broker.set_enabled(true).await?;
     }
     Ok(())
 }
@@ -12322,8 +12323,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn revoking_browser_access_clears_injected_broker_sessions() {
+    #[tokio::test]
+    async fn revoking_browser_access_clears_injected_broker_sessions() {
         let home = tempfile::tempdir().expect("tempdir");
         let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
         std::fs::write(&access_flag, b"1").expect("write browser access flag");
@@ -12335,13 +12336,13 @@ mod tests {
         assert!(broker.is_enabled());
 
         // Revoke: the gate flips false and every session is terminated.
-        broker.set_enabled(false);
+        broker.set_enabled(false).await.expect("disable broker");
         assert!(!broker.is_enabled());
         assert_eq!(broker.active_session_count(), 0);
     }
 
-    #[test]
-    fn revoking_browser_access_closes_the_gate_before_removing_persisted_state() {
+    #[tokio::test]
+    async fn revoking_browser_access_closes_the_gate_before_removing_persisted_state() {
         let home = tempfile::tempdir().expect("tempdir");
         let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
         std::fs::write(&access_flag, b"1").expect("write browser access flag");
@@ -12359,6 +12360,7 @@ mod tests {
             },
             || Ok(()),
         )
+        .await
         .expect("revoke transition");
 
         assert!(
@@ -12367,8 +12369,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_spawn_registering_after_revoke_cannot_restore_browser_access() {
+    #[tokio::test]
+    async fn a_spawn_registering_after_revoke_cannot_restore_browser_access() {
         let home = tempfile::tempdir().expect("tempdir");
         let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
         std::fs::write(&access_flag, b"1").expect("write browser access flag");
@@ -12378,7 +12380,7 @@ mod tests {
         std::fs::remove_file(&access_flag).expect("remove browser access flag");
         // Simulate an in-flight spawn publishing the stale value it read before
         // the revoke removed the flag.
-        broker.set_enabled(true);
+        broker.set_enabled(true).await.expect("enable broker");
 
         assert!(!access_flag.exists());
         assert!(
@@ -12387,8 +12389,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn browser_proxy_token_rotates_across_every_grant_transition_and_refuses_stale_tokens() {
+    #[tokio::test]
+    async fn browser_proxy_token_rotates_across_every_grant_transition_and_refuses_stale_tokens() {
         let broker = BrowserBroker::default();
         let browser_token = BrowserProxyToken::new("stale-browser-token".to_string());
 
@@ -12406,6 +12408,7 @@ mod tests {
                     Ok(())
                 },
             )
+            .await
             .expect("grant transition");
 
             let current = browser_token.current();

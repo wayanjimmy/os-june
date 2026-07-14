@@ -5,7 +5,7 @@
 // shape and validation only.
 
 /** Bump when the message contract changes incompatibly. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Must match NATIVE_HOST_NAME in src-tauri/src/extension_host.rs. */
 export const NATIVE_HOST_NAME = "co.opensoftware.june.extension";

@@ -29,6 +29,15 @@ describe("task tab registry", () => {
     registry.add("two", 2);
     expect(registry.cleanupPlan().sort()).toEqual([1, 2]);
   });
+
+  it("forgets an empty tab group so a later task tab can create a new one", () => {
+    const registry = new TaskTabRegistry();
+    registry.start("session-a");
+    registry.add("session-a", 10);
+    registry.session("session-a").groupId = 42;
+    registry.removeTab("session-a", 10);
+    expect(registry.session("session-a").groupId).toBeUndefined();
+  });
 });
 
 describe("native payload chunking", () => {

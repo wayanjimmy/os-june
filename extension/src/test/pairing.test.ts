@@ -26,7 +26,10 @@ describe("pairing handshake", () => {
   it("pairs on hello_ok and records the app version", () => {
     const state = drive([
       { kind: "connect" },
-      { kind: "message", message: { v: 1, type: "hello_ok", appVersion: "0.0.32" } },
+      {
+        kind: "message",
+        message: { v: PROTOCOL_VERSION, type: "hello_ok", appVersion: "0.0.32" },
+      },
     ]);
     expect(state).toEqual({ status: "paired", appVersion: "0.0.32" });
   });
@@ -34,23 +37,52 @@ describe("pairing handshake", () => {
   it("prompts to update June when the extension protocol is newer", () => {
     const state = drive([
       { kind: "connect" },
-      { kind: "message", message: { v: 0, type: "hello_incompatible", expected: 0 } },
+      {
+        kind: "message",
+        message: {
+          v: PROTOCOL_VERSION - 1,
+          type: "hello_incompatible",
+          expected: PROTOCOL_VERSION - 1,
+        },
+      },
     ]);
-    expect(state).toEqual({ status: "incompatible", expected: 0, remedy: "updateJune" });
+    expect(state).toEqual({
+      status: "incompatible",
+      expected: PROTOCOL_VERSION - 1,
+      remedy: "updateJune",
+    });
   });
 
   it("prompts to update the extension when the app protocol is newer", () => {
     const state = drive([
       { kind: "connect" },
-      { kind: "message", message: { v: 2, type: "hello_incompatible", expected: 2 } },
+      {
+        kind: "message",
+        message: {
+          v: PROTOCOL_VERSION + 1,
+          type: "hello_incompatible",
+          expected: PROTOCOL_VERSION + 1,
+        },
+      },
     ]);
-    expect(state).toEqual({ status: "incompatible", expected: 2, remedy: "updateExtension" });
+    expect(state).toEqual({
+      status: "incompatible",
+      expected: PROTOCOL_VERSION + 1,
+      remedy: "updateExtension",
+    });
   });
 
   it("keeps the incompatible verdict when the port then disconnects", () => {
     const state = drive([
       { kind: "connect" },
-      { kind: "message", message: { v: 1, type: "hello_incompatible", expected: 2 } },
+      {
+        kind: "message",
+        message: {
+          v: PROTOCOL_VERSION,
+          type: "hello_incompatible",
+          expected: PROTOCOL_VERSION + 1,
+        },
+      },
       { kind: "disconnect" },
     ]);
     expect(state.status).toBe("incompatible");
@@ -59,7 +91,10 @@ describe("pairing handshake", () => {
   it("maps the shim's app_unreachable error to unreachable and keeps it after disconnect", () => {
     const state = drive([
       { kind: "connect" },
-      { kind: "message", message: { v: 1, type: "error", code: "app_unreachable" } },
+      {
+        kind: "message",
+        message: { v: PROTOCOL_VERSION, type: "error", code: "app_unreachable" },
+      },
       { kind: "disconnect" },
     ]);
     expect(state).toEqual({ status: "unreachable" });
@@ -68,7 +103,7 @@ describe("pairing handshake", () => {
   it("returns to disconnected when a paired port closes", () => {
     const state = drive([
       { kind: "connect" },
-      { kind: "message", message: { v: 1, type: "hello_ok" } },
+      { kind: "message", message: { v: PROTOCOL_VERSION, type: "hello_ok" } },
       { kind: "disconnect" },
     ]);
     expect(state).toEqual({ status: "disconnected" });
@@ -78,7 +113,7 @@ describe("pairing handshake", () => {
     const state = drive([
       { kind: "connect" },
       { kind: "message", message: "garbage" },
-      { kind: "message", message: { v: 1, type: "unknown_future_thing" } },
+      { kind: "message", message: { v: PROTOCOL_VERSION, type: "unknown_future_thing" } },
     ]);
     expect(state).toEqual({ status: "handshaking" });
   });

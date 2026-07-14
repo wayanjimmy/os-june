@@ -113,9 +113,18 @@ impl BrowserTransport for ExtensionBrowserTransport {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct BrowserBroker {
     state: Mutex<BrowserBrokerState>,
+    policy_gate: tokio::sync::RwLock<()>,
+}
+
+impl Default for BrowserBroker {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(BrowserBrokerState::default()),
+            policy_gate: tokio::sync::RwLock::new(()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -166,12 +175,13 @@ impl BrowserBroker {
         self.lock().access_flag_path = Some(path);
     }
 
-    pub(crate) fn set_enabled(&self, enabled: bool) {
+    pub(crate) async fn set_enabled(&self, enabled: bool) -> Result<(), AppError> {
+        let _transition = self.policy_gate.write().await;
         let (transports, sessions) = {
             let mut state = self.lock();
             state.transition_blocked = !enabled;
             if enabled {
-                return;
+                return Ok(());
             }
             let transports = state.transports.clone();
             let sessions = state
@@ -179,19 +189,21 @@ impl BrowserBroker {
                 .iter()
                 .map(|(id, session)| (id.clone(), session.transport_kind))
                 .collect::<Vec<_>>();
-            state.sessions.clear();
             (transports, sessions)
         };
+        let mut first_error = None;
         for (session_id, kind) in sessions {
             if let Some(transport) = transports.get(&kind).cloned() {
-                let transport = Arc::clone(&transport);
-                tauri::async_runtime::spawn(async move {
-                    let _ = transport
-                        .execute("session_close", json!({ "session_id": session_id }))
-                        .await;
-                });
+                if let Err(error) = transport
+                    .execute("session_close", json!({ "session_id": session_id }))
+                    .await
+                {
+                    first_error.get_or_insert(error);
+                }
             }
         }
+        self.lock().sessions.clear();
+        first_error.map_or(Ok(()), Err)
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -233,6 +245,7 @@ impl BrowserBroker {
         tool: &str,
         mut arguments: Value,
     ) -> Result<Value, AppError> {
+        let _operation = self.policy_gate.read().await;
         self.require_enabled()?;
         if matches!(
             tool,
@@ -488,6 +501,33 @@ fn atomic_write(root: &Path, filename: &str, bytes: &[u8]) -> Result<(), AppErro
 mod tests {
     use super::*;
 
+    struct BlockingTransport {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl BrowserTransport for BlockingTransport {
+        fn execute<'a>(&'a self, tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                if tool == "snapshot" {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                let data = match tool {
+                    "tab_open" => json!({ "tabId": 7 }),
+                    "tabs_list" => json!({ "tabs": [] }),
+                    _ => json!({}),
+                };
+                Ok(TransportResponse {
+                    data,
+                    artifact: None,
+                })
+            })
+        }
+    }
+
     #[test]
     fn artifact_names_are_broker_minted_and_path_safe() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -679,5 +719,70 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[tokio::test]
+    async fn revocation_waits_for_in_flight_commands_before_closing_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flag = temp.path().join("browser-access");
+        std::fs::write(&flag, b"1").expect("grant");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let broker = Arc::new(BrowserBroker::default());
+        broker.set_access_flag_path(flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(BlockingTransport {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            temp.path().join("images"),
+            temp.path().join("artifacts"),
+        );
+        let started = broker
+            .execute(BrowserTransportKind::Attended, "session_start", json!({}))
+            .await
+            .expect("start");
+        let session_id = started["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        broker
+            .execute(
+                BrowserTransportKind::Attended,
+                "tab_open",
+                json!({ "session_id": session_id }),
+            )
+            .await
+            .expect("open");
+
+        let command_broker = Arc::clone(&broker);
+        let command_session = session_id.clone();
+        let command = tokio::spawn(async move {
+            command_broker
+                .execute(
+                    BrowserTransportKind::Attended,
+                    "snapshot",
+                    json!({ "session_id": command_session, "tab_id": 7 }),
+                )
+                .await
+        });
+        entered.notified().await;
+        let revoke_broker = Arc::clone(&broker);
+        let mut revoke = tokio::spawn(async move { revoke_broker.set_enabled(false).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut revoke)
+                .await
+                .is_err(),
+            "revoke must wait for the active browser operation"
+        );
+        release.notify_one();
+        command
+            .await
+            .expect("command task")
+            .expect("command result");
+        revoke.await.expect("revoke task").expect("revoke result");
+        assert_eq!(broker.active_session_count(), 0);
+        assert!(!broker.is_enabled());
     }
 }

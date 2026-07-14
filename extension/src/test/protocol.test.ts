@@ -25,7 +25,10 @@ describe("protocol messages", () => {
 describe("parseHostMessage", () => {
   it("accepts every known host message type", () => {
     for (const type of ["hello_ok", "hello_incompatible", "pong", "error"]) {
-      expect(parseHostMessage({ v: 1, type })).toEqual({ v: 1, type });
+      expect(parseHostMessage({ v: PROTOCOL_VERSION, type })).toEqual({
+        v: PROTOCOL_VERSION,
+        type,
+      });
     }
   });
 
@@ -34,13 +37,13 @@ describe("parseHostMessage", () => {
     expect(parseHostMessage("hello_ok")).toBeNull();
     expect(parseHostMessage({ type: "hello_ok" })).toBeNull();
     expect(parseHostMessage({ v: "1", type: "hello_ok" })).toBeNull();
-    expect(parseHostMessage({ v: 1, type: "take_over_tab" })).toBeNull();
+    expect(parseHostMessage({ v: PROTOCOL_VERSION, type: "take_over_tab" })).toBeNull();
   });
 
   it("accepts only well-formed browser requests", () => {
     expect(
       parseBrowserRequest({
-        v: 1,
+        v: PROTOCOL_VERSION,
         type: "request",
         id: 3,
         tool: "tab_open",
@@ -48,8 +51,16 @@ describe("parseHostMessage", () => {
       }),
     ).toMatchObject({ id: 3, tool: "tab_open" });
     expect(
-      parseBrowserRequest({ v: 1, type: "request", id: "3", tool: "tab_open", arguments: {} }),
+      parseBrowserRequest({
+        v: PROTOCOL_VERSION,
+        type: "request",
+        id: "3",
+        tool: "tab_open",
+        arguments: {},
+      }),
     ).toBeNull();
-    expect(parseBrowserRequest({ v: 1, type: "request", id: 3, tool: "tab_open" })).toBeNull();
+    expect(
+      parseBrowserRequest({ v: PROTOCOL_VERSION, type: "request", id: 3, tool: "tab_open" }),
+    ).toBeNull();
   });
 });

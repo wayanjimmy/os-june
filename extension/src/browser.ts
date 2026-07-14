@@ -67,6 +67,7 @@ export class TaskTabRegistry {
   removeTab(sessionId: string, tabId: number): void {
     const session = this.session(sessionId);
     session.tabs.delete(tabId);
+    if (session.tabs.size === 0) session.groupId = undefined;
     if (session.activeTabId === tabId) session.activeTabId = session.tabs.keys().next().value;
   }
 
@@ -144,7 +145,7 @@ async function detach(tabId: number): Promise<void> {
 }
 
 async function closeTabs(tabIds: number[]): Promise<void> {
-  await Promise.all(tabIds.map(detach));
+  await detachTabs(tabIds);
   if (tabIds.length > 0) {
     try {
       await chrome.tabs.remove(tabIds);
@@ -152,6 +153,10 @@ async function closeTabs(tabIds: number[]): Promise<void> {
       // A tab can disappear between cleanup planning and removal.
     }
   }
+}
+
+async function detachTabs(tabIds: number[]): Promise<void> {
+  await Promise.all(tabIds.map(detach));
 }
 
 async function waitUntilReady(tabId: number): Promise<void> {
@@ -266,6 +271,14 @@ export class BrowserController {
   constructor() {
     debuggerApi().onEvent.addListener((source, method, params) => {
       if (
+        (method === "Page.frameNavigated" || method === "Page.navigatedWithinDocument") &&
+        source.tabId !== undefined
+      ) {
+        const owner = this.registry.find(source.tabId);
+        if (owner) this.registry.invalidate(owner.sessionId, source.tabId);
+        return;
+      }
+      if (
         method !== "Runtime.bindingCalled" ||
         params?.name !== MUTATION_BINDING ||
         source.tabId === undefined
@@ -283,7 +296,7 @@ export class BrowserController {
   async disconnect(): Promise<void> {
     const tabIds = this.registry.cleanupPlan();
     this.registry.clear();
-    await closeTabs(tabIds);
+    await detachTabs(tabIds);
   }
 
   async execute(
