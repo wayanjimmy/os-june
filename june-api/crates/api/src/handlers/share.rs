@@ -22,6 +22,7 @@ use june_services::{CreateShareInput, InviteInput, ShareService};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct InviteWire {
     email: String,
     envelope_b64: String,
@@ -29,6 +30,7 @@ pub(crate) struct InviteWire {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CreateShareRequest {
     kind: String,
     ciphertext_b64: String,
@@ -37,56 +39,62 @@ pub(crate) struct CreateShareRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CreatedInviteWire {
     invite_id: String,
     email: String,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CreateShareResponse {
     share_id: String,
     invites: Vec<CreatedInviteWire>,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ShareSummaryWire {
     share_id: String,
     kind: String,
-    created_at_unix: i64,
+    /// RFC 3339.
+    created_at: String,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ShareListResponse {
-    shares: Vec<ShareSummaryWire>,
-}
-
-#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ShareInviteWire {
     invite_id: String,
     email: String,
-    status: &'static str,
-    last_access_at_unix: Option<i64>,
+    /// `pending` | `accepted` | `revoked`.
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_access_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ShareDetailResponse {
     share_id: String,
     kind: String,
-    created_at_unix: i64,
+    created_at: String,
     invites: Vec<ShareInviteWire>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AddInvitesRequest {
     invites: Vec<InviteWire>,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AddInvitesResponse {
     invites: Vec<CreatedInviteWire>,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ShareViewResponse {
     kind: String,
     ciphertext_b64: String,
@@ -99,6 +107,7 @@ pub(crate) struct ShareViewResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DeletedResponse {
     deleted: bool,
 }
@@ -135,19 +144,19 @@ pub(crate) async fn create(
 pub(crate) async fn list(
     State(state): State<ApiState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<ShareListResponse>>, ApiError> {
+) -> Result<Json<ApiResponse<Vec<ShareSummaryWire>>>, ApiError> {
     let (service, user) = share_context(&state, &headers).await?;
     let shares = service.list(&user).await?;
-    Ok(Json(ApiResponse::ok(ShareListResponse {
-        shares: shares
+    Ok(Json(ApiResponse::ok(
+        shares
             .into_iter()
             .map(|share| ShareSummaryWire {
                 share_id: share.share_id,
                 kind: share.kind.as_str().to_string(),
-                created_at_unix: share.created_at_unix,
+                created_at: share.created_at,
             })
             .collect(),
-    })))
+    )))
 }
 
 pub(crate) async fn detail(
@@ -160,20 +169,20 @@ pub(crate) async fn detail(
     Ok(Json(ApiResponse::ok(ShareDetailResponse {
         share_id: share.share_id,
         kind: share.kind.as_str().to_string(),
-        created_at_unix: share.created_at_unix,
+        created_at: share.created_at,
         invites: invites
             .into_iter()
             .map(|invite| ShareInviteWire {
-                status: if invite.revoked_at_unix.is_some() {
+                state: if invite.revoked_at.is_some() {
                     "revoked"
-                } else if invite.accepted_at_unix.is_some() {
+                } else if invite.accepted_at.is_some() {
                     "accepted"
                 } else {
                     "pending"
                 },
                 invite_id: invite.invite_id,
                 email: invite.email,
-                last_access_at_unix: invite.last_access_at_unix,
+                last_access_at: invite.last_access_at,
             })
             .collect(),
     })))

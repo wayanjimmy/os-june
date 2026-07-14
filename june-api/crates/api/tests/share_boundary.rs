@@ -94,7 +94,7 @@ impl ShareStore for MemoryShareStore {
                 share_id: share_id.clone(),
                 owner_user_id: share.owner.clone(),
                 kind: share.kind,
-                created_at_unix: 0,
+                created_at: "2026-07-14T00:00:00Z".to_string(),
             })
             .collect())
     }
@@ -114,7 +114,7 @@ impl ShareStore for MemoryShareStore {
                 share_id: share_id.to_string(),
                 owner_user_id: share.owner.clone(),
                 kind: share.kind,
-                created_at_unix: 0,
+                created_at: "2026-07-14T00:00:00Z".to_string(),
             },
             share
                 .invites
@@ -123,9 +123,9 @@ impl ShareStore for MemoryShareStore {
                     invite_id: invite.invite_id.clone(),
                     email: invite.email.clone(),
                     recipient_user_id: invite.recipient_user_id.clone(),
-                    accepted_at_unix: invite.accepted.then_some(1),
-                    revoked_at_unix: invite.revoked.then_some(1),
-                    last_access_at_unix: invite.accepted.then_some(1),
+                    accepted_at: invite.accepted.then(|| "2026-07-14T00:00:01Z".to_string()),
+                    revoked_at: invite.revoked.then(|| "2026-07-14T00:00:02Z".to_string()),
+                    last_access_at: invite.accepted.then(|| "2026-07-14T00:00:01Z".to_string()),
                 })
                 .collect(),
         ))
@@ -291,8 +291,8 @@ fn authed(request: axum::http::request::Builder, token: &str) -> axum::http::req
 fn create_request(token: &str, invites: &[Value]) -> Request<Body> {
     let body = json!({
         "kind": "note",
-        "ciphertext_b64": BASE64.encode(b"opaque-ciphertext"),
-        "iv_b64": BASE64.encode([7u8; 12]),
+        "ciphertextB64": BASE64.encode(b"opaque-ciphertext"),
+        "ivB64": BASE64.encode([7u8; 12]),
         "invites": invites,
     });
     authed(Request::builder().method("POST").uri("/v1/shares"), token)
@@ -304,8 +304,8 @@ fn create_request(token: &str, invites: &[Value]) -> Request<Body> {
 fn invite_wire(email: &str) -> Value {
     json!({
         "email": email,
-        "envelope_b64": BASE64.encode([1u8; 48]),
-        "envelope_iv_b64": BASE64.encode([2u8; 12]),
+        "envelopeB64": BASE64.encode([1u8; 48]),
+        "envelopeIvB64": BASE64.encode([2u8; 12]),
     })
 }
 
@@ -330,7 +330,7 @@ async fn invited_recipient_views_exact_ciphertext_and_uninvited_cannot_be_told_f
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let share_id = body["data"]["share_id"]
+    let share_id = body["data"]["shareId"]
         .as_str()
         .expect("share id")
         .to_string();
@@ -352,10 +352,10 @@ async fn invited_recipient_views_exact_ciphertext_and_uninvited_cannot_be_told_f
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body["data"]["ciphertext_b64"],
+        body["data"]["ciphertextB64"],
         BASE64.encode(b"opaque-ciphertext")
     );
-    assert_eq!(body["data"]["envelope_b64"], BASE64.encode([1u8; 48]));
+    assert_eq!(body["data"]["envelopeB64"], BASE64.encode([1u8; 48]));
 
     // Uninvited authenticated user vs a share that does not exist: identical
     // status AND identical body. Nothing distinguishes the two.
@@ -396,11 +396,11 @@ async fn owner_sees_invite_lifecycle_and_revocation_cuts_access() {
         create_request(OWNER, &[invite_wire("friend@example.com")]),
     )
     .await;
-    let share_id = body["data"]["share_id"]
+    let share_id = body["data"]["shareId"]
         .as_str()
         .expect("share id")
         .to_string();
-    let invite_id = body["data"]["invites"][0]["invite_id"]
+    let invite_id = body["data"]["invites"][0]["inviteId"]
         .as_str()
         .expect("invite id")
         .to_string();
@@ -418,7 +418,7 @@ async fn owner_sees_invite_lifecycle_and_revocation_cuts_access() {
         .expect("request builds"),
     )
     .await;
-    assert_eq!(body["data"]["invites"][0]["status"], "pending");
+    assert_eq!(body["data"]["invites"][0]["state"], "pending");
 
     // Recipient views once: accepted.
     let (status, _) = call(
@@ -446,7 +446,7 @@ async fn owner_sees_invite_lifecycle_and_revocation_cuts_access() {
         .expect("request builds"),
     )
     .await;
-    assert_eq!(body["data"]["invites"][0]["status"], "accepted");
+    assert_eq!(body["data"]["invites"][0]["state"], "accepted");
 
     // Revoke: recipient's next fetch is the standard 404.
     let (status, _) = call(
@@ -486,7 +486,7 @@ async fn non_owner_cannot_inspect_or_mutate_a_share() {
         create_request(OWNER, &[invite_wire("friend@example.com")]),
     )
     .await;
-    let share_id = body["data"]["share_id"]
+    let share_id = body["data"]["shareId"]
         .as_str()
         .expect("share id")
         .to_string();

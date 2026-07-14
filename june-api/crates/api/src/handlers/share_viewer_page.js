@@ -279,7 +279,7 @@
     }
     var body = await response.json().catch(function () { return null; });
     var data = body && body.success && body.data;
-    if (!data || !data.envelope_b64) {
+    if (!data || !data.envelopeB64) {
       // Owners land here too (no envelope): the app is their viewer.
       showStatus(NOT_AVAILABLE, true);
       return;
@@ -287,13 +287,13 @@
     try {
       var contentKey = await aesGcmDecrypt(
         inviteKey,
-        b64Decode(data.envelope_iv_b64),
-        b64Decode(data.envelope_b64)
+        b64Decode(data.envelopeIvB64),
+        b64Decode(data.envelopeB64)
       );
       var plaintext = await aesGcmDecrypt(
         contentKey,
-        b64Decode(data.iv_b64),
-        b64Decode(data.ciphertext_b64)
+        b64Decode(data.ivB64),
+        b64Decode(data.ciphertextB64)
       );
       var payload = JSON.parse(new TextDecoder().decode(plaintext));
     } catch (error) {

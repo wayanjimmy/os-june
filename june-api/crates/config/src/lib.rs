@@ -370,6 +370,22 @@ pub struct LocalDevConfig {
     pub bearer_token: String,
     #[serde(default = "default_local_dev_user_id")]
     pub user_id: String,
+    /// Second local identity so recipient-side share flows (JUN-308) can be
+    /// exercised without real OS Accounts. Empty disables the second token.
+    #[serde(default)]
+    pub viewer_bearer_token: String,
+    #[serde(default = "default_local_dev_viewer_user_id")]
+    pub viewer_user_id: String,
+    #[serde(default = "default_local_dev_viewer_email")]
+    pub viewer_email: String,
+}
+
+fn default_local_dev_viewer_user_id() -> String {
+    "usr_local_dev_viewer".to_string()
+}
+
+fn default_local_dev_viewer_email() -> String {
+    "viewer@localdev.june".to_string()
 }
 
 fn default_local_dev_bearer_token() -> String {
@@ -386,6 +402,9 @@ impl Default for LocalDevConfig {
             enabled: false,
             bearer_token: default_local_dev_bearer_token(),
             user_id: default_local_dev_user_id(),
+            viewer_bearer_token: String::new(),
+            viewer_user_id: default_local_dev_viewer_user_id(),
+            viewer_email: default_local_dev_viewer_email(),
         }
     }
 }
@@ -404,6 +423,16 @@ impl Debug for LocalDevConfig {
                 },
             )
             .field("user_id", &self.user_id)
+            .field(
+                "viewer_bearer_token",
+                if self.viewer_bearer_token.is_empty() {
+                    &"<unset>"
+                } else {
+                    &REDACTED
+                },
+            )
+            .field("viewer_user_id", &self.viewer_user_id)
+            .field("viewer_email", &self.viewer_email)
             .finish()
     }
 }

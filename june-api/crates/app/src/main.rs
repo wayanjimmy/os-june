@@ -299,12 +299,19 @@ fn build_router(
         Arc::new(june_services::ShareService::new(
             june_services::ShareServiceDeps {
                 store,
-                identity: Arc::new(
-                    june_providers::viewer_identity::OsAccountsViewerIdentity::new(
-                        clients.default.clone(),
-                        &config.os_accounts.api_url,
-                    ),
-                ),
+                identity: if config.local_dev.enabled {
+                    Arc::new(june_providers::local_dev::LocalDevViewerIdentity::new(
+                        config.local_dev.viewer_bearer_token.clone(),
+                        config.local_dev.viewer_email.clone(),
+                    )) as Arc<dyn june_domain::ViewerIdentity>
+                } else {
+                    Arc::new(
+                        june_providers::viewer_identity::OsAccountsViewerIdentity::new(
+                            clients.default.clone(),
+                            &config.os_accounts.api_url,
+                        ),
+                    )
+                },
                 max_ciphertext_bytes: config.share.max_ciphertext_bytes,
             },
         ))
@@ -414,10 +421,16 @@ fn build_os_accounts_client(
 
 fn build_token_verifier(config: &AppConfig) -> Arc<dyn june_domain::TokenVerifier> {
     if config.local_dev.enabled {
-        Arc::new(LocalDevTokenVerifier::new(
-            config.local_dev.bearer_token.clone(),
-            config.local_dev.user_id.clone(),
-        ))
+        Arc::new(
+            LocalDevTokenVerifier::new(
+                config.local_dev.bearer_token.clone(),
+                config.local_dev.user_id.clone(),
+            )
+            .with_viewer(
+                config.local_dev.viewer_bearer_token.clone(),
+                config.local_dev.viewer_user_id.clone(),
+            ),
+        )
     } else {
         Arc::new(JwksTokenVerifier::from_config(
             jwks_client(),

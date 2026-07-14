@@ -689,7 +689,8 @@ pub struct ShareRecord {
     pub share_id: String,
     pub owner_user_id: String,
     pub kind: ShareKind,
-    pub created_at_unix: i64,
+    /// RFC 3339.
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -697,9 +698,10 @@ pub struct ShareInviteRecord {
     pub invite_id: String,
     pub email: String,
     pub recipient_user_id: Option<String>,
-    pub accepted_at_unix: Option<i64>,
-    pub revoked_at_unix: Option<i64>,
-    pub last_access_at_unix: Option<i64>,
+    /// RFC 3339 when set.
+    pub accepted_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub last_access_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -89,12 +89,13 @@ MVP payload by construction.
 
 ## Wire contract (june-api, all under OS Accounts Bearer auth)
 
+- Wire casing is camelCase (house convention); timestamps are RFC 3339.
 - `POST /v1/shares` - owner creates a share:
-  `{ kind, ciphertext_b64, iv_b64, invites: [{ email, envelope_b64, envelope_iv_b64 }] }`
-  -> `{ share_id, invites: [{ invite_id, email }] }`. 10 MB ciphertext cap.
-- `GET /v1/shares` - owner lists their shares (ids, kind, invite states).
+  `{ kind, ciphertextB64, ivB64, invites: [{ email, envelopeB64, envelopeIvB64 }] }`
+  -> `{ shareId, invites: [{ inviteId, email }] }`. 10 MB ciphertext cap.
+- `GET /v1/shares` - owner lists their shares (array of `{ shareId, kind, createdAt }`).
 - `GET /v1/shares/{share_id}` - owner detail: invites with
-  pending/accepted/revoked state and last access time.
+  `state` (`pending` | `accepted` | `revoked`) and `lastAccessAt`.
 - `POST /v1/shares/{share_id}/invites` - owner adds invites (same shape as
   create) -> new invite ids.
 - `DELETE /v1/shares/{share_id}/invites/{invite_id}` - owner revokes.
@@ -103,7 +104,8 @@ MVP payload by construction.
   caller's verified emails via OS Accounts `/me` (the access JWT carries
   only `sub`), matches non-revoked invites, binds `recipient_user_id` on
   first access, records an access event, and returns
-  `{ kind, ciphertext_b64, iv_b64, envelope_b64, envelope_iv_b64, owner_display }`.
+  `{ kind, ciphertextB64, ivB64, envelopeB64, envelopeIvB64 }` (the owner's
+  display name travels inside the encrypted payload).
   Owners can also fetch their own shares here.
 - `GET /s/{share_id}` - the viewer HTML shell (no auth, no content, no
   share-existence signal; the same page is served for any well-formed id).

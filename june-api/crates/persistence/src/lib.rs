@@ -54,8 +54,10 @@ fn query_error(error: sqlx::Error) -> ShareStoreError {
     }
 }
 
-fn unix(ts: DateTime<Utc>) -> i64 {
-    ts.timestamp()
+fn rfc3339(ts: DateTime<Utc>) -> String {
+    // Whole-second RFC 3339 with a Z suffix; sub-second precision is noise
+    // for share metadata.
+    ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 #[async_trait]
@@ -331,7 +333,7 @@ fn share_record(row: &sqlx::postgres::PgRow) -> Result<ShareRecord, ShareStoreEr
         share_id: row.try_get("share_id").map_err(query_error)?,
         owner_user_id: row.try_get("owner_user_id").map_err(query_error)?,
         kind: parse_kind(row)?,
-        created_at_unix: unix(row.try_get("created_at").map_err(query_error)?),
+        created_at: rfc3339(row.try_get("created_at").map_err(query_error)?),
     })
 }
 
@@ -350,8 +352,8 @@ fn invite_record(row: &sqlx::postgres::PgRow) -> Result<ShareInviteRecord, Share
         invite_id: row.try_get("invite_id").map_err(query_error)?,
         email: row.try_get("email").map_err(query_error)?,
         recipient_user_id: row.try_get("recipient_user_id").map_err(query_error)?,
-        accepted_at_unix: accepted.map(unix),
-        revoked_at_unix: revoked.map(unix),
-        last_access_at_unix: last_access.map(unix),
+        accepted_at: accepted.map(rfc3339),
+        revoked_at: revoked.map(rfc3339),
+        last_access_at: last_access.map(rfc3339),
     })
 }
