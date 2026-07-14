@@ -2395,6 +2395,10 @@ async fn transcribe_recording_ready(app: AppHandle, recording: RecordingReadyInf
         .as_deref()
         .map(|bundle_id| is_email_app_bundle(bundle_id).then(|| APP_CONTEXT_EMAIL.to_string()))
         .unwrap_or_else(frontmost_app_context);
+    // Pin the owning profile now, like the paste target above: transcription
+    // can take seconds, and a profile switch mid-flight must not relabel this
+    // dictation's history row to the new profile.
+    let history_profile = crate::commands::active_profile(&app);
     // Backstop for the toggle-start path (where the start-time gate in
     // send_dictation_command can't tell start from stop) and for tokens that
     // expired between start and finish.
@@ -2465,7 +2469,7 @@ async fn transcribe_recording_ready(app: AppHandle, recording: RecordingReadyInf
             app.clone(),
             crate::p3a::questions::Question::DictationSessions,
         );
-        spawn_dictation_history_write(app.clone(), transcript.clone());
+        spawn_dictation_history_write(app.clone(), transcript.clone(), history_profile.clone());
     }
     if let Some(event) = outcome.event {
         emit_dictation_event_value(&app, event);
@@ -3042,9 +3046,13 @@ fn looks_like_report_summary_response(normalized: &str) -> bool {
                 || normalized.contains("transcription pipeline")))
 }
 
-fn spawn_dictation_history_write(app: AppHandle, transcript: TranscriptionProviderResult) {
+fn spawn_dictation_history_write(
+    app: AppHandle,
+    transcript: TranscriptionProviderResult,
+    profile: String,
+) {
     tauri::async_runtime::spawn(async move {
-        store_dictation_history_item(&app, &transcript).await;
+        store_dictation_history_item(&app, &transcript, &profile).await;
     });
 }
 
@@ -3548,13 +3556,16 @@ fn skip_word_separators(value: &str) -> &str {
     value.trim_start_matches(|ch: char| ch.is_ascii_whitespace() || ch.is_ascii_punctuation())
 }
 
-async fn store_dictation_history_item(app: &AppHandle, transcript: &TranscriptionProviderResult) {
+async fn store_dictation_history_item(
+    app: &AppHandle,
+    transcript: &TranscriptionProviderResult,
+    profile: &str,
+) {
     match crate::commands::repositories(app).await {
         Ok(repos) => {
-            let profile = crate::commands::active_profile(app);
             if let Err(error) = repos
                 .create_dictation_history_item(
-                    &profile,
+                    profile,
                     &transcript.text,
                     transcript.language.clone(),
                     &transcript.provider,

@@ -2,8 +2,10 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  deleteHermesSession: vi.fn(),
   deleteProfileData: vi.fn(),
   hermesBridgeStatus: vi.fn(),
+  listSessionProfiles: vi.fn(),
   moveProfileDataToDefault: vi.fn(),
   profileDataSummary: vi.fn(),
 }));
@@ -11,8 +13,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../lib/tauri", () => ({
   deleteProfileData: mocks.deleteProfileData,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
+  listSessionProfiles: mocks.listSessionProfiles,
   moveProfileDataToDefault: mocks.moveProfileDataToDefault,
   profileDataSummary: mocks.profileDataSummary,
+}));
+
+vi.mock("../lib/hermes-adapter", () => ({
+  deleteHermesSession: mocks.deleteHermesSession,
 }));
 
 import {
@@ -116,6 +123,8 @@ describe("profile manager - hook flows", () => {
     mocks.profileDataSummary.mockResolvedValue(EMPTY_SUMMARY);
     mocks.moveProfileDataToDefault.mockResolvedValue(undefined);
     mocks.deleteProfileData.mockResolvedValue(undefined);
+    mocks.listSessionProfiles.mockResolvedValue([]);
+    mocks.deleteHermesSession.mockResolvedValue(undefined);
   });
 
   it("loads the list and active profile from separate endpoints", async () => {
@@ -269,8 +278,16 @@ describe("profile manager - hook flows", () => {
       notes: 0,
       dictation: 1,
       folders: 0,
-      sessions: 0,
+      sessions: 2,
     });
+    // Hermes owns the chat transcripts: delete-permanently must remove the
+    // profile's sessions themselves, not just June's mapping rows — an
+    // unmapped session would resurface under default.
+    mocks.listSessionProfiles.mockResolvedValue([
+      { sessionId: "chat-1", profile: "research" },
+      { sessionId: "chat-2", profile: "research" },
+      { sessionId: "chat-3", profile: "other" },
+    ]);
     const harness = makeAdminHarness({
       profiles: [
         { name: "default", active: true },
@@ -285,6 +302,9 @@ describe("profile manager - hook flows", () => {
     const ok = await controller.confirmRemoval("delete");
 
     expect(ok).toBe(true);
+    expect(mocks.deleteHermesSession).toHaveBeenCalledTimes(2);
+    expect(mocks.deleteHermesSession).toHaveBeenCalledWith("chat-1");
+    expect(mocks.deleteHermesSession).toHaveBeenCalledWith("chat-2");
     expect(mocks.deleteProfileData).toHaveBeenCalledWith("research");
     expect(mocks.moveProfileDataToDefault).not.toHaveBeenCalled();
     expect(
@@ -293,6 +313,41 @@ describe("profile manager - hook flows", () => {
       ),
     ).toBe(true);
     expect(controller.getSnapshot().pendingRemoval).toBeNull();
+    controller.dispose();
+  });
+
+  it("aborts permanent removal when a Hermes chat delete fails", async () => {
+    mocks.profileDataSummary.mockResolvedValue({
+      notes: 0,
+      dictation: 0,
+      folders: 0,
+      sessions: 1,
+    });
+    mocks.listSessionProfiles.mockResolvedValue([{ sessionId: "chat-1", profile: "research" }]);
+    mocks.deleteHermesSession.mockRejectedValue(new Error("session delete failed"));
+    const harness = makeAdminHarness({
+      profiles: [
+        { name: "default", active: true },
+        { name: "research", active: false },
+      ],
+      activeProfile: "default",
+    });
+    const controller = new ProfileManagerController(harness as ProfileManagerEngine);
+    await controller.load();
+    await controller.beginRemove("research");
+
+    const ok = await controller.confirmRemoval("delete");
+
+    // The mapping rows and profile survive so a retry can converge — the
+    // pinned runtime treats deleting an already-absent session as success.
+    expect(ok).toBe(false);
+    expect(mocks.deleteProfileData).not.toHaveBeenCalled();
+    expect(
+      harness.server.requestLog.some(
+        (entry) => entry.method === "DELETE" && entry.path === "/api/profiles/research",
+      ),
+    ).toBe(false);
+    expect(controller.getSnapshot().error).toContain("session delete failed");
     controller.dispose();
   });
 

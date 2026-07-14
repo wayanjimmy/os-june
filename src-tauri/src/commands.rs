@@ -328,10 +328,23 @@ pub async fn move_profile_data_to_default(app: AppHandle, profile: String) -> Re
 
 #[tauri::command]
 pub async fn delete_profile_data(app: AppHandle, profile: String) -> Result<(), AppError> {
-    Ok(repositories(&app)
-        .await?
-        .delete_profile_data(&profile)
-        .await?)
+    // "Delete permanently" is a privacy promise: recordings on disk go with
+    // the rows, mirroring delete_note / delete_notes.
+    let paths = app_paths(&app)?;
+    let repos = repositories(&app).await?;
+    let audio_paths = repos.audio_artifact_paths_for_profile(&profile).await?;
+    repos.delete_profile_data(&profile).await?;
+    for path in audio_paths {
+        if path.trim().is_empty() {
+            continue;
+        }
+        if let Err(error) = paths.remove_recording_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("failed to remove deleted profile audio {path}: {error}");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

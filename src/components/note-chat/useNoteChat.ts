@@ -510,7 +510,15 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
       try {
         const gateway = await connectGateway(true);
         if (!gateway) throw new Error("Hermes gateway is not connected.");
-        if (!capturedModelSelection && defaultModelSelectionSnapshot) {
+        // Read after connectGateway so its refreshActiveHermesProfile has
+        // reconciled the sticky pointer.
+        const activeProfile = getActiveHermesProfileName();
+        // The global default is June's model selection, not a per-chat pick.
+        // Under a named profile it must not ride session.create as a
+        // per-session override - that would silently bypass the profile's own
+        // text model. An explicit note-chat pick still applies: the user chose
+        // it for this chat.
+        if (!capturedModelSelection && defaultModelSelectionSnapshot && activeProfile === "default") {
           capturedModelSelection = await defaultModelSelectionSnapshot;
           capturedHermesModelId = hermesModelIdForSelection(capturedModelSelection);
         }
@@ -529,7 +537,6 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
             }
           }
         }
-        const activeProfile = getActiveHermesProfileName();
         if (!activeStoredSessionId) {
           const created = await gateway.request<HermesRuntimeSessionResponse>("session.create", {
             title: noteTitle.trim() || "Note chat",

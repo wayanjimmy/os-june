@@ -2118,6 +2118,10 @@ export function App() {
         setOriginFolderId(undefined);
         setOriginAllNotes(false);
         setFolderReturnTarget(undefined);
+        // The open chat came from the old profile's list; keeping it selected
+        // would reopen it (workspace re-applies initialSessionId on mount).
+        setActiveAgentSession(undefined);
+        setAgentOrigin(undefined);
         const nextNoteId = recordingNoteIdRef.current ?? notesResponse.items[0]?.id;
         if (nextNoteId) {
           const note = await getNote(nextNoteId);
@@ -2135,7 +2139,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeHermesProfileName, appBlocked, bootstrapped]);
+  }, [activeHermesProfileName, appBlocked, bootstrapped, setActiveAgentSession]);
 
   // Probe with "microphonePlusSystem" on mount so sourceReadiness always
   // has the system source. Onboarding's permissions screen normally fires

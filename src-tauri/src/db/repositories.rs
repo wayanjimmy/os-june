@@ -814,12 +814,22 @@ impl Repositories {
         .await?;
 
         if let Some(folder_id) = folder_id {
-            query("INSERT OR IGNORE INTO note_folders (note_id, folder_id, assigned_at) VALUES (?, ?, ?)")
-                .bind(&id)
-                .bind(folder_id)
-                .bind(&now)
-                .execute(&mut *tx)
-                .await?;
+            // A stale surface (e.g. a project tab saved under another profile)
+            // can still hand over its folder id after a switch. Folders are
+            // profile-scoped, so only file the note when the folder belongs to
+            // the same profile; otherwise the note is created unfiled rather
+            // than leaking a cross-profile association.
+            query(
+                "INSERT OR IGNORE INTO note_folders (note_id, folder_id, assigned_at)
+                 SELECT ?, id, ? FROM folders
+                 WHERE id = ? AND profile = ? AND deleted_at IS NULL",
+            )
+            .bind(&id)
+            .bind(&now)
+            .bind(folder_id)
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?;
         }
 
         tx.commit().await?;
@@ -1716,6 +1726,23 @@ impl Repositories {
             .bind(note_id)
             .fetch_all(&self.pool)
             .await?;
+        Ok(rows.into_iter().map(|row| row.get("path")).collect())
+    }
+
+    /// Recording files owned by a profile's notes, for the delete-permanently
+    /// path (delete_profile_data removes the rows; the caller removes these).
+    pub async fn audio_artifact_paths_for_profile(
+        &self,
+        profile: &str,
+    ) -> Result<Vec<String>, sqlx::error::Error> {
+        let rows = query(
+            "SELECT a.path FROM audio_artifacts a
+             JOIN notes n ON n.id = a.note_id
+             WHERE n.profile = ?",
+        )
+        .bind(profile)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(|row| row.get("path")).collect())
     }
 

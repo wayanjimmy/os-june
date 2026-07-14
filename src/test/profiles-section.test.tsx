@@ -18,9 +18,11 @@ import { ProfilesSurfaceView } from "../components/settings/ProfileBuilderSectio
 import { makeAdminHarness } from "./fixtures/hermes-admin-harness";
 
 const mocks = vi.hoisted(() => ({
+  deleteHermesSession: vi.fn(),
   deleteProfileData: vi.fn(),
   deleteProfileModelOverrides: vi.fn(),
   hermesBridgeStatus: vi.fn(),
+  listSessionProfiles: vi.fn(),
   listVeniceModels: vi.fn(),
   moveProfileDataToDefault: vi.fn(),
   profileDataSummary: vi.fn(),
@@ -32,11 +34,16 @@ vi.mock("../lib/tauri", () => ({
   deleteProfileData: mocks.deleteProfileData,
   deleteProfileModelOverrides: mocks.deleteProfileModelOverrides,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
+  listSessionProfiles: mocks.listSessionProfiles,
   listVeniceModels: mocks.listVeniceModels,
   moveProfileDataToDefault: mocks.moveProfileDataToDefault,
   profileDataSummary: mocks.profileDataSummary,
   providerModelSettings: mocks.providerModelSettings,
   setProfileModelOverrides: mocks.setProfileModelOverrides,
+}));
+
+vi.mock("../lib/hermes-adapter", () => ({
+  deleteHermesSession: mocks.deleteHermesSession,
 }));
 
 const EMPTY_SUMMARY = { notes: 0, dictation: 0, folders: 0, sessions: 0 };
@@ -166,6 +173,8 @@ describe("profiles settings surface", () => {
     mocks.moveProfileDataToDefault.mockResolvedValue(undefined);
     mocks.deleteProfileData.mockResolvedValue(undefined);
     mocks.deleteProfileModelOverrides.mockResolvedValue(undefined);
+    mocks.listSessionProfiles.mockResolvedValue([]);
+    mocks.deleteHermesSession.mockResolvedValue(undefined);
   });
 
   it("renders profiles with the active badge from activeName", async () => {

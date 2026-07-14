@@ -88,6 +88,7 @@ import { Spinner } from "../ui/Spinner";
 import { Switch } from "../ui/Switch";
 import {
   assignSessionToProfile,
+  listSessionProfiles,
   cancelAgentTask,
   dictationHelperCommand,
   explainAgentApproval,
@@ -8091,6 +8092,21 @@ export function AgentWorkspace({
         keepMessageCount: branchSeedMessages.length,
         ...(branchRequestMessageId ? { throughMessageId: branchRequestMessageId } : {}),
       });
+      // A branch belongs with its source conversation: copy the source's
+      // profile mapping so the fork doesn't fall to default in the
+      // profile-scoped chat list (ADR 0020). Best-effort — a missed stamp
+      // surfaces the branch under default, it never loses the conversation.
+      try {
+        const assignments = await listSessionProfiles();
+        const sourceProfile = assignments.find(
+          (assignment) => assignment.sessionId === sessionId,
+        )?.profile;
+        if (sourceProfile && sourceProfile !== "default") {
+          await assignSessionToProfile(result.sessionId, sourceProfile);
+        }
+      } catch {
+        // Unmapped branches still appear under default; nothing is lost.
+      }
       try {
         const resumedBranch = await gateway.request<HermesRuntimeSessionResponse>(
           "session.resume",

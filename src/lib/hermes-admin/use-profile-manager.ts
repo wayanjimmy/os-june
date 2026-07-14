@@ -18,9 +18,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { setActiveHermesProfileName } from "../active-hermes-profile";
 import { messageFromError } from "../errors";
+import { deleteHermesSession } from "../hermes-adapter";
 import {
   deleteProfileData,
   hermesBridgeStatus,
+  listSessionProfiles,
   moveProfileDataToDefault,
   profileDataSummary,
   type HermesBridgeStatus,
@@ -279,6 +281,16 @@ export class ProfileManagerController {
       if (disposition === "move") {
         await moveProfileDataToDefault(name);
       } else {
+        // Hermes owns the chat transcripts; wiping only June's mapping rows
+        // would surface the dead profile's chats under default (unmapped
+        // resolves to default). Delete the sessions themselves first — the
+        // pinned runtime treats deleting an absent session as success, so a
+        // retry after a partial failure converges instead of wedging.
+        const assignments = await listSessionProfiles();
+        for (const assignment of assignments) {
+          if (assignment.profile !== name) continue;
+          await deleteHermesSession(assignment.sessionId);
+        }
         await deleteProfileData(name);
       }
     } catch (error) {
