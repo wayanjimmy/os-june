@@ -1997,6 +1997,76 @@ export type ConnectorTrigger = {
   config: Record<string, unknown>;
 };
 
+// ---------------------------------------------------------------------------
+// Obsidian local vault plugin
+// ---------------------------------------------------------------------------
+
+export type ObsidianVaultHealth =
+  | "no_vault_selected"
+  | "indexing"
+  | "healthy"
+  | "missing"
+  | "unreadable"
+  | "permission_denied"
+  | "root_changed"
+  | "partial_index"
+  | "cloud_files_unavailable"
+  | "watcher_degraded"
+  | "rebuilding"
+  | "write_conflict_detected";
+
+export type ObsidianVaultGrant = {
+  vaultId: string;
+  displayName: string;
+  displayPath: string;
+  writeEnabled: boolean;
+  status: ObsidianVaultHealth;
+  createdAt: string;
+  updatedAt: string;
+  lastCheckedAt?: string;
+  lastScanStartedAt?: string;
+  lastScanCompletedAt?: string;
+  lastSuccessfulScanAt?: string;
+  indexVersion: number;
+  noteCount: number;
+  tagCount: number;
+  unresolvedLinkCount: number;
+  ambiguousLinkCount: number;
+  placeholderFileCount: number;
+  skippedFileCount: number;
+  lastErrorCode?: string;
+};
+
+export type ObsidianVaultStatus = {
+  grant?: ObsidianVaultGrant;
+};
+
+/** Tauri event: the selected Obsidian vault grant or write mode changed. */
+export const OBSIDIAN_VAULT_CHANGED_EVENT = "june://obsidian-vault-changed";
+
+export async function obsidianVaultStatus() {
+  return invoke<ObsidianVaultStatus>("obsidian_vault_status");
+}
+
+export async function obsidianVaultConfirm(rootPath: string) {
+  return invoke<ObsidianVaultGrant>("obsidian_vault_confirm", {
+    request: { rootPath },
+  });
+}
+
+export async function obsidianVaultRemove(vaultId: string) {
+  return invoke<void>("obsidian_vault_remove", { vaultId });
+}
+
+export async function obsidianVaultSetWriteMode(input: {
+  vaultId: string;
+  writeEnabled: boolean;
+}) {
+  return invoke<ObsidianVaultGrant>("obsidian_vault_set_write_mode", {
+    request: input,
+  });
+}
+
 /** One connector action call parked in the Rust proxy waiting for the user.
  * `argsPreview` is already redacted on the Rust side. */
 export type PendingConnectorApproval = {

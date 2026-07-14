@@ -107,6 +107,7 @@ import { DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { ConnectorsSection } from "./ConnectorsSection";
 import { ExternalDirsSection } from "./ExternalDirsSection";
+import { ObsidianSection } from "./ObsidianSection";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
 import { SkillDetailSection } from "./SkillDetailSection";
 import { SkillReviewSection } from "./SkillReviewSection";
@@ -282,6 +283,7 @@ export type SettingsTab =
   | "models"
   | "agent"
   | "connectors"
+  | "obsidian"
   | "skills"
   | "external-dirs"
   | "skill-review"
@@ -308,6 +310,7 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "models", label: "Models" },
   { id: "agent", label: "Agent" },
   { id: "connectors", label: "Connectors" },
+  { id: "obsidian", label: "Obsidian" },
   { id: "skills", label: "Installed skills" },
   { id: "external-dirs", label: "External skill directories" },
   { id: "skill-review", label: "Pending skill changes" },
@@ -2224,6 +2227,7 @@ export function AppSettings({
         ) : null}
 
         {activeTab === "connectors" ? <ConnectorsSection /> : null}
+        {activeTab === "obsidian" ? <ObsidianSection /> : null}
 
         {activeTab === "skills" ? <InstalledSkillsSection onOpenSkill={setOpenSkill} /> : null}
         {activeTab === "external-dirs" ? <ExternalDirsSection /> : null}
