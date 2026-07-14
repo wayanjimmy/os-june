@@ -25,6 +25,9 @@ PROTOCOL_VERSION = "2025-03-26"
 SERVER_INFO = {"name": "june-context", "version": "0.3.0"}
 MAX_LIMIT = 20
 DEFAULT_LIMIT = 8
+# Keep in sync with MEMORY_CONTENT_MAX_CHARS in commands.rs — the proxy
+# enforces it; this only shapes the advertised tool schema.
+MEMORY_CONTENT_MAX_CHARS = 4_000
 SNIPPET_CHARS = 900
 FULL_TEXT_CHARS = 60_000
 SQLITE_BUSY_TIMEOUT_MS = 5_000

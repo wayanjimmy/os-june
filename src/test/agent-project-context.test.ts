@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   prepareProjectPrompt,
+  ProjectContextSignatureStore,
   stripProjectContext,
   type AgentProjectContext,
 } from "../lib/agent-project-context";
@@ -126,6 +127,40 @@ describe("agent project context", () => {
     const refiled = prepareProjectPrompt("Back", project, still.contextSignature);
     expect(refiled.injected).toBe(true);
     expect(refiled.text).toContain("project_id: project-1");
+  });
+
+  describe("signature store persistence", () => {
+    const KEY = "test.project-context.signatures";
+    beforeEach(() => window.localStorage.removeItem(KEY));
+
+    it("survives a reload so leaving a project still announces itself", () => {
+      const first = new ProjectContextSignatureStore(KEY);
+      const filed = prepareProjectPrompt("First", project, undefined);
+      first.set("session-1", filed.contextSignature);
+
+      // Simulated app restart: a fresh store hydrates from storage, so the
+      // move out of the project still delivers the clearing block.
+      const reloaded = new ProjectContextSignatureStore(KEY);
+      const cleared = prepareProjectPrompt("After reload", undefined, reloaded.get("session-1"));
+      expect(cleared.injected).toBe(true);
+      expect(cleared.text).toContain("no longer filed in a project");
+    });
+
+    it("starts fresh from corrupt storage and prunes oldest entries", () => {
+      window.localStorage.setItem(KEY, "{not json");
+      const store = new ProjectContextSignatureStore(KEY);
+      expect(store.get("anything")).toBeUndefined();
+      for (let i = 0; i < 505; i += 1) store.set(`session-${i}`, `sig-${i}`);
+      expect(store.get("session-0")).toBeUndefined();
+      expect(store.get("session-504")).toBe("sig-504");
+    });
+
+    it("deletes entries durably (compaction path)", () => {
+      const store = new ProjectContextSignatureStore(KEY);
+      store.set("session-1", "sig");
+      store.delete("session-1");
+      expect(new ProjectContextSignatureStore(KEY).get("session-1")).toBeUndefined();
+    });
   });
 
   it("keeps multi-line instructions intact through strip", () => {

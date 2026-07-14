@@ -11088,6 +11088,43 @@ async fn wait_for_hermes(base_url: &str, token: &str) -> Result<(), AppError> {
 mod tests {
     use super::*;
 
+    // The bundled MCP scripts are written verbatim into the Hermes home and
+    // evaluated at import time by the runtime venv. A NameError in module
+    // scope (e.g. a tool schema referencing an undefined constant) silently
+    // kills the whole server for every session, and no other gate executes
+    // the scripts — so import each one here. Regression guard: PR #746's
+    // june_context memory tool schema referenced a constant the write-path
+    // rework had removed.
+    #[test]
+    fn bundled_mcp_scripts_import_cleanly() {
+        for (name, script) in [
+            ("june_context_mcp.py", JUNE_CONTEXT_MCP_SCRIPT),
+            ("june_web_mcp.py", JUNE_WEB_MCP_SCRIPT),
+            ("june_image_mcp.py", JUNE_IMAGE_MCP_SCRIPT),
+            ("june_video_mcp.py", JUNE_VIDEO_MCP_SCRIPT),
+            ("june_recorder_mcp.py", JUNE_RECORDER_MCP_SCRIPT),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(name);
+            std::fs::write(&path, script).expect("write script");
+            // Import the module without running main(): runpy would execute
+            // argv handling; importlib exercises exactly the module scope.
+            let output = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(format!(
+                    "import importlib.util; spec = importlib.util.spec_from_file_location('m', r'{}'); importlib.util.module_from_spec(spec); spec.loader.exec_module(importlib.util.module_from_spec(spec))",
+                    path.display()
+                ))
+                .output()
+                .expect("run python3");
+            assert!(
+                output.status.success(),
+                "{name} failed to import:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn ensure_video_defaults_injects_missing_knobs_under_the_keys_june_api_reads() {
         let mut body = serde_json::json!({ "prompt": "a calm lake" });

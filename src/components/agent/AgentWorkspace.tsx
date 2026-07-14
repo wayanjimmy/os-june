@@ -367,6 +367,7 @@ import {
 import { toolActivitySentence } from "../../lib/agent-tool-labels";
 import {
   prepareProjectPrompt,
+  ProjectContextSignatureStore,
   stripProjectContext,
   type AgentProjectContext,
 } from "../../lib/agent-project-context";
@@ -383,7 +384,7 @@ const AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
 const AGENT_WORKSPACE_MAX_SESSION_RETRY_DELAY_MS =
   AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS[AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS.length - 1] ??
   2000;
-const projectContextSignaturesBySessionId = new Map<string, string | null>();
+const projectContextSignaturesBySessionId = new ProjectContextSignatureStore();
 const QUEUED_STEER_RETRY_DELAY_MS = 300;
 const RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS = 1000;
 const RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS = 3000;

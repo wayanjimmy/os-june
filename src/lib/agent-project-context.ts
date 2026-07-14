@@ -92,6 +92,70 @@ export function prepareProjectPrompt(
   };
 }
 
+const SIGNATURES_STORAGE_KEY = "june.project-context.signatures";
+const SIGNATURES_MAX_ENTRIES = 500;
+
+/** Last delivered context signature per stored session id, persisted so a
+ * June restart still knows a past conversation carries a project block —
+ * without this, moving an old session out of its project after a reload
+ * would skip the clearing marker and stale instructions would keep applying.
+ * Losing the store is safe in the other direction: an empty map merely
+ * reinjects. Insertion-ordered; pruned to the newest entries. */
+export class ProjectContextSignatureStore {
+  private entries: Map<string, string | null>;
+
+  constructor(private storageKey = SIGNATURES_STORAGE_KEY) {
+    this.entries = new Map();
+    try {
+      const raw = window.localStorage.getItem(this.storageKey);
+      const parsed: unknown = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (
+            Array.isArray(item) &&
+            typeof item[0] === "string" &&
+            (typeof item[1] === "string" || item[1] === null)
+          ) {
+            this.entries.set(item[0], item[1]);
+          }
+        }
+      }
+    } catch {
+      // Corrupt or unavailable storage starts fresh — worst case is a
+      // harmless reinjection.
+    }
+  }
+
+  get(sessionId: string): string | null | undefined {
+    return this.entries.get(sessionId);
+  }
+
+  set(sessionId: string, signature: string | null): void {
+    // Re-inserting moves the entry to the newest position so pruning drops
+    // genuinely stale sessions first.
+    this.entries.delete(sessionId);
+    this.entries.set(sessionId, signature);
+    while (this.entries.size > SIGNATURES_MAX_ENTRIES) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+    this.persist();
+  }
+
+  delete(sessionId: string): void {
+    if (this.entries.delete(sessionId)) this.persist();
+  }
+
+  private persist(): void {
+    try {
+      window.localStorage.setItem(this.storageKey, JSON.stringify([...this.entries]));
+    } catch {
+      // A failed persist degrades to the pre-persistence in-memory behavior.
+    }
+  }
+}
+
 // Matches only a block with the exact generated shape: the five fixed lines
 // with a single-line project_id and project name, a non-greedy instructions
 // body, and the closing marker followed by the blank separator. A user
