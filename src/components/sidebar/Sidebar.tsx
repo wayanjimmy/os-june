@@ -272,6 +272,8 @@ const SETTINGS_SIDEBAR_GROUPS: {
         label: "Connectors",
         icon: <IconPlugin1 size={16} />,
       },
+      // Temporary static entrypoint while the Plugins catalog is not available.
+      // The final Obsidian entrypoint should move to the catalog surface.
       {
         id: "obsidian",
         label: "Obsidian",
