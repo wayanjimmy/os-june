@@ -3196,6 +3196,40 @@ describe("AppSettings", () => {
     await waitFor(() => expect(screen.queryByText("Key saved.")).not.toBeInTheDocument());
   });
 
+  it("explains that Auto does not use the saved Venice API key", async () => {
+    const user = userEvent.setup();
+    mocks.providerModelSettings.mockResolvedValueOnce({
+      settings: {
+        ...buildProviderSettings(),
+        generationModel: "open-software/auto",
+        remoteGenerationModel: "open-software/auto",
+        veniceApiKeyConfigured: true,
+      },
+    });
+
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole("tab", { name: "Models" }));
+    await user.click(screen.getByRole("button", { name: "More options for AI models" }));
+
+    expect(
+      await screen.findByText(
+        "Auto does not use your Venice API key for notes or chat. Choose a Venice model above to use your key there.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("defaults the model picker to curated suggestions", async () => {
     const user = userEvent.setup();
     render(

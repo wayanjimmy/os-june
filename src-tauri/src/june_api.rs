@@ -2403,7 +2403,7 @@ where
     if envelope.message.as_deref() == Some("venice_api_key_invalid") {
         return Err(AppError::new(
             "venice_api_key_invalid",
-            "Your saved Venice API key is not an inference key. Open Settings and paste a key that starts with VENICE_INFERENCE_KEY_.",
+            "Your saved Venice API key has an invalid format. Open Settings and paste a new Venice API key.",
         ));
     }
     if envelope.message.as_deref() == Some("venice_api_key_rejected") {
@@ -3102,7 +3102,7 @@ data: \"data\":{\"content\":\"Joined\",\"titleSuggestion\":null,\"provider\":\"v
             panic!("invalid Venice key should fail");
         };
         assert_eq!(invalid.code, "venice_api_key_invalid");
-        assert!(invalid.message.contains("VENICE_INFERENCE_KEY_"));
+        assert!(invalid.message.contains("invalid format"));
 
         let Err(rejected) = parse_response_body::<GenerateResponse>(
             "/v1/notes/generate",

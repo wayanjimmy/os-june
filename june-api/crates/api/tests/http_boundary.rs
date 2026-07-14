@@ -341,7 +341,7 @@ async fn integration_note_generate_forwards_venice_api_key_header() -> Result<()
             "transcript": "System: launch is Friday",
             "model": "text-model"
         }),
-        "VENICE_INFERENCE_KEY_user",
+        "opaque_user_venice_key",
     )?)
     .await;
 
@@ -352,7 +352,7 @@ async fn integration_note_generate_forwards_venice_api_key_header() -> Result<()
         body["data"]["content"],
         "Generated note body with user Venice key"
     );
-    assert!(!body.to_string().contains("VENICE_INFERENCE_KEY_user"));
+    assert!(!body.to_string().contains("opaque_user_venice_key"));
     Ok(())
 }
 
@@ -368,14 +368,14 @@ async fn integration_note_generate_rejects_malformed_venice_api_key_header()
             "transcript": "System: launch is Friday",
             "model": "text-model"
         }),
-        "sk_wrong",
+        &"x".repeat(4_097),
     )?)
     .await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await?;
     assert_eq!(body["success"], false);
-    assert_eq!(body["message"], "venice_api_key_invalid");
+    assert_eq!(body["message"], "venice_api_key_too_long");
     Ok(())
 }
 
@@ -2188,9 +2188,7 @@ impl Generator for FakeGenerator {
         if request.transcript.contains("boom") {
             return Err(DomainError::UpstreamProvider);
         }
-        let content = if request.provider_credentials.venice_api_key.as_deref()
-            == Some("VENICE_INFERENCE_KEY_user")
-        {
+        let content = if request.provider_credentials.has_venice_api_key() {
             "Generated note body with user Venice key"
         } else {
             "Generated note body"
