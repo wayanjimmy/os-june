@@ -317,7 +317,6 @@ pub async fn create_memory(
 ) -> Result<MemoryDto, AppError> {
     let repos = repositories(&app).await?;
     let settings_path = memory_settings_path(&app)?;
-    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     create_memory_with_settings(
         &repos,
         &settings_path,
@@ -336,7 +335,6 @@ pub async fn update_memory(
 ) -> Result<MemoryDto, AppError> {
     let repos = repositories(&app).await?;
     let settings_path = memory_settings_path(&app)?;
-    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     update_memory_with_settings(&repos, &settings_path, &id, &content).await
 }
 
@@ -404,6 +402,10 @@ pub(crate) async fn create_memory_with_settings(
     content: &str,
     source: &str,
 ) -> Result<MemoryDto, AppError> {
+    // Every write path (Tauri command AND the loopback proxy) takes the
+    // settings lock across the enabled check and the insert, so a save that
+    // read "enabled" can never commit after a concurrent toggle-off persists.
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     ensure_memory_enabled(settings_path)?;
     let content = validated_memory_content(content)?;
     let source = source.trim();
@@ -422,6 +424,8 @@ async fn update_memory_with_settings(
     id: &str,
     content: &str,
 ) -> Result<MemoryDto, AppError> {
+    // Same lock discipline as create: check + write under the settings lock.
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     ensure_memory_enabled(settings_path)?;
     let content = validated_memory_content(content)?;
     repos.update_memory(id, content).await
