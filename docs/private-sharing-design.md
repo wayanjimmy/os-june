@@ -144,7 +144,11 @@ unchanged, so the rollout cannot regress existing deployments.
 
 Tables: `shares` (id, owner_user_id, kind, ciphertext, iv, created_at,
 deleted_at) and `share_invites` (id, share_id, email, envelope, envelope_iv,
-recipient_user_id, accepted_at, revoked_at, last_access_at, created_at).
+recipient_user_id, accepted_at, revoked_at, last_access_at, created_at). A
+partial unique index on `share_invites (share_id, email) WHERE revoked_at IS
+NULL` enforces at most one active invite per email per share in the database,
+so the uniqueness guarantee holds under concurrent add-invite requests, not
+just the application-level check.
 
 ## Recipient viewer
 

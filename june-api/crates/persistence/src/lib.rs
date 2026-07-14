@@ -364,8 +364,22 @@ async fn insert_invite(
     .bind(&invite.envelope_iv)
     .execute(&mut **tx)
     .await
-    .map_err(query_error)?;
+    .map_err(insert_invite_error)?;
     Ok(())
+}
+
+/// Maps a violation of the active-email uniqueness index to a clean
+/// `DuplicateActiveInvite`. This is the authoritative guard: it fires even
+/// when two concurrent add-invite transactions both pass the pre-insert clash
+/// check under READ COMMITTED. Any other error (including an `invite_id`
+/// collision, which is astronomically unlikely) falls through unchanged.
+fn insert_invite_error(error: sqlx::Error) -> ShareStoreError {
+    if let sqlx::Error::Database(db_error) = &error
+        && db_error.constraint() == Some("idx_share_invites_active_email")
+    {
+        return ShareStoreError::DuplicateActiveInvite;
+    }
+    query_error(error)
 }
 
 fn share_record(row: &sqlx::postgres::PgRow) -> Result<ShareRecord, ShareStoreError> {
