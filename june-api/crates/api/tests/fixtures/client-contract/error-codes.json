@@ -9,5 +9,6 @@
   "internal": 5000,
   "upstream": 5001,
   "metering": 5031,
-  "timeout": 5041
+  "timeout": 5041,
+  "sharingUnavailable": 5011
 }

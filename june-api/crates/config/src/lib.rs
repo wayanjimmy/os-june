@@ -437,7 +437,7 @@ impl Debug for LocalDevConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShareConfig {
     /// Postgres URL for the share store. Empty disables sharing.
@@ -454,6 +454,23 @@ pub struct ShareConfig {
     /// Max accepted ciphertext, in bytes.
     #[serde(default = "default_share_max_ciphertext_bytes")]
     pub max_ciphertext_bytes: usize,
+}
+
+impl Default for ShareConfig {
+    // Hand-written so the derived Default can't diverge from the serde field
+    // defaults. `load()` seeds `AppConfig::default()` as the figment base, so a
+    // `usize::default()` zero here would be *present* in the merged config and
+    // shadow `default_share_max_ciphertext_bytes` (which only applies when the
+    // field is absent), capping every share at 0 bytes on a deployment that
+    // sets only the share envs.
+    fn default() -> Self {
+        Self {
+            database_url: String::new(),
+            viewer_accounts_url: String::new(),
+            viewer_client_id: String::new(),
+            max_ciphertext_bytes: default_share_max_ciphertext_bytes(),
+        }
+    }
 }
 
 fn default_share_max_ciphertext_bytes() -> usize {
@@ -1531,6 +1548,23 @@ mod tests {
             .merge(Toml::file(toml_path))
             .extract::<AppConfig>()
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn share_max_ciphertext_survives_default_seeding() -> Result<(), Box<dyn std::error::Error>> {
+        // load() seeds AppConfig::default() as the figment base via
+        // Serialized::defaults, then layers config.toml/env on top. If
+        // ShareConfig::default left max_ciphertext_bytes at usize::default()
+        // (0), that 0 is present in the base and shadows the serde field
+        // default, so a deployment that sets only the share envs would build a
+        // 0-byte cap and reject every share. Mirror that merge with no overlay
+        // and assert the real cap survives.
+        use figment::{Figment, providers::Serialized};
+        let config: AppConfig = Figment::new()
+            .merge(Serialized::defaults(AppConfig::default()))
+            .extract()?;
+        assert_eq!(config.share.max_ciphertext_bytes, 10 * 1024 * 1024);
+        Ok(())
     }
 
     #[test]

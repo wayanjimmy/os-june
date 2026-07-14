@@ -400,6 +400,7 @@ fn error_code_registry_is_stable() -> Result<(), Box<dyn Error>> {
             ("upstream", june_api::ERR_UPSTREAM),
             ("metering", june_api::ERR_METERING),
             ("timeout", june_api::ERR_TIMEOUT),
+            ("sharingUnavailable", june_api::ERR_SHARING_UNAVAILABLE),
         ]
         .map(|(name, code)| (name.to_string(), code)),
     );
