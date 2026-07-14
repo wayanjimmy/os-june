@@ -277,6 +277,15 @@ The ranked portfolio and shared product contract live in
 _Avoid_: connector (unless specifically naming its third-party account path),
 integration (too broad), plugin for a Tauri framework package.
 
+**Local vault grant**:
+The user's explicit, revocable selection of one local Obsidian-compatible vault
+folder for a local plugin. It is filesystem authority for an opaque vault id,
+owned by the Rust host: the agent sees only vault-relative paths returned by
+June's tools and never receives the canonical root. A local vault grant is not a
+Connector and has no account, OAuth scope, refresh token, or provider revocation
+flow. See [ADR-0019](docs/adr/0019-obsidian-local-vault-plugin.md).
+_Avoid_: connector, account, OAuth grant, mounted drive.
+
 ### Connectors
 
 **Connector**:
