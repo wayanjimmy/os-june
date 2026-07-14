@@ -97,7 +97,7 @@ pub(crate) async fn generate(
         provider_credentials,
         &requested_model_id,
         &model_id,
-        false,
+        state.pricing().is_venice_model(&model_id),
     )?;
 
     let stream = request.stream;
@@ -372,11 +372,11 @@ pub(crate) fn credentials_for_resolved_model(
     mut credentials: ProviderCredentials,
     requested_model_id: &str,
     resolved_model_id: &str,
-    allow_byok_model_fallback: bool,
+    resolved_supports_venice_byok: bool,
 ) -> Result<ProviderCredentials, ApiError> {
     if credentials.has_venice_api_key()
         && requested_model_id != resolved_model_id
-        && !allow_byok_model_fallback
+        && (resolved_model_id == AUTO_TEXT_MODEL || !resolved_supports_venice_byok)
     {
         return Err(ApiError::unprocessable("venice_api_key_model_unavailable"));
     }
@@ -459,12 +459,12 @@ fn parse_preview_flag(value: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTO_TEXT_MODEL, parse_preview_flag, require_priced_model_kind,
-        resolve_priced_asr_model_kind, resolve_priced_text_model_kind,
+        AUTO_TEXT_MODEL, credentials_for_resolved_model, parse_preview_flag,
+        require_priced_model_kind, resolve_priced_asr_model_kind, resolve_priced_text_model_kind,
     };
     use crate::ApiError;
     use june_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
-    use june_domain::ModelKind;
+    use june_domain::{ModelKind, ProviderCredentials};
     use june_services::PricingTable;
     use std::collections::BTreeMap;
 
@@ -532,6 +532,23 @@ mod tests {
         let resolved = resolve_priced_text_model_kind(&pricing_table(), "retired-venice-model")
             .expect("stale model should remain usable through Auto");
         assert_eq!(resolved, AUTO_TEXT_MODEL);
+    }
+
+    #[test]
+    fn byok_rejects_retired_asr_fallback_to_non_venice_model() {
+        let credentials = ProviderCredentials {
+            venice_api_key: Some("opaque-user-key".to_string()),
+        };
+
+        let error =
+            credentials_for_resolved_model(credentials, "retired-venice-asr", "openai-asr", false)
+                .expect_err("provider-changing BYOK fallback should fail");
+
+        assert!(matches!(
+            error,
+            ApiError::Unprocessable { message, .. }
+                if message == "venice_api_key_model_unavailable"
+        ));
     }
 
     #[test]

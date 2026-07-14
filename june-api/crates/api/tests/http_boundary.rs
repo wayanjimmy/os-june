@@ -1746,6 +1746,24 @@ fn test_state_from_deps(deps: TestStateDeps) -> ApiState {
 fn models() -> BTreeMap<String, ModelPriceConfig> {
     [
         (
+            "nvidia/parakeet-tdt-0.6b-v3",
+            ModelPriceConfig {
+                unit: PriceUnit::Seconds,
+                credits_per_million_seconds: Some(250_000),
+                input_credits_per_million_tokens: None,
+                output_credits_per_million_tokens: None,
+                provider: ModelProvider::Venice,
+                model_type: ModelType::Asr,
+                display_name: "Private ASR Model".to_string(),
+                description: None,
+                privacy: None,
+                pricing: None,
+                context_tokens: None,
+                traits: Vec::new(),
+                capabilities: Vec::new(),
+            },
+        ),
+        (
             "asr-model",
             ModelPriceConfig {
                 unit: PriceUnit::Seconds,

@@ -37,7 +37,7 @@ pub(crate) async fn chat_completions(
         provider_credentials,
         &requested_model_id,
         &model_id,
-        false,
+        state.pricing().is_venice_model(&model_id),
     )?;
     if let Some(object) = body.as_object_mut() {
         object.insert(
