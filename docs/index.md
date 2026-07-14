@@ -75,6 +75,7 @@ Per-repo config the engineering skills read before acting (see the
   - [Linear](plugins/linear-prd.md) — [implementation plan](plugins/linear-implementation-plan.md)
   - [Documents](plugins/documents-prd.md) — [implementation plan](plugins/documents-implementation-plan.md)
   - [Spreadsheets](plugins/spreadsheets-prd.md) — [implementation plan](plugins/spreadsheets-implementation-plan.md)
+  - [Obsidian](plugins/obsidian-prd.md) — [implementation plan](plugins/obsidian-implementation-plan.md)
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [june-api-prd.md](june-api-prd.md) — June API: upstream proxy + OS Accounts authorize/charge (the canonical backend spec)
 - [telemetry.md](telemetry.md) — public overview of June telemetry, current behavior, and policies
