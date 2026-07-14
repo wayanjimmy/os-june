@@ -30,6 +30,15 @@ reference expiry, consequential-action classification, approval journal,
 artifact references, and teardown. The extension and headless driver execute
 commands but do not decide policy.
 
+The broker is not merely where policy is written; it is the only place it can
+be *enforced*. The agent runtime can read its own loopback token out of its
+config and call the broker's routes directly, so gating at the runtime's tool
+layer gates nothing. See the 2026-07-13 addendum to
+[ADR-0017](../adr/0017-browser-use-via-june-extension.md). Concretely: the
+Browser access grant, re-checked in the broker on every request, is the sole
+authorization gate, and every consequential-action approval (JUN-297) is
+enforced broker-side.
+
 ## MCP contract
 
 - Session: `start_session`, `close_session`.
@@ -95,7 +104,9 @@ workspace file references rather than native-messaging payloads.
 - Cross-language protocol fixtures for framing, version mismatch, reconnect,
   and file-reference payloads.
 - Extension integration tests against hostile fixture pages and navigation
-  races.
+  races. Best-effort in v1 and deliberately not a release gate (the canonical
+  PRD's testing decisions); the committed gates are the Rust policy tests, the
+  protocol fixtures, and the MCP schema fixtures.
 - MCP schema fixtures plus pinned-runtime live smoke.
 - Live macOS walkthrough: install, pair, create task tab, share one tab, approve
   an action, deny an action, human takeover, stop, disconnect, and crash the

@@ -78,11 +78,11 @@ is no provider API fee; model and support costs determine final packaging.
 | Consequential actions executed without a valid approval | 0 |
 | Sessions touching an unshared pre-existing tab | 0 |
 | Median time from access request to first snapshot | under 90 seconds |
+| Users disconnecting because behavior surprised them | under 2% |
 
 A verifiable outcome is defined before execution and recorded by the broker,
 such as reaching a target state, producing the requested artifact, or receiving
 an action receipt. Agent self-reported completion does not count.
-| Users disconnecting because behavior surprised them | under 2% |
 
 ## Strategic risks
 

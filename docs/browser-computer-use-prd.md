@@ -5,6 +5,15 @@ Supersedes the JUN-229 scope proposal (PR #689, closed unmerged); that
 document's surface inventory and gap analysis inform this PRD.
 Date: 2026-07-13
 
+**This is the canonical spec for Browser use and Computer use.** The plugin
+portfolio (JUN-309) carries a product-and-business layer above it:
+[plugins/browser-use-prd.md](plugins/browser-use-prd.md) and
+[plugins/computer-use-prd.md](plugins/computer-use-prd.md), each with an
+implementation plan. Those cover ranking, positioning, packaging, and success
+measures; this document owns the tool contract, the trust boundary, the
+transports, and the tests, and the portfolio docs defer to it by name. When
+the two disagree, this one is right and the other is a bug.
+
 ## Problem statement
 
 June's agent can search the web and fetch a single page as markdown, but it
@@ -129,6 +138,21 @@ a vision-capable model.
   close, navigate, snapshot (visible text plus interactive references that
   expire on navigation or mutation), click, fill, press, screenshot, back,
   and tab operations (list, open, switch, close, accept a user-shared tab).
+- The tool names are canonical here, because two documents naming them
+  differently is how the contract drifts:
+
+  | Group | Tools |
+  | --- | --- |
+  | Session | `start_session`, `close_session` |
+  | Navigation | `navigate`, `back` |
+  | Perception | `snapshot`, `screenshot` |
+  | Interaction | `click`, `fill`, `press` |
+  | Tabs | `list_tabs`, `open_tab`, `switch_tab`, `close_tab`, `accept_shared_tab` |
+
+  Verb first, matching every other internal June MCP server
+  (`start_recording`, `generate_image`, `search_threads`, `get_meeting_note`).
+  A tool declared here but not yet implemented fails cleanly; it never
+  silently no-ops.
 - The Rust browser broker is the choke point. Policy decisions are made in
   Rust, never by prompting the model (the connectors precedent): grant
   checks, consequential-action classification, approval parking, per-task
@@ -216,6 +240,31 @@ a vision-capable model.
   is unavailable with a switch-model notice. Routines never get the toolset.
 - A release self-test starts the bundled driver and fails the build if the
   private system interfaces it relies on break on a macOS update.
+
+### Operability and privacy of the capability itself
+
+These come from the portfolio PRD and implementation plan
+([plugins/browser-use-prd.md](plugins/browser-use-prd.md),
+[plugins/browser-use-implementation-plan.md](plugins/browser-use-implementation-plan.md))
+and are recorded here because they are release-gating and no slice owned them:
+
+- **Two kill switches, not one.** The attended transport (the extension) and
+  the managed transport (the routines browser) fail in different ways and are
+  operated by different people, so each gets its own remote disable. Killing
+  the extension must not silently take routines down with it, and the reverse.
+- **The capability logs nothing about what it saw.** No URLs, page text,
+  screenshots, or field values in telemetry or logs. What a browsing session
+  touched is exactly the material the user is trusting June with, and a log
+  line is a copy of it outside the boundary the rest of this PRD builds.
+- **The broker records outcomes; the model does not get to grade itself.** A
+  task's declared outcome is recorded by the broker before execution and
+  checked after, because the launch metric ("browser tasks with a verifiable
+  outcome") is meaningless if the agent's own claim of success is the
+  evidence. Approval events (parked, approved, declined) are counted; their
+  contents are not.
+
+Each of these is a slice that does not exist yet; they are tracked separately
+rather than folded into an existing one.
 
 ### Naming
 
