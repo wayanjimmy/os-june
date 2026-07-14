@@ -36,7 +36,7 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "session_start",
+        "name": "start_session",
         "description": "Start a Browser use session.",
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -51,9 +51,9 @@ TOOLS: list[dict[str, Any]] = [
             },
         }
         for name, description in [
-            ("session_close", "Close a Browser use session and its task tabs."),
-            ("tabs_list", "List task tabs owned by a Browser use session."),
-            ("tab_open", "Open a new about:blank task tab."),
+            ("close_session", "Close a Browser use session and its task tabs."),
+            ("list_tabs", "List task tabs owned by a Browser use session."),
+            ("open_tab", "Open a new about:blank task tab."),
         ]
     ],
     *[
@@ -73,8 +73,8 @@ TOOLS: list[dict[str, Any]] = [
             ("snapshot", "Snapshot the accessibility tree of a task tab."),
             ("screenshot", "Capture the visible viewport of a task tab."),
             ("back", "Navigate a task tab back. Not implemented yet."),
-            ("tab_switch", "Make an owned task tab active."),
-            ("tab_close", "Close an owned task tab."),
+            ("switch_tab", "Make an owned task tab active."),
+            ("close_tab", "Close an owned task tab."),
         ]
     ],
     {
@@ -131,7 +131,7 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "tab_accept_shared",
+        "name": "accept_shared_tab",
         "description": "Accept a user-shared tab. Not implemented yet.",
         "inputSchema": {
             "type": "object",

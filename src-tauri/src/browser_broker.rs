@@ -201,7 +201,7 @@ impl BrowserBroker {
         for (session_id, kind) in sessions {
             if let Some(transport) = transports.get(&kind).cloned() {
                 if let Err(error) = transport
-                    .execute("session_close", json!({ "session_id": session_id }))
+                    .execute("close_session", json!({ "session_id": session_id }))
                     .await
                 {
                     first_error.get_or_insert(error);
@@ -265,7 +265,7 @@ impl BrowserBroker {
         self.require_enabled()?;
         if matches!(
             tool,
-            "click" | "fill" | "press" | "back" | "tab_accept_shared"
+            "click" | "fill" | "press" | "back" | "accept_shared_tab"
         ) {
             return Err(AppError::new(
                 "not_implemented",
@@ -274,15 +274,15 @@ impl BrowserBroker {
         }
         if !matches!(
             tool,
-            "session_start"
-                | "session_close"
+            "start_session"
+                | "close_session"
                 | "navigate"
                 | "snapshot"
                 | "screenshot"
-                | "tabs_list"
-                | "tab_open"
-                | "tab_switch"
-                | "tab_close"
+                | "list_tabs"
+                | "open_tab"
+                | "switch_tab"
+                | "close_tab"
         ) {
             return Err(AppError::new(
                 "unknown_browser_tool",
@@ -291,7 +291,7 @@ impl BrowserBroker {
         }
 
         let transport = self.transport(kind)?;
-        if tool == "session_start" {
+        if tool == "start_session" {
             let session_id = uuid::Uuid::new_v4().to_string();
             arguments = json!({ "session_id": session_id });
             transport.execute(tool, arguments).await?;
@@ -320,7 +320,7 @@ impl BrowserBroker {
             }
         }
 
-        if tool == "session_close" {
+        if tool == "close_session" {
             transport.execute(tool, arguments).await?;
             self.lock().sessions.remove(&session_id);
             return Ok(json!({ "closed": true }));
@@ -330,7 +330,7 @@ impl BrowserBroker {
             validate_attended_url(required_string(&arguments, "url")?)?;
         }
 
-        if tool == "tab_open" {
+        if tool == "open_tab" {
             let response = transport.execute(tool, arguments.clone()).await?;
             let tab_id = response
                 .data
@@ -360,7 +360,7 @@ impl BrowserBroker {
             if !accepted {
                 let _ = transport
                     .execute(
-                        "tab_close",
+                        "close_tab",
                         json!({ "session_id": session_id, "tab_id": tab_id }),
                     )
                     .await;
@@ -372,7 +372,7 @@ impl BrowserBroker {
             return Ok(response.data);
         }
 
-        if tool != "tabs_list" {
+        if tool != "list_tabs" {
             let tab_id = arguments
                 .get("tab_id")
                 .and_then(Value::as_i64)
@@ -391,7 +391,7 @@ impl BrowserBroker {
         }
 
         let mut response = transport.execute(tool, arguments.clone()).await?;
-        if tool == "tabs_list" {
+        if tool == "list_tabs" {
             let owned = self
                 .lock()
                 .sessions
@@ -424,7 +424,7 @@ impl BrowserBroker {
                 }
             }
         }
-        if tool == "tab_close" {
+        if tool == "close_tab" {
             let tab_id = arguments["tab_id"].as_i64().unwrap_or_default();
             if let Some(session) = self.lock().sessions.get_mut(&session_id) {
                 session.tabs.remove(&tab_id);
@@ -532,8 +532,8 @@ mod tests {
                     release.notified().await;
                 }
                 let data = match tool {
-                    "tab_open" => json!({ "tabId": 7 }),
-                    "tabs_list" => json!({ "tabs": [] }),
+                    "open_tab" => json!({ "tabId": 7 }),
+                    "list_tabs" => json!({ "tabs": [] }),
                     _ => json!({}),
                 };
                 Ok(TransportResponse {
@@ -549,7 +549,7 @@ mod tests {
     impl BrowserTransport for FailingCloseTransport {
         fn execute<'a>(&'a self, tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
             Box::pin(async move {
-                if tool == "session_close" {
+                if tool == "close_session" {
                     return Err(AppError::new(
                         "extension_disconnected",
                         "The browser extension disconnected.",
@@ -618,7 +618,7 @@ mod tests {
         );
 
         let managed = broker
-            .execute(BrowserTransportKind::Managed, "session_start", json!({}))
+            .execute(BrowserTransportKind::Managed, "start_session", json!({}))
             .await
             .expect_err("managed transport is not registered in this slice");
         assert_eq!(managed.code, "browser_transport_unavailable");
@@ -630,7 +630,7 @@ mod tests {
         );
 
         let started = broker
-            .execute(BrowserTransportKind::Attended, "session_start", json!({}))
+            .execute(BrowserTransportKind::Attended, "start_session", json!({}))
             .await
             .expect("start");
         let session_id = started["sessionId"].as_str().expect("session id");
@@ -638,7 +638,7 @@ mod tests {
         let crossed = broker
             .execute(
                 BrowserTransportKind::Managed,
-                "tabs_list",
+                "list_tabs",
                 json!({ "session_id": session_id }),
             )
             .await
@@ -647,7 +647,7 @@ mod tests {
         let opened = broker
             .execute(
                 BrowserTransportKind::Attended,
-                "tab_open",
+                "open_tab",
                 json!({ "session_id": session_id }),
             )
             .await
@@ -657,7 +657,7 @@ mod tests {
         let listed = broker
             .execute(
                 BrowserTransportKind::Attended,
-                "tabs_list",
+                "list_tabs",
                 json!({ "session_id": session_id }),
             )
             .await
@@ -688,7 +688,7 @@ mod tests {
         broker
             .execute(
                 BrowserTransportKind::Attended,
-                "session_close",
+                "close_session",
                 json!({ "session_id": session_id }),
             )
             .await
@@ -710,7 +710,7 @@ mod tests {
             temp.path().join("artifacts"),
         );
         let started = broker
-            .execute(BrowserTransportKind::Attended, "session_start", json!({}))
+            .execute(BrowserTransportKind::Attended, "start_session", json!({}))
             .await
             .expect("start");
         let session_id = started["sessionId"].as_str().expect("session id");
@@ -718,7 +718,7 @@ mod tests {
         let error = broker
             .execute(
                 BrowserTransportKind::Attended,
-                "tabs_list",
+                "list_tabs",
                 json!({ "session_id": session_id }),
             )
             .await
@@ -738,8 +738,8 @@ mod tests {
         fn execute<'a>(&'a self, tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
             Box::pin(async move {
                 let data = match tool {
-                    "tab_open" => json!({ "tabId": 7, "url": "about:blank" }),
-                    "tabs_list" => json!({
+                    "open_tab" => json!({ "tabId": 7, "url": "about:blank" }),
+                    "list_tabs" => json!({
                         "tabs": [
                             { "tabId": 7, "title": "Owned", "url": "about:blank" },
                             { "tabId": 999, "title": "Foreign", "url": "https://private.example" },
@@ -775,7 +775,7 @@ mod tests {
             temp.path().join("artifacts"),
         );
         let started = broker
-            .execute(BrowserTransportKind::Attended, "session_start", json!({}))
+            .execute(BrowserTransportKind::Attended, "start_session", json!({}))
             .await
             .expect("start");
         let session_id = started["sessionId"]
@@ -785,7 +785,7 @@ mod tests {
         broker
             .execute(
                 BrowserTransportKind::Attended,
-                "tab_open",
+                "open_tab",
                 json!({ "session_id": session_id }),
             )
             .await
@@ -835,7 +835,7 @@ mod tests {
             temp.path().join("artifacts"),
         );
         broker
-            .execute(BrowserTransportKind::Attended, "session_start", json!({}))
+            .execute(BrowserTransportKind::Attended, "start_session", json!({}))
             .await
             .expect("start");
 

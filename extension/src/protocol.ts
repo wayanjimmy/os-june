@@ -23,15 +23,15 @@ export type PingMessage = {
 };
 
 export type BrowserToolName =
-  | "session_start"
-  | "session_close"
+  | "start_session"
+  | "close_session"
   | "navigate"
   | "snapshot"
   | "screenshot"
-  | "tabs_list"
-  | "tab_open"
-  | "tab_switch"
-  | "tab_close";
+  | "list_tabs"
+  | "open_tab"
+  | "switch_tab"
+  | "close_tab";
 
 export type BrowserRequestMessage = {
   v: number;

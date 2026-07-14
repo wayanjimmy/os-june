@@ -379,15 +379,15 @@ export class BrowserController {
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     const sessionId = stringArg(args, "session_id");
-    if (tool === "session_start") {
+    if (tool === "start_session") {
       this.registry.start(sessionId);
       return { sessionId };
     }
-    if (tool === "session_close") {
+    if (tool === "close_session") {
       await closeTabs(this.registry.removeSession(sessionId));
       return { closed: true };
     }
-    if (tool === "tab_open") {
+    if (tool === "open_tab") {
       this.registry.session(sessionId);
       const created = await chrome.tabs.create({ url: "about:blank", active: true });
       if (created.id === undefined)
@@ -406,7 +406,7 @@ export class BrowserController {
         throw error;
       }
     }
-    if (tool === "tabs_list") {
+    if (tool === "list_tabs") {
       const tabs = [];
       for (const ownedId of [...this.registry.session(sessionId).tabs.keys()]) {
         try {
@@ -421,12 +421,12 @@ export class BrowserController {
     }
     const tabId = tabArg(args);
     const taskTab = await this.requireMarkedTaskTab(sessionId, tabId);
-    if (tool === "tab_close") {
+    if (tool === "close_tab") {
       this.registry.removeTab(sessionId, tabId);
       await closeTabs([tabId]);
       return { closed: true };
     }
-    if (tool === "tab_switch") {
+    if (tool === "switch_tab") {
       await chrome.tabs.update(tabId, { active: true });
       this.registry.session(sessionId).activeTabId = tabId;
       return { tabId };

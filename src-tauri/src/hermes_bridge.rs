@@ -12191,7 +12191,7 @@ mod tests {
     async fn browser_execute_route_refuses_the_correct_token_while_grant_is_off() {
         let home = tempfile::tempdir().expect("tempdir");
         let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
-        let body = r#"{"tool":"session_start","arguments":{}}"#;
+        let body = r#"{"tool":"start_session","arguments":{}}"#;
         let request = format!(
             "POST /v1/browser/execute HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer browser-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
@@ -12432,8 +12432,8 @@ mod tests {
     fn browser_mcp_script_advertises_the_transport_agnostic_contract() {
         for tool in [
             "status",
-            "session_start",
-            "session_close",
+            "start_session",
+            "close_session",
             "navigate",
             "snapshot",
             "click",
@@ -12441,11 +12441,11 @@ mod tests {
             "press",
             "screenshot",
             "back",
-            "tabs_list",
-            "tab_open",
-            "tab_switch",
-            "tab_close",
-            "tab_accept_shared",
+            "list_tabs",
+            "open_tab",
+            "switch_tab",
+            "close_tab",
+            "accept_shared_tab",
         ] {
             assert!(
                 JUNE_BROWSER_MCP_SCRIPT.contains(&format!("\"name\": \"{tool}\""))

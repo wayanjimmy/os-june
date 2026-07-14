@@ -46,21 +46,21 @@ describe("parseHostMessage", () => {
         v: PROTOCOL_VERSION,
         type: "request",
         id: 3,
-        tool: "tab_open",
+        tool: "open_tab",
         arguments: { session_id: "s" },
       }),
-    ).toMatchObject({ id: 3, tool: "tab_open" });
+    ).toMatchObject({ id: 3, tool: "open_tab" });
     expect(
       parseBrowserRequest({
         v: PROTOCOL_VERSION,
         type: "request",
         id: "3",
-        tool: "tab_open",
+        tool: "open_tab",
         arguments: {},
       }),
     ).toBeNull();
     expect(
-      parseBrowserRequest({ v: PROTOCOL_VERSION, type: "request", id: 3, tool: "tab_open" }),
+      parseBrowserRequest({ v: PROTOCOL_VERSION, type: "request", id: 3, tool: "open_tab" }),
     ).toBeNull();
   });
 });
