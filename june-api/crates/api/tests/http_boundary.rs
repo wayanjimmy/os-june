@@ -314,13 +314,13 @@ async fn integration_agent_chat_stream_returns_upstream_sse_body() -> Result<(),
 
 #[tokio::test]
 async fn integration_agent_chat_routes_stale_model_through_auto() -> Result<(), Box<dyn Error>> {
-    let response = send(json_request_with_venice_api_key(
+    let response = send(json_request(
         "/v1/chat/completions",
         &serde_json::json!({
             "model": "retired-venice-model",
             "messages": [{ "role": "user", "content": "hello" }]
         }),
-        "opaque_user_venice_key",
+        Some(AUTHORIZATION),
     )?)
     .await;
 
@@ -331,7 +331,26 @@ async fn integration_agent_chat_routes_stale_model_through_auto() -> Result<(), 
 }
 
 #[tokio::test]
-async fn integration_note_generate_drops_venice_key_when_stale_model_routes_through_auto()
+async fn integration_agent_chat_rejects_byok_when_stale_model_would_fallback()
+-> Result<(), Box<dyn Error>> {
+    let response = send(json_request_with_venice_api_key(
+        "/v1/chat/completions",
+        &serde_json::json!({
+            "model": "retired-venice-model",
+            "messages": [{ "role": "user", "content": "hello" }]
+        }),
+        "opaque_user_venice_key",
+    )?)
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(response).await?;
+    assert_eq!(body["message"], "venice_api_key_model_unavailable");
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_note_generate_rejects_byok_when_stale_model_would_fallback()
 -> Result<(), Box<dyn Error>> {
     let response = send(json_request_with_venice_api_key(
         "/v1/notes/generate",
@@ -346,10 +365,10 @@ async fn integration_note_generate_drops_venice_key_when_stale_model_routes_thro
     )?)
     .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response_json(response).await?;
-    assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["content"], "Generated note body");
+    assert_eq!(body["success"], false);
+    assert_eq!(body["message"], "venice_api_key_model_unavailable");
     Ok(())
 }
 
@@ -858,6 +877,27 @@ async fn integration_dictate_routes_retired_asr_model_through_priced_fallback()
     let body = response_json(response).await?;
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["text"], "Transcribed audio");
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_dictate_rejects_byok_when_retired_asr_model_would_fallback()
+-> Result<(), Box<dyn Error>> {
+    let response = send(multipart_request_with_venice_api_key(
+        "/v1/dictate",
+        multipart_body([
+            text_part("model", "retired-asr-model"),
+            text_part("sessionId", "session-stale-asr"),
+            text_part("utteranceId", "utterance-stale-asr"),
+            file_part("audio", "dictation.wav", valid_wav()),
+        ]),
+        "opaque_user_venice_key",
+    )?)
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(response).await?;
+    assert_eq!(body["message"], "venice_api_key_model_unavailable");
     Ok(())
 }
 
@@ -1881,6 +1921,23 @@ fn get_request_with_auth(
 
 fn multipart_request(uri: &str, body: Vec<u8>) -> Result<Request<Body>, axum::http::Error> {
     multipart_request_with_auth(uri, body, Some(AUTHORIZATION))
+}
+
+fn multipart_request_with_venice_api_key(
+    uri: &str,
+    body: Vec<u8>,
+    venice_api_key: &str,
+) -> Result<Request<Body>, axum::http::Error> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={}", boundary()),
+        )
+        .header(header::AUTHORIZATION, AUTHORIZATION)
+        .header("x-venice-api-key", venice_api_key)
+        .body(Body::from(body))
 }
 
 fn multipart_request_with_auth(

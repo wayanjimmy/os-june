@@ -90,10 +90,11 @@ pub(crate) async fn generate(
     let user_id = authenticated_user(&state, &headers).await?;
     let provider_credentials = provider_credentials(&headers)?;
     request.validate()?;
-    let model_id = required(request.model, "model_required")?;
-    validation::validate_text_len("model", &model_id, validation::MAX_MODEL_CHARS)?;
-    let model_id = resolve_priced_text_model(&state, &model_id)?;
-    let provider_credentials = credentials_for_resolved_text_model(provider_credentials, &model_id);
+    let requested_model_id = required(request.model, "model_required")?;
+    validation::validate_text_len("model", &requested_model_id, validation::MAX_MODEL_CHARS)?;
+    let model_id = resolve_priced_text_model(&state, &requested_model_id)?;
+    let provider_credentials =
+        credentials_for_resolved_model(provider_credentials, &requested_model_id, &model_id)?;
 
     let stream = request.stream;
     let params = NoteGenerateParams {
@@ -361,16 +362,20 @@ pub(crate) fn resolve_priced_text_model(
     resolve_priced_text_model_kind(state.pricing(), requested_model_id)
 }
 
-/// Auto is a June-managed route. Clear any user credential after resolving
-/// stale model ids so an older client cannot accidentally turn Auto into BYOK.
-pub(crate) fn credentials_for_resolved_text_model(
+/// Auto is a June-managed route. Reject a stale BYOK selection instead of
+/// silently changing its billing, and never let explicit Auto become BYOK.
+pub(crate) fn credentials_for_resolved_model(
     mut credentials: ProviderCredentials,
-    model_id: &str,
-) -> ProviderCredentials {
-    if model_id == AUTO_TEXT_MODEL {
+    requested_model_id: &str,
+    resolved_model_id: &str,
+) -> Result<ProviderCredentials, ApiError> {
+    if credentials.has_venice_api_key() && requested_model_id != resolved_model_id {
+        return Err(ApiError::unprocessable("venice_api_key_model_unavailable"));
+    }
+    if resolved_model_id == AUTO_TEXT_MODEL {
         credentials.venice_api_key = None;
     }
-    credentials
+    Ok(credentials)
 }
 
 fn resolve_priced_text_model_kind(
