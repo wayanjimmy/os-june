@@ -1917,6 +1917,12 @@ export function AppSettings({
                         <span className="settings-row-description">
                           Choose how June balances model quality and usage cost.
                         </span>
+                        {providerSettings.veniceApiKeyConfigured ? (
+                          <span className="settings-row-description settings-row-substatus">
+                            Auto does not use your Venice API key for notes or chat. Choose a Venice
+                            model above to use your key for notes and new chats.
+                          </span>
+                        ) : null}
                       </div>
                       <div className="settings-row-control">
                         <SegmentedControl<AutoPreference>
@@ -2727,7 +2733,7 @@ function VeniceApiKeyRow({
         <h3 className="settings-row-title">Venice API key</h3>
         <p className="settings-row-description">
           Use your own key for Venice models so June credits are not used. Stored locally and sent
-          only for Venice requests.
+          only for Venice requests. For least privilege, use an inference-only key.
         </p>
         {configured ? (
           <p className="settings-row-description settings-row-substatus">Key saved.</p>
