@@ -87,6 +87,33 @@ pub struct ConnectorGrant {
     pub account_id: String,
 }
 
+/// Local Obsidian vault grant. This is filesystem authority for a selected
+/// local root, not a connector account. The canonical root stays Rust-side and
+/// must never be handed to Hermes or the MCP scripts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObsidianVaultGrantRecord {
+    pub vault_id: String,
+    pub display_name: String,
+    pub canonical_root: String,
+    pub root_identity: String,
+    pub write_enabled: bool,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_checked_at: Option<String>,
+    pub last_scan_started_at: Option<String>,
+    pub last_scan_completed_at: Option<String>,
+    pub last_successful_scan_at: Option<String>,
+    pub index_version: i64,
+    pub note_count: i64,
+    pub tag_count: i64,
+    pub unresolved_link_count: i64,
+    pub ambiguous_link_count: i64,
+    pub placeholder_file_count: i64,
+    pub skipped_file_count: i64,
+    pub last_error_code: Option<String>,
+}
+
 impl Repositories {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -211,6 +238,95 @@ impl Repositories {
                 }
             })
             .collect())
+    }
+
+    // --- Obsidian local vault grants --------------------------------------
+    //
+    // Local filesystem grant metadata only. Note content, tags, backlinks,
+    // approval diffs, and MCP credentials are never persisted here.
+
+    pub async fn get_obsidian_vault_grant(
+        &self,
+    ) -> Result<Option<ObsidianVaultGrantRecord>, sqlx::error::Error> {
+        let row = query(
+            "SELECT vault_id, display_name, canonical_root, root_identity, write_enabled, status,
+                    created_at, updated_at, last_checked_at, last_scan_started_at,
+                    last_scan_completed_at, last_successful_scan_at, index_version, note_count,
+                    tag_count, unresolved_link_count, ambiguous_link_count,
+                    placeholder_file_count, skipped_file_count, last_error_code
+             FROM obsidian_vault_grants
+             ORDER BY created_at ASC
+             LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(obsidian_vault_grant_from_row))
+    }
+
+    pub async fn set_obsidian_vault_grant(
+        &self,
+        vault_id: &str,
+        display_name: &str,
+        canonical_root: &str,
+        root_identity: &str,
+    ) -> Result<ObsidianVaultGrantRecord, sqlx::error::Error> {
+        let now = timestamp();
+        let mut tx = self.pool.begin().await?;
+        // V1 supports one active vault. Replacing the row is revocation of the
+        // old local grant; there is no provider-side state to revoke.
+        query("DELETE FROM obsidian_vault_grants")
+            .execute(&mut *tx)
+            .await?;
+        query(
+            "INSERT INTO obsidian_vault_grants (
+               vault_id, display_name, canonical_root, root_identity, write_enabled, status,
+               created_at, updated_at, last_checked_at
+             ) VALUES (?, ?, ?, ?, 0, 'indexing', ?, ?, ?)",
+        )
+        .bind(vault_id)
+        .bind(display_name)
+        .bind(canonical_root)
+        .bind(root_identity)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.get_obsidian_vault_grant()
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    pub async fn set_obsidian_vault_write_enabled(
+        &self,
+        vault_id: &str,
+        write_enabled: bool,
+    ) -> Result<Option<ObsidianVaultGrantRecord>, sqlx::error::Error> {
+        let now = timestamp();
+        query(
+            "UPDATE obsidian_vault_grants
+             SET write_enabled = ?, updated_at = ?
+             WHERE vault_id = ?",
+        )
+        .bind(if write_enabled { 1 } else { 0 })
+        .bind(&now)
+        .bind(vault_id)
+        .execute(&self.pool)
+        .await?;
+        let current = self.get_obsidian_vault_grant().await?;
+        Ok(current.filter(|record| record.vault_id == vault_id))
+    }
+
+    pub async fn delete_obsidian_vault_grant(
+        &self,
+        vault_id: &str,
+    ) -> Result<bool, sqlx::error::Error> {
+        let result = query("DELETE FROM obsidian_vault_grants WHERE vault_id = ?")
+            .bind(vault_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // --- Private connectors (Google) --------------------------------------
@@ -3392,6 +3508,31 @@ fn connector_account_from_row(row: sqlx_sqlite::SqliteRow) -> ConnectorAccountRe
     }
 }
 
+fn obsidian_vault_grant_from_row(row: sqlx_sqlite::SqliteRow) -> ObsidianVaultGrantRecord {
+    ObsidianVaultGrantRecord {
+        vault_id: row.get("vault_id"),
+        display_name: row.get("display_name"),
+        canonical_root: row.get("canonical_root"),
+        root_identity: row.get("root_identity"),
+        write_enabled: row.get::<i64, _>("write_enabled") != 0,
+        status: row.get("status"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        last_checked_at: row.get::<Option<String>, _>("last_checked_at"),
+        last_scan_started_at: row.get::<Option<String>, _>("last_scan_started_at"),
+        last_scan_completed_at: row.get::<Option<String>, _>("last_scan_completed_at"),
+        last_successful_scan_at: row.get::<Option<String>, _>("last_successful_scan_at"),
+        index_version: row.get("index_version"),
+        note_count: row.get("note_count"),
+        tag_count: row.get("tag_count"),
+        unresolved_link_count: row.get("unresolved_link_count"),
+        ambiguous_link_count: row.get("ambiguous_link_count"),
+        placeholder_file_count: row.get("placeholder_file_count"),
+        skipped_file_count: row.get("skipped_file_count"),
+        last_error_code: row.get::<Option<String>, _>("last_error_code"),
+    }
+}
+
 fn routine_trust_from_row(row: sqlx_sqlite::SqliteRow) -> RoutineTrustRecord {
     RoutineTrustRecord {
         job_id: row.get("job_id"),
@@ -3556,6 +3697,71 @@ mod tests {
 
     fn scopes(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn obsidian_vault_grant_is_single_local_authority_row() {
+        let repos = test_repositories().await;
+        let first = repos
+            .set_obsidian_vault_grant(
+                "vault-1",
+                "Work vault",
+                "/Users/example/WorkVault",
+                "unix:1:10",
+            )
+            .await
+            .expect("set first vault");
+        assert_eq!(first.vault_id, "vault-1");
+        assert_eq!(first.display_name, "Work vault");
+        assert_eq!(first.canonical_root, "/Users/example/WorkVault");
+        assert!(!first.write_enabled);
+        assert_eq!(first.status, "indexing");
+        assert_eq!(first.note_count, 0);
+
+        let enabled = repos
+            .set_obsidian_vault_write_enabled("vault-1", true)
+            .await
+            .expect("enable writes")
+            .expect("vault still present");
+        assert!(enabled.write_enabled);
+
+        let second = repos
+            .set_obsidian_vault_grant(
+                "vault-2",
+                "Personal vault",
+                "/Users/example/PersonalVault",
+                "unix:1:11",
+            )
+            .await
+            .expect("replace vault");
+        assert_eq!(second.vault_id, "vault-2");
+        assert_eq!(second.display_name, "Personal vault");
+        assert!(!second.write_enabled);
+
+        let current = repos
+            .get_obsidian_vault_grant()
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(current.vault_id, "vault-2");
+        assert!(repos
+            .set_obsidian_vault_write_enabled("vault-1", true)
+            .await
+            .expect("missing old vault")
+            .is_none());
+        assert!(!repos
+            .delete_obsidian_vault_grant("vault-1")
+            .await
+            .expect("delete missing"));
+        assert!(repos
+            .delete_obsidian_vault_grant("vault-2")
+            .await
+            .expect("delete current"));
+        assert!(repos
+            .get_obsidian_vault_grant()
+            .await
+            .expect("get none")
+            .is_none());
     }
 
     #[tokio::test]

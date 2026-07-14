@@ -14,6 +14,7 @@ pub mod macos_menu_icons;
 pub mod meeting_detection;
 pub mod meeting_hud;
 pub mod menu_bar;
+pub mod obsidian;
 pub mod os_accounts;
 pub mod p3a;
 pub mod providers;
@@ -305,6 +306,10 @@ pub fn run() {
             connectors::approvals::connector_approval_respond,
             connectors::approvals::connector_approvals_respond_all,
             hermes_bridge::connectors_apply_runtime,
+            obsidian::commands::obsidian_vault_status,
+            obsidian::commands::obsidian_vault_confirm,
+            obsidian::commands::obsidian_vault_remove,
+            obsidian::commands::obsidian_vault_set_write_mode,
             updates::get_release_channel,
             updates::set_release_channel,
             updates::fetch_update,
