@@ -94,10 +94,17 @@ export function registerConnectorApprovalsDemo({
 }: {
   setPending: (items: PendingConnectorApproval[]) => void;
 }): ConnectorApprovalsDemoApi {
+  const win = window as unknown as Record<string, unknown>;
+
   function park(count: number) {
     const now = Date.now();
+    const parked = Math.max(1, Math.min(count, SAMPLES.length));
+    // Only Google ships today, so the real header stack never shows more than
+    // one mark. Preview the overlapping-logo treatment by asking the tray to
+    // repeat the mark up to 3 times (it honors this only in DEV).
+    win.__connectorApprovalsStack = Math.min(parked, 3);
     setPending(
-      Array.from({ length: Math.max(1, Math.min(count, SAMPLES.length)) }, (_, index) => ({
+      Array.from({ length: parked }, (_, index) => ({
         ...SAMPLES[index % SAMPLES.length],
         approvalId: `demo-${index}`,
         requestedAtMs: now - index * 45_000,
@@ -123,6 +130,9 @@ export function registerConnectorApprovalsDemo({
       case "clear":
       case "stop":
         setPending([]);
+        // Drop the preview override so a stale count can't leak into a later
+        // real approvals refresh in the same dev session.
+        delete win.__connectorApprovalsStack;
         return "Approvals tray dismissed.";
       default:
         return HELP;
@@ -132,7 +142,8 @@ export function registerConnectorApprovalsDemo({
   (window as unknown as Record<string, unknown>).__connectorApprovals = hook;
 
   function dispose() {
-    delete (window as unknown as Record<string, unknown>).__connectorApprovals;
+    delete win.__connectorApprovals;
+    delete win.__connectorApprovalsStack;
   }
 
   return { dispose };
