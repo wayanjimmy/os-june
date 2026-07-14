@@ -17,6 +17,13 @@ pub(crate) type TransportFuture<'a> =
     Pin<Box<dyn Future<Output = Result<TransportResponse, AppError>> + Send + 'a>>;
 
 pub(crate) trait BrowserTransport: Send + Sync {
+    /// Reserve transport-owned startup state before the broker publishes the
+    /// session. Managed transports use this to make launch cancellation
+    /// visible before their asynchronous startup work begins.
+    fn reserve_session(&self, _session_id: &str) -> Result<(), AppError> {
+        Ok(())
+    }
+
     fn execute<'a>(&'a self, tool: &'a str, arguments: Value) -> TransportFuture<'a>;
 
     /// Synchronously terminate a transport-owned session. Managed transports
@@ -364,8 +371,8 @@ impl BrowserBroker {
         if tool == "start_session" {
             let session_id = uuid::Uuid::new_v4().to_string();
             arguments = json!({ "session_id": &session_id });
-            transport.execute(tool, arguments).await?;
             let inserted = {
+                transport.reserve_session(&session_id)?;
                 let mut state = self.lock();
                 let enabled = !state.transition_blocked
                     && state
@@ -384,6 +391,30 @@ impl BrowserBroker {
                 enabled
             };
             if !inserted {
+                transport.terminate_session(&session_id);
+                let _ = transport
+                    .execute("close_session", json!({ "session_id": &session_id }))
+                    .await;
+                return Err(AppError::new(
+                    "browser_access_disabled",
+                    "Browser use is not enabled.",
+                ));
+            }
+
+            if let Err(error) = transport.execute(tool, arguments).await {
+                self.lock().sessions.remove(&session_id);
+                transport.terminate_session(&session_id);
+                return Err(error);
+            }
+            let still_owned = {
+                let state = self.lock();
+                !state.transition_blocked
+                    && state
+                        .sessions
+                        .get(&session_id)
+                        .is_some_and(|session| session.transport_kind == kind)
+            };
+            if !still_owned {
                 transport.terminate_session(&session_id);
                 let _ = transport
                     .execute("close_session", json!({ "session_id": &session_id }))
@@ -689,6 +720,90 @@ mod tests {
                     artifact: None,
                 })
             })
+        }
+    }
+
+    #[cfg(unix)]
+    struct StartingProcessState {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        child: Mutex<Option<std::process::Child>>,
+        profile: PathBuf,
+        terminated: std::sync::atomic::AtomicBool,
+        finished: std::sync::atomic::AtomicBool,
+        finished_notify: tokio::sync::Notify,
+    }
+
+    #[cfg(unix)]
+    struct StartingProcessTransport {
+        state: Arc<StartingProcessState>,
+    }
+
+    #[cfg(unix)]
+    impl StartingProcessTransport {
+        fn terminate(state: &StartingProcessState) {
+            state
+                .terminated
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(mut child) = state
+                .child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = std::fs::remove_dir_all(&state.profile);
+            state.release.notify_waiters();
+        }
+    }
+
+    #[cfg(unix)]
+    impl BrowserTransport for StartingProcessTransport {
+        fn execute<'a>(&'a self, tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
+            let state = Arc::clone(&self.state);
+            Box::pin(async move {
+                if tool == "start_session" {
+                    std::fs::create_dir_all(&state.profile).expect("starting profile");
+                    let child = std::process::Command::new("/bin/sleep")
+                        .arg("30")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .expect("starting browser stand-in");
+                    *state
+                        .child
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
+                    state.entered.notify_one();
+                    state.release.notified().await;
+                    state
+                        .finished
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    state.finished_notify.notify_waiters();
+                    if state.terminated.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(AppError::new(
+                            "browser_session_closed",
+                            "The managed browser session was terminated.",
+                        ));
+                    }
+                } else if tool == "close_session" {
+                    while !state.finished.load(std::sync::atomic::Ordering::SeqCst) {
+                        let notified = state.finished_notify.notified();
+                        if state.finished.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        notified.await;
+                    }
+                }
+                Ok(TransportResponse::data(json!({})))
+            })
+        }
+
+        fn terminate_session(&self, _session_id: &str) {
+            Self::terminate(&self.state);
         }
     }
 
@@ -1015,6 +1130,68 @@ mod tests {
         assert!(terminated.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(broker.active_session_count(), 0);
         assert!(!broker.is_enabled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn revocation_terminates_a_managed_session_during_startup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flag = temp.path().join("browser-access");
+        std::fs::write(&flag, b"1").expect("grant");
+        let profile = temp.path().join("starting-profile");
+        let state = Arc::new(StartingProcessState {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            child: Mutex::new(None),
+            profile: profile.clone(),
+            terminated: std::sync::atomic::AtomicBool::new(false),
+            finished: std::sync::atomic::AtomicBool::new(false),
+            finished_notify: tokio::sync::Notify::new(),
+        });
+        let broker = Arc::new(BrowserBroker::default());
+        broker.set_access_flag_path(flag);
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            Arc::new(StartingProcessTransport {
+                state: Arc::clone(&state),
+            }),
+            temp.path().join("images"),
+            temp.path().join("artifacts"),
+        );
+
+        let start_broker = Arc::clone(&broker);
+        let start = tokio::spawn(async move {
+            start_broker
+                .execute(BrowserTransportKind::Managed, "start_session", json!({}))
+                .await
+        });
+        state.entered.notified().await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), broker.set_enabled(false))
+            .await
+            .expect("revoke must complete during startup")
+            .expect("revoke result");
+
+        let process_survived = state
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .is_some_and(|child| child.try_wait().expect("child status").is_none());
+        let profile_survived = profile.exists();
+        let terminated = state.terminated.load(std::sync::atomic::Ordering::SeqCst);
+        let startup_finished = start.is_finished();
+
+        // Always clean up the stand-in before asserting, including on the RED
+        // run where the broker cannot see a starting session yet.
+        StartingProcessTransport::terminate(&state);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), start).await;
+
+        assert!(terminated, "revoke never reached the starting transport");
+        assert!(!process_survived, "starting browser survived revoke");
+        assert!(!profile_survived, "starting profile survived revoke");
+        assert!(startup_finished, "revoke returned before startup finished");
+        assert_eq!(broker.active_session_count(), 0);
     }
 
     #[tokio::test]

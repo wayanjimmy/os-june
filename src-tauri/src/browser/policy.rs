@@ -204,13 +204,16 @@ pub fn validate_public_http_url(raw: &str) -> Result<ValidatedUrl, PolicyViolati
 /// IPv6 addresses that embed an IPv4 address (IPv4-mapped, IPv4-compatible, and
 /// the NAT64 well-known prefix 64:ff9b::/96) are normalized to their embedded
 /// IPv4 and re-checked, so `::ffff:10.0.0.1` cannot smuggle a private v4 target
-/// through the v6 path.
+/// through the v6 path. A public embedded IPv4 address must still satisfy the
+/// IPv6 allowlist; normalization never promotes an address outside 2000::/3.
 pub fn address_violation(ip: IpAddr, config: &PolicyConfig) -> Option<PolicyViolation> {
     match ip {
         IpAddr::V4(v4) => ipv4_violation(v4, config),
         IpAddr::V6(v6) => {
             if let Some(embedded) = embedded_ipv4(v6) {
-                return ipv4_violation(embedded, config);
+                if let Some(violation) = ipv4_violation(embedded, config) {
+                    return Some(violation);
+                }
             }
             ipv6_violation(v6, config)
         }
@@ -263,8 +266,9 @@ fn ipv4_violation(ip: Ipv4Addr, config: &PolicyConfig) -> Option<PolicyViolation
     // inside real VPN and appliance networks, so omitting them would let a
     // hostname resolve to a reachable non-public service and still pass.
     let special = [
-        // 192.0.0.0/24 IETF protocol assignments.
-        (octets[0] == 192 && octets[1] == 0 && octets[2] == 0),
+        // 192.0.0.0/24 IETF protocol assignments, except the globally
+        // reachable PCP and TURN anycast addresses at .9 and .10.
+        (octets[0] == 192 && octets[1] == 0 && octets[2] == 0 && !matches!(octets[3], 9 | 10)),
         // 192.0.2.0/24 TEST-NET-1.
         (octets[0] == 192 && octets[1] == 0 && octets[2] == 2),
         // 198.51.100.0/24 TEST-NET-2.
@@ -296,7 +300,8 @@ fn ipv6_violation(ip: Ipv6Addr, config: &PolicyConfig) -> Option<PolicyViolation
         };
     }
 
-    let first = ip.segments()[0];
+    let segments = ip.segments();
+    let first = segments[0];
     // fe80::/10 (link-local unicast). The is_unicast_link_local method is still
     // unstable, so match the prefix by hand.
     if (first & 0xffc0) == 0xfe80 {
@@ -311,18 +316,39 @@ fn ipv6_violation(ip: Ipv6Addr, config: &PolicyConfig) -> Option<PolicyViolation
         return Some(PolicyViolation::BlockedAddress(AddressClass::Multicast));
     }
 
-    let segments = ip.segments();
-    // 2001:db8::/32 (documentation).
-    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+    // Admit only IPv6 global unicast (2000::/3). This top-level allowlist is
+    // deliberately checked before the IANA carve-outs below: an unrecognized
+    // special-purpose prefix outside global unicast fails closed instead of
+    // becoming public merely because it was absent from a denylist.
+    if (first & 0xe000) != 0x2000 {
         return Some(PolicyViolation::BlockedAddress(
             AddressClass::SpecialPurpose,
         ));
     }
-    // 2001::/23 (IETF protocol assignments), which contains Teredo
-    // (2001::/32) and ORCHIDv2. Teredo addresses embed an IPv4 address, so
-    // leaving the block open would be a tunnel to a target the v4 rules
-    // already refuse.
+
+    // 2001::/23 is non-global by default. Admit only the more-specific ranges
+    // whose IANA Globally Reachable flag is true.
     if segments[0] == 0x2001 && (segments[1] & 0xfe00) == 0x0000 {
+        let protocol_assignment_exception =
+            // PCP, TURN, and DNS-SD anycast singletons.
+            (segments[1] == 0x0001
+                && segments[2..7].iter().all(|segment| *segment == 0)
+                && matches!(segments[7], 1..=3))
+            // AMT (2001:3::/32).
+            || segments[1] == 0x0003
+            // AS112-v6 (2001:4:112::/48).
+            || (segments[1] == 0x0004 && segments[2] == 0x0112)
+            // ORCHIDv2 (2001:20::/28) and DETs (2001:30::/28).
+            || (segments[1] & 0xfff0) == 0x0020
+            || (segments[1] & 0xfff0) == 0x0030;
+        if !protocol_assignment_exception {
+            return Some(PolicyViolation::BlockedAddress(
+                AddressClass::SpecialPurpose,
+            ));
+        }
+    }
+    // 2001:db8::/32 (documentation).
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
         return Some(PolicyViolation::BlockedAddress(
             AddressClass::SpecialPurpose,
         ));
@@ -330,6 +356,12 @@ fn ipv6_violation(ip: Ipv6Addr, config: &PolicyConfig) -> Option<PolicyViolation
     // 2002::/16 (6to4): the next 32 bits ARE an IPv4 address, so 6to4 is a
     // direct route to a private v4 destination if left open.
     if segments[0] == 0x2002 {
+        return Some(PolicyViolation::BlockedAddress(
+            AddressClass::SpecialPurpose,
+        ));
+    }
+    // 3fff::/20 (documentation).
+    if segments[0] == 0x3fff && (segments[1] & 0xf000) == 0 {
         return Some(PolicyViolation::BlockedAddress(
             AddressClass::SpecialPurpose,
         ));
@@ -505,7 +537,7 @@ mod tests {
             ("::ffff:127.0.0.1", Some(AddressClass::Loopback)),
             ("64:ff9b::10.0.0.1", Some(AddressClass::Private)),
             ("::0.0.0.10", Some(AddressClass::Unspecified)), // IPv4-compatible 0.0.0.10 -> 0/8
-            ("::ffff:8.8.8.8", None),                        // mapped public v4 is fine
+            ("::ffff:8.8.8.8", Some(AddressClass::SpecialPurpose)), // still outside 2000::/3
             // IPv6 public.
             ("2606:4700::1111", None),
             ("2001:4860:4860::8888", None),
@@ -546,6 +578,133 @@ mod tests {
         // not over-broad.
         assert_eq!(class_of("198.17.255.255"), None);
         assert_eq!(class_of("198.20.0.1"), None);
+    }
+
+    #[test]
+    fn ipv6_admits_only_global_unicast_minus_iana_non_global_carve_outs() {
+        let cases = [
+            // 2000::/3 is the only admitted top-level IPv6 range.
+            ("1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("2000::", false),
+            ("3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("4000::", true),
+            // Special-purpose ranges outside 2000::/3 stay refused by the
+            // allowlist even when they are not covered by legacy helpers.
+            ("100::", true),
+            ("100::ffff:ffff:ffff:ffff", true),
+            ("100:0:0:1::", true),
+            ("64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("64:ff9b::8.8.8.8", true),
+            ("64:ff9b:0:1::", true),
+            ("5f00::", true),
+            ("5fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("fec0::", true),
+            ("feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            // IANA protocol-assignment block and its globally reachable
+            // exceptions.
+            ("2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("2001::", true),
+            ("2001:1::1", false),
+            ("2001:1::2", false),
+            ("2001:1::3", false),
+            ("2001:2::", true),
+            ("2001:2:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("2001:3::", false),
+            ("2001:3:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("2001:4:111:ffff:ffff:ffff:ffff:ffff", true),
+            ("2001:4:112::", false),
+            ("2001:4:112:ffff:ffff:ffff:ffff:ffff", false),
+            ("2001:4:113::", true),
+            ("2001:20::", false),
+            ("2001:2f:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("2001:30::", false),
+            ("2001:3f:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("2001:200::", false),
+            // Remaining non-global carve-outs inside 2000::/3.
+            ("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("2001:db8::", true),
+            ("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("2001:db9::", false),
+            ("2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("2002::", true),
+            ("2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("2003::", false),
+            ("3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false),
+            ("3fff::", true),
+            ("3fff:0fff:ffff:ffff:ffff:ffff:ffff:ffff", true),
+            ("3fff:1000::", false),
+        ];
+
+        for (ip, refused) in cases {
+            assert_eq!(class_of(ip).is_some(), refused, "address {ip}");
+        }
+    }
+
+    #[test]
+    fn ipv4_global_unicast_boundaries_match_iana_reachability() {
+        let cases = [
+            ("0.255.255.255", true),
+            ("1.0.0.0", false),
+            ("9.255.255.255", false),
+            ("10.0.0.0", true),
+            ("10.255.255.255", true),
+            ("11.0.0.0", false),
+            ("100.63.255.255", false),
+            ("100.64.0.0", true),
+            ("100.127.255.255", true),
+            ("100.128.0.0", false),
+            ("126.255.255.255", false),
+            ("127.0.0.0", true),
+            ("127.255.255.255", true),
+            ("128.0.0.0", false),
+            ("169.253.255.255", false),
+            ("169.254.0.0", true),
+            ("169.254.255.255", true),
+            ("169.255.0.0", false),
+            ("172.15.255.255", false),
+            ("172.16.0.0", true),
+            ("172.31.255.255", true),
+            ("172.32.0.0", false),
+            ("191.255.255.255", false),
+            ("192.0.0.0", true),
+            ("192.0.0.8", true),
+            ("192.0.0.9", false),
+            ("192.0.0.10", false),
+            ("192.0.0.11", true),
+            ("192.0.0.169", true),
+            ("192.0.0.170", true),
+            ("192.0.0.171", true),
+            ("192.0.0.172", true),
+            ("192.0.1.255", false),
+            ("192.0.2.0", true),
+            ("192.0.2.255", true),
+            ("192.0.3.0", false),
+            ("192.167.255.255", false),
+            ("192.168.0.0", true),
+            ("192.168.255.255", true),
+            ("192.169.0.0", false),
+            ("198.17.255.255", false),
+            ("198.18.0.0", true),
+            ("198.19.255.255", true),
+            ("198.20.0.0", false),
+            ("198.51.99.255", false),
+            ("198.51.100.0", true),
+            ("198.51.100.255", true),
+            ("198.51.101.0", false),
+            ("203.0.112.255", false),
+            ("203.0.113.0", true),
+            ("203.0.113.255", true),
+            ("203.0.114.0", false),
+            ("223.255.255.255", false),
+            ("224.0.0.0", true),
+            ("239.255.255.255", true),
+            ("240.0.0.0", true),
+            ("255.255.255.255", true),
+        ];
+
+        for (ip, refused) in cases {
+            assert_eq!(class_of(ip).is_some(), refused, "address {ip}");
+        }
     }
 
     #[test]

@@ -138,6 +138,11 @@ const JUNE_BROWSER_MCP_SCRIPT: &str = include_str!("hermes/june_browser_mcp.py")
 /// authorization boundary against the agent, which can read its own config.
 /// The Browser access grant, re-checked by the broker, authorizes browser use.
 const JUNE_BROWSER_MCP_TOKEN_ENV: &str = "JUNE_BROWSER_PROXY_TOKEN";
+/// Runtime-owned session markers passed through to `june_browser`. Hermes
+/// filters subprocess environments, so the rendered MCP entry explicitly
+/// interpolates both values for the child process.
+const JUNE_BROWSER_MCP_CRON_CONTEXT_ENV: &str = "JUNE_BROWSER_CRON_SESSION";
+const JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV: &str = "JUNE_BROWSER_GATEWAY_SESSION";
 // Private Google connectors: four MCP servers (read + action split per
 // provider), registered only when at least one Google account is connected.
 // They call the loopback provider proxy's /v1/gmail*, /v1/gcal* routes, which
@@ -8135,6 +8140,8 @@ fn render_browser_mcp_entry(
       - {base_url}
     env:
       PYTHONUNBUFFERED: "1"
+      {cron_context_env}: "${{HERMES_CRON_SESSION}}"
+      {gateway_context_env}: "${{HERMES_GATEWAY_SESSION}}"
 {token_entry}    timeout: 30
     connect_timeout: 10
 "#,
@@ -8143,6 +8150,8 @@ fn render_browser_mcp_entry(
         command = yaml_string(&config.command),
         script_path = yaml_string(&config.script_path.to_string_lossy()),
         base_url = yaml_string(base_url),
+        cron_context_env = JUNE_BROWSER_MCP_CRON_CONTEXT_ENV,
+        gateway_context_env = JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV,
     )
 }
 
@@ -9848,6 +9857,25 @@ async fn handle_browser_execute(
         )
         .await;
     };
+    let transport = match request
+        .get("callContext")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("routine") => BrowserTransportKind::Managed,
+        Some("attended") => BrowserTransportKind::Attended,
+        _ => {
+            return write_json_response(
+                stream,
+                403,
+                serde_json::json!({
+                    "success": false,
+                    "message": "Browser use is unavailable because the caller context could not be verified.",
+                    "errorCode": "browser_context_unknown",
+                }),
+            )
+            .await;
+        }
+    };
     let arguments = match request.get("arguments") {
         Some(arguments) if arguments.is_object() => arguments.clone(),
         None => serde_json::json!({}),
@@ -9866,7 +9894,7 @@ async fn handle_browser_execute(
     };
     match state
         .browser_broker
-        .execute(BrowserTransportKind::Attended, tool, arguments)
+        .execute(transport, tool, arguments)
         .await
     {
         Ok(data) => {
@@ -9879,7 +9907,7 @@ async fn handle_browser_execute(
         }
         Err(error) => {
             let status = match error.code.as_str() {
-                "browser_access_disabled" => 403,
+                "browser_access_disabled" | "browser_context_unknown" => 403,
                 "browser_session_not_found" | "tab_not_owned" => 404,
                 "not_implemented" | "browser_tool_unavailable" => 501,
                 "browser_session_limit" => 429,
@@ -12232,7 +12260,7 @@ mod tests {
     async fn browser_execute_route_refuses_the_correct_token_while_grant_is_off() {
         let home = tempfile::tempdir().expect("tempdir");
         let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
-        let body = r#"{"tool":"start_session","arguments":{}}"#;
+        let body = r#"{"callContext":"attended","tool":"start_session","arguments":{}}"#;
         let request = format!(
             "POST /v1/browser/execute HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer browser-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
@@ -12247,6 +12275,151 @@ mod tests {
             "grant off must refuse action routes even with the correct token: {response}"
         );
         assert!(response.contains("browser_access_disabled"));
+    }
+
+    struct BrowserContextTransport {
+        called: Arc<std::sync::atomic::AtomicBool>,
+        block_navigation: bool,
+    }
+
+    impl crate::browser_broker::BrowserTransport for BrowserContextTransport {
+        fn execute<'a>(
+            &'a self,
+            tool: &'a str,
+            _arguments: serde_json::Value,
+        ) -> crate::browser_broker::TransportFuture<'a> {
+            let called = Arc::clone(&self.called);
+            let block_navigation = self.block_navigation;
+            Box::pin(async move {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                if block_navigation && tool == "navigate" {
+                    return Err(AppError::new(
+                        "browser_policy_blocked",
+                        "Navigation blocked: the destination is not on the public web.",
+                    ));
+                }
+                Ok(crate::browser_broker::TransportResponse::data(
+                    serde_json::json!({}),
+                ))
+            })
+        }
+    }
+
+    fn browser_execute_request(body: &str) -> String {
+        format!(
+            "POST /v1/browser/execute HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer browser-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn response_json(response: &str) -> serde_json::Value {
+        serde_json::from_str(
+            response
+                .split_once("\r\n\r\n")
+                .expect("HTTP response body")
+                .1,
+        )
+        .expect("JSON response")
+    }
+
+    #[tokio::test]
+    async fn unattended_browser_execute_route_reaches_managed_policy_end_to_end() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let attended_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let managed_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let broker = broker_for_access_flag(&access_flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&attended_called),
+                block_navigation: false,
+            }),
+            home.path().join("attended-images"),
+            home.path().join("attended-artifacts"),
+        );
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&managed_called),
+                block_navigation: true,
+            }),
+            home.path().join("managed-images"),
+            home.path().join("managed-artifacts"),
+        );
+
+        let start_body = r#"{"callContext":"routine","tool":"start_session","arguments":{}}"#;
+        let started = browser_proxy_response_with_broker(
+            Arc::clone(&broker),
+            &browser_execute_request(start_body),
+        )
+        .await;
+        let session_id = response_json(&started)["data"]["sessionId"]
+            .as_str()
+            .expect("managed session id")
+            .to_string();
+
+        let navigate_body = serde_json::json!({
+            "callContext": "routine",
+            "tool": "navigate",
+            "arguments": {
+                "session_id": session_id,
+                "url": "http://127.0.0.1/private",
+            },
+        })
+        .to_string();
+        let refused = browser_proxy_response_with_broker(
+            Arc::clone(&broker),
+            &browser_execute_request(&navigate_body),
+        )
+        .await;
+
+        assert!(
+            refused.starts_with("HTTP/1.1 400 Bad Request"),
+            "managed private-network policy must refuse through the real route: {refused}"
+        );
+        assert!(refused.contains("browser_policy_blocked"));
+        assert!(managed_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !attended_called.load(std::sync::atomic::Ordering::SeqCst),
+            "an unattended call must never reach the attended transport"
+        );
+
+        let attended_body = r#"{"callContext":"attended","tool":"start_session","arguments":{}}"#;
+        let attended = browser_proxy_response_with_broker(
+            Arc::clone(&broker),
+            &browser_execute_request(attended_body),
+        )
+        .await;
+        assert!(attended.starts_with("HTTP/1.1 200 OK"), "{attended}");
+        assert!(attended_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_browser_execute_context_fails_closed_before_transport_dispatch() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let attended_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let broker = broker_for_access_flag(&access_flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&attended_called),
+                block_navigation: false,
+            }),
+            home.path().join("images"),
+            home.path().join("artifacts"),
+        );
+        let body = r#"{"tool":"start_session","arguments":{}}"#;
+
+        let response =
+            browser_proxy_response_with_broker(broker, &browser_execute_request(body)).await;
+
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+        assert!(response.contains("browser_context_unknown"));
+        assert!(!attended_called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -12284,6 +12457,10 @@ mod tests {
         assert!(config.contains("    enabled: false\n"));
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_browser_mcp.py\"\n"));
         assert!(config.contains("      - \"http://127.0.0.1:9/v1\"\n"));
+        assert!(config.contains("      JUNE_BROWSER_CRON_SESSION: \"${HERMES_CRON_SESSION}\"\n"));
+        assert!(
+            config.contains("      JUNE_BROWSER_GATEWAY_SESSION: \"${HERMES_GATEWAY_SESSION}\"\n")
+        );
         assert!(!config.contains("browser-proxy-tok"));
         assert!(!config.contains(JUNE_BROWSER_MCP_TOKEN_ENV));
         assert!(!config.contains("JUNE_BROWSER_PROXY_TOKEN: \"proxy-tok\""));

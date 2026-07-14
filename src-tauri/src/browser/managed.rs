@@ -90,12 +90,18 @@ impl ManagedSessionConfig {
 pub async fn start_managed_session(
     config: ManagedSessionConfig,
 ) -> Result<Arc<ManagedBrowserSession>, AppError> {
-    start_managed_session_with_id(config, uuid::Uuid::new_v4().to_string()).await
+    start_managed_session_with_id(
+        config,
+        uuid::Uuid::new_v4().to_string(),
+        Arc::new(StartingManagedSession::default()),
+    )
+    .await
 }
 
 async fn start_managed_session_with_id(
     config: ManagedSessionConfig,
     id: String,
+    starting: Arc<StartingManagedSession>,
 ) -> Result<Arc<ManagedBrowserSession>, AppError> {
     let detected = launcher::detect_browser()
         .ok_or_else(|| AppError::new("browser_not_found", launcher::NO_BROWSER_MESSAGE))?;
@@ -111,6 +117,13 @@ async fn start_managed_session_with_id(
     let (cdp_read, cdp_write) = browser
         .take_cdp_pipes()
         .ok_or_else(|| start_failed("pipes"))?;
+    let resources = Arc::new(ManagedSessionResources {
+        proxy,
+        browser: Mutex::new(browser),
+        profile,
+        closed: AtomicBool::new(false),
+    });
+    starting.attach(Arc::clone(&resources))?;
     let cdp = CdpClient::start(cdp_read, cdp_write);
 
     // Attach to a fresh page target. These calls fail (browser_closed) if the
@@ -150,15 +163,17 @@ async fn start_managed_session_with_id(
         id,
         cdp,
         cdp_session_id,
-        proxy,
         policy: config.policy,
         resolver: config.resolver,
-        browser: Mutex::new(browser),
-        profile,
+        resources,
         epoch: AtomicU64::new(0),
         last_used: Mutex::new(Instant::now()),
-        closed: AtomicBool::new(false),
     });
+
+    if starting.is_cancelled() {
+        session.teardown();
+        return Err(session_closed(&session.id));
+    }
 
     // Crash watcher: if the browser process ends (the CDP pipe closes), tear
     // the session down promptly so the profile does not wait for registry
@@ -186,18 +201,113 @@ pub struct ManagedBrowserSession {
     id: String,
     cdp: CdpClient,
     cdp_session_id: String,
-    proxy: PinningProxy,
     policy: PolicyConfig,
     resolver: Arc<dyn Resolver>,
-    browser: Mutex<LaunchedBrowser>,
-    profile: EphemeralProfile,
+    resources: Arc<ManagedSessionResources>,
     /// Navigation epoch: bumped when a navigation starts, so snapshot
     /// references minted before it are identifiably stale. Interaction tools
     /// (JUN-294, attended transport) must refuse references from an older
     /// epoch instead of acting on the wrong element.
     epoch: AtomicU64,
     last_used: Mutex<Instant>,
+}
+
+struct ManagedSessionResources {
+    proxy: PinningProxy,
+    browser: Mutex<LaunchedBrowser>,
+    profile: EphemeralProfile,
     closed: AtomicBool,
+}
+
+impl ManagedSessionResources {
+    fn teardown(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut browser) = self.browser.lock() {
+            browser.kill();
+        }
+        self.proxy.shutdown();
+        self.profile.delete();
+    }
+}
+
+#[derive(Default)]
+struct StartingManagedSession {
+    cancelled: AtomicBool,
+    begun: AtomicBool,
+    finished: AtomicBool,
+    finished_notify: tokio::sync::Notify,
+    resources: Mutex<Option<Arc<ManagedSessionResources>>>,
+}
+
+impl StartingManagedSession {
+    fn begin(&self) -> Result<(), AppError> {
+        self.begun.store(true, Ordering::SeqCst);
+        if self.is_cancelled() {
+            self.finish();
+            return Err(session_closed("starting"));
+        }
+        Ok(())
+    }
+
+    fn attach(&self, resources: Arc<ManagedSessionResources>) -> Result<(), AppError> {
+        let mut slot = self
+            .resources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.cancelled.load(Ordering::SeqCst) {
+            drop(slot);
+            resources.teardown();
+            return Err(session_closed("starting"));
+        }
+        *slot = Some(resources);
+        Ok(())
+    }
+
+    fn terminate(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(resources) = self
+            .resources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()
+        {
+            resources.teardown();
+        }
+        if !self.begun.load(Ordering::SeqCst) {
+            self.finish();
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn finish(&self) {
+        if !self.finished.swap(true, Ordering::SeqCst) {
+            self.finished_notify.notify_waiters();
+        }
+    }
+
+    async fn wait_finished(&self) {
+        while !self.finished.load(Ordering::SeqCst) {
+            let notified = self.finished_notify.notified();
+            if self.finished.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct StartingCompletionGuard(Arc<StartingManagedSession>);
+
+impl Drop for StartingCompletionGuard {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
 }
 
 impl ManagedBrowserSession {
@@ -209,14 +319,14 @@ impl ManagedBrowserSession {
     /// The ephemeral profile directory, exposed so the E2E harness can prove
     /// teardown deleted it. The path is app-owned scratch, not page content.
     pub fn profile_path(&self) -> PathBuf {
-        self.profile.path().to_path_buf()
+        self.resources.profile.path().to_path_buf()
     }
 
     /// The browser process id while it is running, exposed so the E2E harness
     /// can kill the process and prove the crash watcher tears the session
     /// down. `None` once the process has been reaped.
     pub fn browser_pid(&self) -> Option<u32> {
-        let mut browser = self.browser.lock().ok()?;
+        let mut browser = self.resources.browser.lock().ok()?;
         if browser.try_wait_exited() {
             None
         } else {
@@ -228,14 +338,7 @@ impl ManagedBrowserSession {
     /// and synchronous, so revoke, crash, idle timeout, and app exit can all
     /// call it (or rely on Drop, which repeats the same work via the guards).
     fn teardown(&self) {
-        if self.closed.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        if let Ok(mut browser) = self.browser.lock() {
-            browser.kill();
-        }
-        self.proxy.shutdown();
-        self.profile.delete();
+        self.resources.teardown();
     }
 
     fn touch(&self) {
@@ -245,14 +348,8 @@ impl ManagedBrowserSession {
     }
 
     fn ensure_open(&self) -> Result<(), AppError> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(AppError::new(
-                "browser_session_closed",
-                format!(
-                    "Browser session {} is closed. Start a new one with start_session.",
-                    self.id
-                ),
-            ));
+        if self.resources.closed.load(Ordering::SeqCst) {
+            return Err(session_closed(&self.id));
         }
         Ok(())
     }
@@ -297,7 +394,7 @@ impl ManagedBrowserSession {
                 // A connection the proxy refused surfaces as a generic net
                 // error in the browser; the proxy's block ring tells us the
                 // refusal was policy, not the network.
-                if self.proxy.blocked_since(started).is_some() {
+                if self.resources.proxy.blocked_since(started).is_some() {
                     return Err(AppError::new(
                         "browser_policy_blocked",
                         "Navigation blocked: the destination is not on the public web. \
@@ -523,7 +620,7 @@ impl ManagedBrowserSession {
     }
 
     fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
+        self.resources.closed.load(Ordering::SeqCst)
     }
 }
 
@@ -544,6 +641,7 @@ pub(crate) struct ManagedBrowserTransport {
 struct ManagedTransportInner {
     config: ManagedSessionConfig,
     sessions: Mutex<HashMap<String, Arc<ManagedBrowserSession>>>,
+    starting: Mutex<HashMap<String, Arc<StartingManagedSession>>>,
     start_lock: tokio::sync::Mutex<()>,
 }
 
@@ -556,6 +654,7 @@ impl ManagedBrowserTransport {
         let inner = Arc::new(ManagedTransportInner {
             config,
             sessions: Mutex::new(HashMap::new()),
+            starting: Mutex::new(HashMap::new()),
             start_lock: tokio::sync::Mutex::new(()),
         });
         spawn_idle_reaper(&inner);
@@ -580,43 +679,106 @@ impl ManagedBrowserTransport {
         })
     }
 
-    async fn start_session(&self, session_id: &str) -> Result<TransportResponse, AppError> {
-        let _start = self.inner.start_lock.lock().await;
-        {
+    fn starting(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<StartingManagedSession>>> {
+        self.inner
+            .starting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn reserve_session(&self, session_id: &str) -> Result<(), AppError> {
+        let active = {
             let mut sessions = self.sessions();
             sessions.retain(|_, session| !session.is_closed());
-            if sessions.len() >= MAX_MANAGED_SESSIONS {
-                return Err(AppError::new(
-                    "browser_session_limit",
-                    "Too many managed browser sessions are open. Close one first.",
-                ));
-            }
+            sessions.len()
+        };
+        let mut starting = self.starting();
+        if active + starting.len() >= MAX_MANAGED_SESSIONS {
+            return Err(AppError::new(
+                "browser_session_limit",
+                "Too many managed browser sessions are open. Close one first.",
+            ));
         }
+        starting.insert(
+            session_id.to_string(),
+            Arc::new(StartingManagedSession::default()),
+        );
+        Ok(())
+    }
+
+    async fn start_session(&self, session_id: &str) -> Result<TransportResponse, AppError> {
+        let _start = self.inner.start_lock.lock().await;
+        let starting = self
+            .starting()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| session_closed(session_id))?;
+        if let Err(error) = starting.begin() {
+            self.starting().remove(session_id);
+            return Err(error);
+        }
+        let _completion = StartingCompletionGuard(Arc::clone(&starting));
         let config = ManagedSessionConfig {
             artifacts_root: self.inner.config.artifacts_root.clone(),
             policy: self.inner.config.policy.clone(),
             resolver: Arc::clone(&self.inner.config.resolver),
         };
-        let session = start_managed_session_with_id(config, session_id.to_string()).await?;
-        self.sessions().insert(session_id.to_string(), session);
+        let result =
+            start_managed_session_with_id(config, session_id.to_string(), Arc::clone(&starting))
+                .await;
+        let session = match result {
+            Ok(session) if !starting.is_cancelled() => session,
+            Ok(session) => {
+                session.teardown();
+                self.starting().remove(session_id);
+                return Err(session_closed(session_id));
+            }
+            Err(error) => {
+                self.starting().remove(session_id);
+                return Err(error);
+            }
+        };
+        self.sessions()
+            .insert(session_id.to_string(), Arc::clone(&session));
+        self.starting().remove(session_id);
+        if session.is_closed() {
+            self.sessions().remove(session_id);
+            return Err(session_closed(session_id));
+        }
         Ok(TransportResponse::data(json!({})))
     }
 
     fn terminate_session(&self, session_id: &str) {
+        if let Some(starting) = self.starting().get(session_id).cloned() {
+            starting.terminate();
+        }
         if let Some(session) = self.sessions().remove(session_id) {
             session.teardown();
+        }
+    }
+
+    async fn close_session(&self, session_id: &str) {
+        let starting = self.starting().get(session_id).cloned();
+        self.terminate_session(session_id);
+        if let Some(starting) = starting {
+            starting.wait_finished().await;
+            self.starting().remove(session_id);
         }
     }
 }
 
 impl BrowserTransport for ManagedBrowserTransport {
+    fn reserve_session(&self, session_id: &str) -> Result<(), AppError> {
+        ManagedBrowserTransport::reserve_session(self, session_id)
+    }
+
     fn execute<'a>(&'a self, tool: &'a str, arguments: Value) -> TransportFuture<'a> {
         Box::pin(async move {
             let session_id = required_argument(&arguments, "session_id")?;
             match tool {
                 "start_session" => self.start_session(session_id).await,
                 "close_session" => {
-                    self.terminate_session(session_id);
+                    self.close_session(session_id).await;
                     Ok(TransportResponse::data(json!({ "closed": true })))
                 }
                 "navigate" => {
@@ -682,6 +844,16 @@ impl BrowserTransport for ManagedBrowserTransport {
 
 impl Drop for ManagedTransportInner {
     fn drop(&mut self) {
+        let starting = self
+            .starting
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, starting)| starting)
+            .collect::<Vec<_>>();
+        for starting in starting {
+            starting.terminate();
+        }
         let sessions = self
             .sessions
             .get_mut()
@@ -745,6 +917,13 @@ fn start_failed(stage: &str) -> AppError {
     )
 }
 
+fn session_closed(session_id: &str) -> AppError {
+    AppError::new(
+        "browser_session_closed",
+        format!("Browser session {session_id} is closed. Start a new one with start_session."),
+    )
+}
+
 fn tool_error(error: super::cdp::CdpError) -> AppError {
     AppError::new("browser_command_failed", error.message)
 }
@@ -785,47 +964,41 @@ const SNAPSHOT_JS: &str = r#"(() => {
     return rect.width > 0 && rect.height > 0;
   };
   const refs = [];
-  // A field whose value must never reach the model or an artifact: the browser
-  // itself masks a password, and this read path must not undo that. One-time
-  // codes and payment details are the same class. Matched on type, autocomplete
-  // token, and the usual name/id/label tells, because a secret in a plain
-  // text input is still a secret.
-  const SENSITIVE_TYPES = ["password", "hidden"];
-  const SENSITIVE_AUTOCOMPLETE = /one-time-code|current-password|new-password|^cc-/i;
-  const SENSITIVE_HINT = /pass(word|code)?|otp|one.?time|2fa|mfa|secret|token|cvv|cvc|card.?number|security.?code|ssn|pin\b/i;
-  const sensitive = (el) => {
-    const type = (el.getAttribute("type") || "").toLowerCase();
-    if (SENSITIVE_TYPES.includes(type)) return true;
-    const autocomplete = el.getAttribute("autocomplete") || "";
-    if (SENSITIVE_AUTOCOMPLETE.test(autocomplete)) return true;
-    const hints = [
-      el.getAttribute("name") || "",
-      el.getAttribute("id") || "",
-      el.getAttribute("aria-label") || "",
-      el.getAttribute("placeholder") || "",
-    ].join(" ");
-    return SENSITIVE_HINT.test(hints);
+  const FORM_CONTROLS = new Set(["input", "textarea", "select"]);
+  const accessibleLabel = (el) => {
+    const labelledBy = (el.getAttribute("aria-labelledby") || "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.innerText || "")
+      .join(" ");
+    const labels = el.labels
+      ? Array.from(el.labels).map((label) => label.innerText || "").join(" ")
+      : "";
+    return (
+      el.getAttribute("aria-label") ||
+      labelledBy ||
+      labels ||
+      el.getAttribute("placeholder") ||
+      el.getAttribute("name") ||
+      ""
+    ).trim().replace(/\s+/g, " ").slice(0, 120);
   };
   const describe = (el, n) => {
     const tag = el.tagName.toLowerCase();
     const type = el.getAttribute("type");
-    const label = (
-      el.getAttribute("aria-label") ||
-      el.getAttribute("placeholder") ||
-      el.getAttribute("name") ||
-      ""
-    ).trim();
-    const isSensitive = sensitive(el);
-    // Never serialize the value of a sensitive field. Say only whether it is
-    // filled, so the agent can still reason about form state.
-    const raw = isSensitive ? "" : (el.innerText || el.value || "");
+    const label = accessibleLabel(el);
+    const isFormControl = FORM_CONTROLS.has(tag);
+    // Form-control values are untrusted page data that may contain secrets.
+    // Expose only the accessible label and a generic state.
+    const raw = isFormControl ? "" : (el.innerText || "");
     const text = raw.trim().replace(/\s+/g, " ").slice(0, 120);
     const href = tag === "a" ? (el.getAttribute("href") || "").slice(0, 300) : "";
     let out = "[ref" + n + "] <" + tag + (type ? " type=" + type : "") + ">";
-    if (isSensitive) {
+    if (isFormControl) {
+      const filled = type === "checkbox" || type === "radio" ? el.checked : Boolean(el.value);
       out += " (value hidden";
       if (label) out += ": " + label;
-      out += el.value ? ", filled)" : ", empty)";
+      out += filled ? ", filled)" : ", empty)";
       return out;
     }
     if (text) out += " " + text;

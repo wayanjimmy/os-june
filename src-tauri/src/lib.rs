@@ -323,6 +323,7 @@ pub fn run() {
         .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
         .setup(|app| {
+            browser::setup_on_app_start();
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
             providers::setup(app);

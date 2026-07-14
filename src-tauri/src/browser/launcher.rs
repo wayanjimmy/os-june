@@ -139,10 +139,10 @@ pub fn profiles_root() -> PathBuf {
 /// startup, before any session exists; all errors are ignored (a missing root
 /// is already the desired state).
 pub fn sweep_profiles_root() {
-    sweep_dir(&profiles_root());
+    sweep_profiles_root_at(&profiles_root());
 }
 
-fn sweep_dir(root: &Path) {
+pub(super) fn sweep_profiles_root_at(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -306,6 +306,12 @@ pub fn launch(binary: &Path, profile_dir: &Path, proxy_port: u16) -> io::Result<
     command
         .arg(format!("--proxy-server=http://127.0.0.1:{proxy_port}"))
         .arg("--proxy-bypass-list=<-loopback>")
+        // WebRTC can otherwise emit ICE/STUN traffic directly over UDP,
+        // outside the HTTP/CONNECT proxy, and reach private or link-local
+        // destinations. Managed read sessions never need realtime media.
+        .arg("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+        .arg("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+        .arg("--enforce-webrtc-ip-permission-check")
         // Quiet, non-phoning-home, extension-free session.
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
@@ -510,7 +516,7 @@ mod tests {
         std::fs::create_dir_all(base.join("stale2")).unwrap();
         std::fs::write(base.join("loose"), b"x").unwrap();
         assert!(base.exists());
-        sweep_dir(&base);
+        sweep_profiles_root_at(&base);
         assert!(!base.exists());
     }
 

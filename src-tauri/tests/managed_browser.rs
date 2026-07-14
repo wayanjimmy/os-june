@@ -54,6 +54,10 @@ impl Resolver for FixtureResolver {
 /// A minimal HTTP fixture server: `/` serves a page with a heading, a link,
 /// and body text; `/redirect` 302s to the blocked internal host.
 async fn spawn_fixture_server() -> SocketAddr {
+    spawn_fixture_server_with_webrtc_probe(None).await
+}
+
+async fn spawn_fixture_server_with_webrtc_probe(webrtc_probe: Option<SocketAddr>) -> SocketAddr {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -82,8 +86,23 @@ async fn spawn_fixture_server() -> SocketAddr {
 <input type=\"password\" name=\"password\" value=\"hunter2-should-never-leak\">\
 <input type=\"text\" autocomplete=\"one-time-code\" name=\"otp\" value=\"483726-should-never-leak\">\
 <input type=\"text\" name=\"cardNumber\" value=\"4111111111111111\">\
+<label for=\"x\">One-time code</label>\
+<input id=\"x\" value=\"label-only-otp-secret\">\
 <input type=\"text\" name=\"city\" value=\"Warsaw\">\
 </form></body></html>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else if path.starts_with("/webrtc") {
+                    let probe = webrtc_probe.expect("WebRTC fixture needs a UDP probe");
+                    let body = format!(
+                        "<!doctype html><html><body><script>\
+const peer = new RTCPeerConnection({{iceServers: [{{urls: 'stun:{probe}'}}]}});\
+peer.createDataChannel('probe');\
+peer.createOffer().then(offer => peer.setLocalDescription(offer));\
+</script></body></html>"
+                    );
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -106,6 +125,23 @@ async fn start_fixture_session(
     artifacts: &std::path::Path,
 ) -> Arc<os_june_lib::browser::managed::ManagedBrowserSession> {
     let fixture_addr = spawn_fixture_server().await;
+    let config = ManagedSessionConfig {
+        artifacts_root: artifacts.to_path_buf(),
+        policy: PolicyConfig {
+            allow_loopback: true,
+        },
+        resolver: Arc::new(FixtureResolver { fixture_addr }),
+    };
+    start_managed_session(config)
+        .await
+        .expect("start managed session (is a Chromium-family browser installed?)")
+}
+
+async fn start_webrtc_fixture_session(
+    artifacts: &std::path::Path,
+    udp_probe: SocketAddr,
+) -> Arc<os_june_lib::browser::managed::ManagedBrowserSession> {
+    let fixture_addr = spawn_fixture_server_with_webrtc_probe(Some(udp_probe)).await;
     let config = ManagedSessionConfig {
         artifacts_root: artifacts.to_path_buf(),
         policy: PolicyConfig {
@@ -157,8 +193,9 @@ async fn navigate_snapshot_screenshot_and_teardown_end_to_end() {
 }
 
 /// The snapshot is a read path over the live page, so it can resurface a value
-/// the browser itself masks. Password, one-time-code, and payment fields must
-/// never have their values serialized to the model or to an artifact.
+/// the browser itself masks. No form-control value is trustworthy enough to
+/// serialize to the model or to an artifact, including a value whose only
+/// sensitive signal is its associated label.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "launches the real detected browser; run with -- --ignored"]
 async fn snapshot_never_leaks_sensitive_field_values() {
@@ -176,16 +213,17 @@ async fn snapshot_never_leaks_sensitive_field_values() {
         "hunter2-should-never-leak",
         "483726-should-never-leak",
         "4111111111111111",
+        "label-only-otp-secret",
+        "Warsaw",
     ] {
         assert!(
             !text.contains(secret),
-            "snapshot leaked a sensitive field value: {text}"
+            "snapshot leaked a form-control value: {text}"
         );
     }
     // The fields are still described, so the agent can reason about the form.
     assert!(text.contains("value hidden"), "{text}");
-    // A non-sensitive field's value is still readable.
-    assert!(text.contains("Warsaw"), "{text}");
+    assert!(text.contains("One-time code"), "{text}");
 
     session.close().await;
 }
@@ -217,6 +255,36 @@ async fn blocked_destinations_refuse_before_navigation_and_after_a_redirect() {
         .await
         .expect_err("redirect to a private destination must refuse");
     assert_eq!(redirected.code, "browser_policy_blocked");
+
+    session.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "launches the real detected browser; run with -- --ignored"]
+async fn managed_page_cannot_send_webrtc_udp_to_a_private_listener() {
+    let _serial = LIVE_BROWSER_SERIAL.lock().await;
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind private UDP probe");
+    let udp_addr = udp.local_addr().expect("UDP probe address");
+    let artifacts = tempfile::tempdir().expect("artifacts dir");
+    let session = start_webrtc_fixture_session(artifacts.path(), udp_addr).await;
+
+    session
+        .navigate("http://fixture.test/webrtc")
+        .await
+        .expect("navigate to WebRTC fixture");
+
+    let mut packet = [0u8; 2048];
+    let received = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        udp.recv_from(&mut packet),
+    )
+    .await;
+    assert!(
+        received.is_err(),
+        "managed Chromium sent non-proxied WebRTC UDP to a private listener"
+    );
 
     session.close().await;
 }
