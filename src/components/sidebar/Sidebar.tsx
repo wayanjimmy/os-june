@@ -273,6 +273,11 @@ const SETTINGS_SIDEBAR_GROUPS: {
         icon: <IconPlugin1 size={16} />,
       },
       {
+        id: "obsidian",
+        label: "Obsidian",
+        icon: <IconNoteText size={16} />,
+      },
+      {
         id: "skills",
         label: "Installed skills",
         icon: <IconElements size={16} />,
