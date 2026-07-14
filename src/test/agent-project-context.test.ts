@@ -105,6 +105,29 @@ describe("agent project context", () => {
     expect(stripProjectContext(truncated)).toBe(truncated);
   });
 
+  it("announces leaving a project exactly once, then reinjects on re-filing", () => {
+    const filed = prepareProjectPrompt("First", project, undefined);
+
+    // Session moved out of the project: one clearing block goes out.
+    const cleared = prepareProjectPrompt("After move out", undefined, filed.contextSignature);
+    expect(cleared.injected).toBe(true);
+    expect(cleared.text).toContain("no longer filed in a project");
+    expect(stripProjectContext(cleared.text)).toBe("After move out");
+
+    // Staying out of a project stays silent.
+    const still = prepareProjectPrompt("Later", undefined, cleared.contextSignature);
+    expect(still).toEqual({
+      text: "Later",
+      injected: false,
+      contextSignature: cleared.contextSignature,
+    });
+
+    // Re-filing injects the new project block again.
+    const refiled = prepareProjectPrompt("Back", project, still.contextSignature);
+    expect(refiled.injected).toBe(true);
+    expect(refiled.text).toContain("project_id: project-1");
+  });
+
   it("keeps multi-line instructions intact through strip", () => {
     const multi = prepareProjectPrompt(
       "Question",

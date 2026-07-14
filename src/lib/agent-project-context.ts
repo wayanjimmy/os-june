@@ -46,13 +46,38 @@ function renderProjectContext(project: AgentProjectContext): string {
   ].join("\n");
 }
 
+/** Signature recorded after delivering the "left the project" marker, so the
+ * clearing block goes out exactly once and a later re-filing (any real
+ * project signature differs) reinjects normally. */
+export const CLEARED_CONTEXT_SIGNATURE = "cleared";
+
+function renderClearedContext(): string {
+  return [
+    CONTEXT_OPEN_MARKER,
+    "project_id: (none)",
+    "project: (none)",
+    "instructions:",
+    "This session is no longer filed in a project. Previous project instructions no longer apply; use only global memory.",
+    CONTEXT_CLOSE_MARKER,
+  ].join("\n");
+}
+
 export function prepareProjectPrompt(
   prompt: string,
   project: AgentProjectContext | undefined,
   previousContextSignature: string | null | undefined,
 ): PreparedProjectPrompt {
   if (!project) {
-    return { text: prompt, injected: false, contextSignature: null };
+    // A project block was delivered earlier in this conversation: tell the
+    // model the filing ended, or it keeps following stale instructions.
+    if (previousContextSignature && previousContextSignature !== CLEARED_CONTEXT_SIGNATURE) {
+      return {
+        text: `${renderClearedContext()}\n\n${prompt}`,
+        injected: true,
+        contextSignature: CLEARED_CONTEXT_SIGNATURE,
+      };
+    }
+    return { text: prompt, injected: false, contextSignature: previousContextSignature ?? null };
   }
 
   const contextSignature = projectContextSignature(project);
