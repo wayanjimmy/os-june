@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use june_domain::{
-    NewShare, NewShareInvite, ShareInviteRecord, ShareKind, ShareRecord, ShareStore,
-    ShareStoreError, ShareViewRecord,
+    MAX_INVITES_PER_SHARE, NewShare, NewShareInvite, ShareInviteRecord, ShareKind, ShareRecord,
+    ShareStore, ShareStoreError, ShareViewRecord,
 };
 use sqlx::{
     PgPool, Row,
@@ -160,6 +160,16 @@ impl ShareStore for PgShareStore {
         .await
         .map_err(query_error)?
         .ok_or(ShareStoreError::NotFound)?;
+        let existing =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM share_invites WHERE share_id = $1")
+                .bind(row_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(query_error)?;
+        let total = usize::try_from(existing).unwrap_or(usize::MAX);
+        if total.saturating_add(invites.len()) > MAX_INVITES_PER_SHARE {
+            return Err(ShareStoreError::InviteLimitExceeded);
+        }
         for (invite_id, invite) in &invites {
             insert_invite(&mut tx, row_id, invite_id, invite).await?;
         }

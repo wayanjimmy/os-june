@@ -17,8 +17,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use june_api::ShareViewerInfo;
 use june_domain::{
-    DomainError, NewShare, NewShareInvite, ShareInviteRecord, ShareKind, ShareRecord, ShareStore,
-    ShareStoreError, ShareViewRecord, ViewerIdentity,
+    DomainError, MAX_INVITES_PER_SHARE, NewShare, NewShareInvite, ShareInviteRecord, ShareKind,
+    ShareRecord, ShareStore, ShareStoreError, ShareViewRecord, ViewerIdentity,
 };
 use june_services::{ShareService, ShareServiceDeps};
 use pretty_assertions::assert_eq;
@@ -142,6 +142,9 @@ impl ShareStore for MemoryShareStore {
             .get_mut(share_id)
             .filter(|share| share.owner == owner && !share.deleted)
             .ok_or(ShareStoreError::NotFound)?;
+        if share.invites.len() + invites.len() > MAX_INVITES_PER_SHARE {
+            return Err(ShareStoreError::InviteLimitExceeded);
+        }
         for (invite_id, invite) in invites {
             share.invites.push(StoredInvite {
                 invite_id,
@@ -567,4 +570,58 @@ async fn robots_txt_disallows_share_paths() {
         .expect("body reads");
     let text = String::from_utf8_lossy(&bytes).to_string();
     assert!(text.contains("Disallow: /s/"));
+}
+
+#[tokio::test]
+async fn invites_cannot_grow_past_the_cumulative_cap() {
+    let router = share_router();
+    let (_, body) = call(
+        &router,
+        create_request(OWNER, &[invite_wire("friend@example.com")]),
+    )
+    .await;
+    let share_id = body["data"]["shareId"]
+        .as_str()
+        .expect("share id")
+        .to_string();
+
+    // Fill to the cap in batches, then one more must fail.
+    let mut added = 1;
+    while added < MAX_INVITES_PER_SHARE {
+        let batch: Vec<Value> = (0..(MAX_INVITES_PER_SHARE - added).min(40))
+            .map(|n| invite_wire(&format!("extra{added}x{n}@example.com")))
+            .collect();
+        added += batch.len();
+        let request = authed(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/shares/{share_id}/invites")),
+            OWNER,
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "invites": batch }).to_string()))
+        .expect("request builds");
+        let (status, _) = call(&router, request).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let request = authed(
+        Request::builder()
+            .method("POST")
+            .uri(format!("/v1/shares/{share_id}/invites")),
+        OWNER,
+    )
+    .header(header::CONTENT_TYPE, "application/json")
+    .body(Body::from(
+        json!({ "invites": [invite_wire("overflow@example.com")] }).to_string(),
+    ))
+    .expect("request builds");
+    let (status, body) = call(&router, request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most")
+    );
 }

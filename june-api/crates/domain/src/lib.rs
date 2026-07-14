@@ -714,6 +714,10 @@ pub struct ShareViewRecord {
     pub envelope: Option<(Vec<u8>, Vec<u8>)>,
 }
 
+/// Hard ceiling on invites per share, enforced by every store so repeated
+/// `add_invites` calls cannot grow a share's ACL without bound.
+pub const MAX_INVITES_PER_SHARE: usize = 50;
+
 #[derive(Debug, Error)]
 pub enum ShareStoreError {
     /// Unknown share, unknown invite, revoked, or not owned by the caller.
@@ -721,6 +725,9 @@ pub enum ShareStoreError {
     /// apart from this signal (non-enumeration).
     #[error("share not found")]
     NotFound,
+    /// The share already carries `MAX_INVITES_PER_SHARE` invites.
+    #[error("invite limit exceeded")]
+    InviteLimitExceeded,
     #[error("share store unavailable: {reason}")]
     Unavailable { reason: String },
 }

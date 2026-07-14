@@ -6,14 +6,13 @@
 
 use crate::error::ServiceError;
 use june_domain::{
-    NewShare, NewShareInvite, ShareInviteRecord, ShareKind, ShareRecord, ShareStore,
-    ShareStoreError, ShareViewRecord, UserId, ViewerIdentity,
+    MAX_INVITES_PER_SHARE, NewShare, NewShareInvite, ShareInviteRecord, ShareKind, ShareRecord,
+    ShareStore, ShareStoreError, ShareViewRecord, UserId, ViewerIdentity,
 };
 use std::sync::Arc;
 
 /// 20 random bytes, base64url: 160 bits of entropy, non-sequential.
 const ID_RANDOM_BYTES: usize = 20;
-const MAX_INVITES_PER_SHARE: usize = 50;
 const MAX_EMAIL_CHARS: usize = 254;
 /// AES-256-GCM of a 32-byte content key: 32 + 16-byte tag.
 const ENVELOPE_BYTES: usize = 48;
@@ -229,6 +228,9 @@ impl From<ShareStoreError> for ServiceError {
     fn from(error: ShareStoreError) -> Self {
         match error {
             ShareStoreError::NotFound => Self::ShareNotFound,
+            ShareStoreError::InviteLimitExceeded => Self::InvalidInput {
+                reason: format!("a share can have at most {MAX_INVITES_PER_SHARE} invites"),
+            },
             ShareStoreError::Unavailable { reason } => {
                 tracing::error!(%reason, "share store unavailable");
                 Self::ShareUnavailable

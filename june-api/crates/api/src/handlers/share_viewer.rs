@@ -105,8 +105,13 @@ pub(crate) async fn token_exchange(
     if state.share().is_none() {
         return Err(ApiError::SharingUnavailable);
     }
+    // Two budgets: per-address AND a global one for the endpoint. The
+    // per-address key uses the LAST x-forwarded-for hop (the one our ingress
+    // appended); earlier entries are client-controlled and spoofable. The
+    // global budget bounds the damage even if a caller varies the header.
     let client_key = format!("ip:{}", client_address(&headers));
-    if !state.share_rate().allow(&client_key) {
+    if !state.share_rate().allow(&client_key) || !state.share_rate().allow("token-exchange:global")
+    {
         return Err(ApiError::AuthorizationDenied);
     }
     if request.code.len() > 4096
@@ -139,9 +144,11 @@ pub(crate) async fn token_exchange(
 }
 
 fn client_address(headers: &HeaderMap) -> String {
+    // dstack-ingress appends the peer address as the FINAL x-forwarded-for
+    // entry; everything before it arrived from the client and is spoofable.
     headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split(',').next_back())
         .map_or_else(|| "unknown".to_string(), |value| value.trim().to_string())
 }
