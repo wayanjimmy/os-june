@@ -961,6 +961,91 @@ pub async fn ensure_hermes_bridge_gateway(bridge: State<'_, HermesBridge>) -> Re
     ensure_hermes_gateway_running(connection).await
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionPrototypeProxyInfo {
+    pub base_url: String,
+    pub account_id: String,
+    pub connector_token: String,
+    pub token_env: &'static str,
+    pub account_env: &'static str,
+}
+
+#[tauri::command]
+pub async fn notion_prototype_provider_proxy_info(
+    app: AppHandle,
+    bridge: State<'_, HermesBridge>,
+) -> Result<NotionPrototypeProxyInfo, AppError> {
+    let hermes_home = resolve_june_hermes_home(&app)?;
+    let proxy = ensure_provider_proxy(&app, &bridge, &hermes_home).await?;
+    Ok(NotionPrototypeProxyInfo {
+        base_url: format!("http://127.0.0.1:{}", proxy.port),
+        account_id: "notion-prototype".to_string(),
+        connector_token: proxy.connector_token,
+        token_env: JUNE_CONNECTOR_MCP_TOKEN_ENV,
+        account_env: JUNE_CONNECTOR_MCP_ACCOUNT_ENV,
+    })
+}
+
+#[tauri::command]
+pub async fn notion_prototype_run_mcp_smoke(
+    app: AppHandle,
+    bridge: State<'_, HermesBridge>,
+    page_id: String,
+) -> Result<serde_json::Value, AppError> {
+    let proxy = notion_prototype_provider_proxy_info(app, bridge).await?;
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("hermes")
+        .join("june_notion_prototype_mcp.py");
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "get_page",
+            "arguments": { "page_id": page_id }
+        }
+    });
+    let mut child = Command::new("python3")
+        .arg(&script)
+        .arg(&proxy.base_url)
+        .env_clear()
+        .env("PYTHONUNBUFFERED", "1")
+        .env(JUNE_CONNECTOR_MCP_TOKEN_ENV, &proxy.connector_token)
+        .env(JUNE_CONNECTOR_MCP_ACCOUNT_ENV, &proxy.account_id)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| AppError::new("notion_prototype_mcp_failed", error.to_string()))?;
+    {
+        let Some(stdin) = child.stdin.as_mut() else {
+            return Err(AppError::new(
+                "notion_prototype_mcp_failed",
+                "Could not open prototype MCP stdin.",
+            ));
+        };
+        writeln!(stdin, "{}", request)
+            .map_err(|error| AppError::new("notion_prototype_mcp_failed", error.to_string()))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| AppError::new("notion_prototype_mcp_failed", error.to_string()))?;
+    if !output.status.success() {
+        return Err(AppError::new(
+            "notion_prototype_mcp_failed",
+            "Prototype MCP smoke process failed.",
+        ));
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).map_err(|_| {
+        AppError::new(
+            "notion_prototype_mcp_failed",
+            "Prototype MCP smoke response was not JSON.",
+        )
+    })
+}
+
 #[tauri::command]
 pub fn resolve_agent_recorder_request(
     bridge: State<'_, HermesBridge>,
@@ -8520,7 +8605,8 @@ async fn handle_june_provider_connection(
             if path.starts_with("/v1/gmail/")
                 || path.starts_with("/v1/gmail-actions/")
                 || path.starts_with("/v1/gcal/")
-                || path.starts_with("/v1/gcal-actions/") =>
+                || path.starts_with("/v1/gcal-actions/")
+                || path.starts_with("/v1/notion-prototype/") =>
         {
             handle_connector_route(&mut stream, &state, path, &request.body).await?;
         }
@@ -8947,7 +9033,10 @@ async fn dispatch_connector_route(
     account_id: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
-    use crate::connectors::google;
+    use crate::connectors::{google, notion_prototype};
+    if path.starts_with("/v1/notion-prototype/") {
+        return notion_prototype::dispatch_proxy_route(path, account_id, body).await;
+    }
     match path {
         "/v1/gmail/search_threads" => {
             let query = require_body_str(body, "query")?;
@@ -9667,9 +9756,9 @@ fn model_catalog_with_fallback(
 }
 
 /// Recorder mutations require the recorder-scoped secret; connector routes
-/// (mail/calendar) require the connector-scoped secret; every other route keeps
-/// the general provider token. Distinct secrets, so none authorizes another's
-/// surface.
+/// (mail/calendar/Notion prototype) require the connector-scoped secret; every
+/// other route keeps the general provider token. Distinct secrets, so none
+/// authorizes another's surface.
 fn provider_proxy_required_token<'a>(
     path: &str,
     provider_token: &'a str,
@@ -9682,6 +9771,7 @@ fn provider_proxy_required_token<'a>(
         || path.starts_with("/v1/gmail-actions/")
         || path.starts_with("/v1/gcal/")
         || path.starts_with("/v1/gcal-actions/")
+        || path.starts_with("/v1/notion-prototype/")
     {
         connector_token
     } else {

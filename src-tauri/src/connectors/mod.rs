@@ -14,6 +14,7 @@
 pub mod approvals;
 pub mod commands;
 pub mod google;
+pub mod notion_prototype;
 pub mod oauth;
 pub mod scopes;
 pub mod store;

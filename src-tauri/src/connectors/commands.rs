@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use super::{
-    begin_connect, disconnect, list_accounts, scopes::ScopeBundle, ConnectFlow, ConnectorAccount,
-    ConnectorAccountStatus,
+    begin_connect, disconnect, list_accounts, notion_prototype, scopes::ScopeBundle, ConnectFlow,
+    ConnectorAccount, ConnectorAccountStatus,
 };
 
 /// A routine earns autonomy only after this many completed approval-mode
@@ -100,6 +100,62 @@ pub async fn connectors_disconnect(
     request: ConnectorsDisconnectRequest,
 ) -> Result<(), AppError> {
     disconnect(&app, &request.account_id, request.revoke).await
+}
+
+// --- Notion ADR 0024 prototype ----------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionPrototypeConnectRequest {
+    pub token: String,
+    pub token_type: notion_prototype::NotionPrototypeTokenType,
+}
+
+#[tauri::command]
+pub async fn notion_prototype_connect(
+    request: NotionPrototypeConnectRequest,
+) -> Result<notion_prototype::NotionPrototypeConnection, AppError> {
+    notion_prototype::connect(request.token, request.token_type).await
+}
+
+#[tauri::command]
+pub async fn notion_prototype_status() -> Result<notion_prototype::NotionPrototypeStatus, AppError>
+{
+    notion_prototype::status().await
+}
+
+#[tauri::command]
+pub async fn notion_prototype_disconnect() -> Result<(), AppError> {
+    notion_prototype::disconnect().await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionPrototypeSelectRootsRequest {
+    pub roots: Vec<notion_prototype::SelectedRoot>,
+}
+
+#[tauri::command]
+pub async fn notion_prototype_select_roots(
+    request: NotionPrototypeSelectRootsRequest,
+) -> Result<Vec<notion_prototype::SelectedRoot>, AppError> {
+    notion_prototype::select_roots(request.roots).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionPrototypeSearchRequest {
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub max: Option<u8>,
+}
+
+#[tauri::command]
+pub async fn notion_prototype_search(
+    request: NotionPrototypeSearchRequest,
+) -> Result<Vec<notion_prototype::NotionPrototypeSearchResult>, AppError> {
+    notion_prototype::search(request.query, request.max).await
 }
 
 // --- Routine trust modes -----------------------------------------------------
