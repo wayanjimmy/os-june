@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   updateHermesBridgeCronJob: vi.fn(),
   deleteHermesBridgeCronJob: vi.fn(),
   hermesBridgeCronJobAction: vi.fn(),
+  memorySettings: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -41,6 +42,7 @@ vi.mock("../lib/tauri", () => ({
   updateHermesBridgeCronJob: mocks.updateHermesBridgeCronJob,
   deleteHermesBridgeCronJob: mocks.deleteHermesBridgeCronJob,
   hermesBridgeCronJobAction: mocks.hermesBridgeCronJobAction,
+  memorySettings: mocks.memorySettings,
 }));
 
 beforeEach(() => {
@@ -49,6 +51,7 @@ beforeEach(() => {
   mocks.startHermesBridge.mockResolvedValue({ running: true });
   mocks.ensureHermesBridgeGateway.mockResolvedValue(undefined);
   mocks.hermesBridgeCronJobs.mockResolvedValue([]);
+  mocks.memorySettings.mockResolvedValue({ enabled: true });
   mocks.createHermesBridgeCronJob.mockResolvedValue({
     id: "routine-1",
     name: "Morning brief",
@@ -152,6 +155,43 @@ describe("Routines Hermes integration", () => {
 
   it("keeps image generation out of unrestricted routine toolsets", () => {
     expect(UNRESTRICTED_ROUTINE_TOOLSETS).not.toContain("image_gen");
+  });
+
+  it("strips the native memory toolset from an unrestricted routine when memory is off", async () => {
+    mocks.memorySettings.mockResolvedValue({ enabled: false });
+
+    await updateRoutine("routine-1", { unrestricted: true });
+
+    const sent = mocks.updateHermesBridgeCronJob.mock.calls.at(-1)?.[1] as {
+      enabled_toolsets: string[];
+    };
+    expect(sent.enabled_toolsets).not.toContain("memory");
+    // Everything else the user opted into is preserved.
+    expect(sent.enabled_toolsets).toContain("terminal");
+  });
+
+  it("keeps the native memory toolset when memory is on", async () => {
+    await createRoutine({
+      prompt: "Summarize today.",
+      schedule: "0 9 * * *",
+      unrestricted: true,
+    });
+
+    const sent = mocks.updateHermesBridgeCronJob.mock.calls.at(-1)?.[1] as {
+      enabled_toolsets: string[];
+    };
+    expect(sent.enabled_toolsets).toContain("memory");
+  });
+
+  it("fails closed and drops native memory if the memory setting cannot be read", async () => {
+    mocks.memorySettings.mockRejectedValue(new Error("unavailable"));
+
+    await updateRoutine("routine-1", { unrestricted: true });
+
+    const sent = mocks.updateHermesBridgeCronJob.mock.calls.at(-1)?.[1] as {
+      enabled_toolsets: string[];
+    };
+    expect(sent.enabled_toolsets).not.toContain("memory");
   });
 
   it("does not queue a manual run when the persistent gateway cannot start", async () => {

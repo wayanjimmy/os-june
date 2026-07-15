@@ -56,11 +56,17 @@ and tombstones its memories in the same transaction.
 
 The runtime's native `memory` toolset is left in place but unadvertised while
 memory is enabled; the SOUL stanza directs June to the june_context tools.
-When memory is globally disabled, the native `memory` toolset is also dropped
-from the cron routine allowlist (`platform_toolsets.cron`) — the one toolset
-list June controls explicitly — so a routine cannot write Hermes' unscoped,
-uninspectable store behind the off switch. Interactive sessions rely on the
-omitted SOUL stanza, consistent with the honest-runtime boundary below.
+When memory is globally disabled, June drops the native `memory` toolset from
+every toolset list it composes: the cron routine allowlist
+(`platform_toolsets.cron`, re-rendered and the routine gateway restarted on
+the toggle) and the explicit per-job `enabled_toolsets` June writes when a
+routine is created or its trust/unrestricted mode is edited. So a routine
+cannot be *granted* the native store behind the off switch. Two residuals are
+honest-runtime, not adversarial (see the closing consequence): a routine
+whose explicit `enabled_toolsets` were stored *before* the toggle keeps them
+until re-saved, and an interactive session relies on the omitted SOUL stanza.
+Fully retroactive enforcement (rewriting every stored routine's toolsets, or a
+Hermes-level global toolset denylist) is a tracked follow-up.
 
 ## Alternatives
 

@@ -5,10 +5,30 @@ import {
   hermesBridgeCronJobAction,
   hermesBridgeCronJobs,
   hermesBridgeStatus,
+  memorySettings,
   startHermesBridge,
   updateHermesBridgeCronJob,
   type HermesCronJobRecord,
 } from "./tauri";
+
+/** The native Hermes `memory` toolset. When the user turns Memory off, June
+ * must not compose it into a routine's explicit `enabled_toolsets` — those
+ * override `platform_toolsets.cron` (which the Rust side already gates), so a
+ * routine created/edited while Memory is off would otherwise still write
+ * Hermes' unscoped store. (Routines left on the sandboxed default carry no
+ * explicit list and are covered by the Rust gate; already-stored explicit
+ * lists are unaffected until re-saved.) */
+const NATIVE_MEMORY_TOOLSET = "memory";
+
+async function stripNativeMemoryIfDisabled(toolsets: string[]): Promise<string[]> {
+  if (!toolsets.includes(NATIVE_MEMORY_TOOLSET)) return toolsets;
+  const enabled = await memorySettings()
+    .then((settings) => settings.enabled)
+    // Fail closed for a privacy control: if the setting can't be read, do not
+    // grant the native memory toolset.
+    .catch(() => false);
+  return enabled ? toolsets : toolsets.filter((toolset) => toolset !== NATIVE_MEMORY_TOOLSET);
+}
 
 /** A Hermes cron job as the app works with it: the raw dashboard-API record
  * flattened to what the Routines surfaces read. Unlike the gateway's
@@ -170,9 +190,10 @@ export async function createRoutine(input: {
       schedule: input.schedule,
       name: input.name,
     });
-    const toolsets =
+    const requested =
       input.enabledToolsets ?? (input.unrestricted ? UNRESTRICTED_ROUTINE_TOOLSETS : undefined);
-    if (!toolsets) return routineFromRecord(created);
+    if (!requested) return routineFromRecord(created);
+    const toolsets = await stripNativeMemoryIfDisabled(requested);
     const widened = await updateHermesBridgeCronJob(created.id, {
       enabled_toolsets: toolsets,
     });
@@ -208,9 +229,12 @@ export async function updateRoutine(jobId: string, updates: RoutineUpdates): Pro
   if (updates.schedule !== undefined) payload.schedule = updates.schedule;
   if (updates.prompt !== undefined) payload.prompt = updates.prompt;
   if (updates.enabledToolsets !== undefined) {
-    payload.enabled_toolsets = updates.enabledToolsets;
+    payload.enabled_toolsets =
+      updates.enabledToolsets === null
+        ? null
+        : await stripNativeMemoryIfDisabled(updates.enabledToolsets);
   } else if (updates.unrestricted === true) {
-    payload.enabled_toolsets = UNRESTRICTED_ROUTINE_TOOLSETS;
+    payload.enabled_toolsets = await stripNativeMemoryIfDisabled(UNRESTRICTED_ROUTINE_TOOLSETS);
   } else if (updates.unrestricted === false) {
     payload.enabled_toolsets = null;
     payload.script = null;
