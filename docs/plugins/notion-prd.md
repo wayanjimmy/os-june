@@ -14,8 +14,9 @@ prepare from selected pages and databases, then publish a reviewed decision
 record, project update, or action list back to the right location.
 
 It ranks below the universal and ecosystem plugins because many users do not
-use Notion and its OAuth/token exchange creates a privacy-architecture question.
-It ranks above software delivery tools because its workflows apply across roles.
+use Notion and its REST OAuth token exchange creates a privacy-architecture
+constraint. It ranks above software delivery tools because its workflows apply
+across roles.
 
 ## Customer and problem
 
@@ -27,12 +28,16 @@ traceability. Broad workspace indexing solves search by increasing data copies.
 ## Product promise
 
 Choose the Notion pages June may use. Prepare and publish from those bounded
-sources while local June notes remain private unless the user explicitly sends
-content to Notion.
+sources while local June notes are not copied to Notion unless the user
+explicitly sends content there. V1 preserves local credential custody by using a
+user-supplied Notion token stored in the Keychain, not Notion REST public OAuth.
+Notion content or note-derived draft context included in prompts still follows
+the user's selected model path.
 
 ## V1 experience
 
-- Connect from Plugins and use Notion's page picker to select accessible roots.
+- Connect from Plugins by pasting a Notion internal connection token, or an
+  advanced personal access token, then select roots in June's own picker.
 - Search selected pages/data sources and read a page on demand.
 - Link a June note to a Notion page without copying the entire note.
 - Draft a decision record, project update, or action database entry from a
@@ -60,7 +65,9 @@ content to Notion.
 
 - Replacing Notion search or editing UI.
 - Mirroring an entire workspace into June or OpenSoftware.
-- Accessing pages outside the Notion authorization/page picker.
+- Accessing pages outside the Notion token's accessible graph or June-selected
+  roots. For PATs, the accessible graph follows the creating user's Notion
+  permissions and can be broader than an internal connection.
 - Autonomous publishing at launch.
 - Treating every database schema as a generic spreadsheet.
 
@@ -74,10 +81,16 @@ content to Notion.
 
 ## Privacy and trust
 
-Notion public connections use OAuth and a client secret for token exchange. The
-implementation must resolve whether a public desktop distribution can keep the
-user token on-device without embedding a reusable secret. Until then, the PRD
-does not make the Google local-mode credential claim.
+Notion public REST OAuth requires a client secret for token exchange, refresh,
+and revocation, so June v1 does not use that flow. Per [ADR 0024](../adr/0024-notion-local-token-custody.md),
+users supply a Notion internal connection token or an advanced personal access
+token, and June stores it only in the Keychain. Internal connections see pages
+and data sources shared with that connection in Notion. PATs act as the creating
+user and are broader, so June presents them as an advanced fallback and narrows
+use through June-selected roots. OpenSoftware holds no Notion credential and is
+not in the Notion connector data path. This claim covers token custody and
+provider calls, not model inference; Notion content included in prompts follows
+the user's selected model path.
 
 Notion content is untrusted input. The user-selected page set and provider
 permissions form a hard boundary. All creates and updates require approval in
@@ -100,7 +113,7 @@ privacy baseline. Triggered routines and cross-plugin publishing flows are Pro.
 
 ## Risks and gates
 
-- Confidential-client OAuth is the first gate.
+- Token-paste onboarding friction is the first gate.
 - Notion APIs expose block trees and evolving data-source schemas; lossless
   editing is not a credible v1 promise.
 - Webhooks require a public endpoint and can arrive out of order; local v1 does
@@ -109,8 +122,8 @@ privacy baseline. Triggered routines and cross-plugin publishing flows are Pro.
 
 ## Decision requested
 
-Approve a bounded-page Notion plugin with read-on-demand and approved publish;
-require the auth spike before implementation and defer webhook routines.
+Proceed under the ADR 0024 local-token auth decision with a bounded-page Notion
+plugin for read-on-demand and approved publish; defer webhook routines.
 
 ## Sources
 

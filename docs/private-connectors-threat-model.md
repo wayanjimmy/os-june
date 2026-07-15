@@ -8,36 +8,44 @@ Phase 3 TEE relay) will publish its own, larger threat model when it ships.
 
 ## What local mode is
 
-You authorize Google on your Mac. The refresh token Google mints is stored in
-your Mac's Keychain. Every Gmail and Calendar API call June makes originates
-from your device, using that token, and goes straight to Google. June's
-backend (June API) is not involved in connector calls.
+You authorize a provider on your Mac. For Google, that means a native-app OAuth
+flow: the refresh token Google mints is stored in your Mac's Keychain. For
+Notion v1, that means a token-paste flow: you create or choose a Notion
+internal connection token, or an advanced personal access token, paste it into
+June, and June stores that token in your Mac's Keychain. Internal connections
+see pages and data sources you share with that connection in Notion. PATs are
+broader: they act as the creating user and follow that user's Notion
+permissions, bounded by token capabilities. Every connector API call June makes
+originates from your device, using that local token, and goes straight to the
+provider. June's backend (June API) is not involved in connector calls.
 
 ## What OpenSoftware can and cannot see
 
 **Cannot see, by architecture:**
 
-- Your Google refresh or access tokens. They are in your Keychain, protected by
-  Keychain access control and June's code-signing identity, and never
-  transmitted to OpenSoftware. We hold no credential that can read your mail,
-  so there is nothing to hand over under a subpoena and nothing to steal in a
-  breach of our servers.
-- The content of your mail or calendar as it flows through a connector call.
-  Connector requests go device -> Google, not through June API.
+- Your provider tokens. Google refresh/access tokens and Notion local tokens
+  are in your Keychain, protected by Keychain access control and June's
+  code-signing identity, and never transmitted to OpenSoftware. We hold no
+  connector credential that can read your mail, calendar, or selected Notion
+  pages, so there is nothing to hand over under a subpoena and nothing to steal
+  in a breach of our servers.
+- The content of your mail, calendar, or selected Notion pages as it flows
+  through a connector call. Connector requests go device -> provider, not
+  through June API.
 
 **Can see, and you should know it:**
 
 - **Model inference is a separate path.** When a routine runs, its prompt (which
-  can include mail or calendar content the routine chose to read) goes to
-  whichever model provider you selected. By default that is June API, which runs
-  in a TEE (Phala) so its own operators cannot read prompt data, but it is still
-  a network call off your device. If you select a local model, inference stays
-  on-device too. The "OpenSoftware is not in the connector data path" claim
+  can include mail, calendar, or Notion content the routine chose to read) goes
+  to whichever model provider you selected. By default that is June API, which
+  runs in a TEE (Phala) so its own operators cannot read prompt data, but it is
+  still a network call off your device. If you select a local model, inference
+  stays on-device too. The "OpenSoftware is not in the connector data path" claim
   covers token custody and provider API calls. It does not cover inference, and
   the copy never implies it does.
 - **Billing metadata.** Metered model calls settle against OS Accounts, so the
   usual coarse billing records exist (that a metered call happened, its action
-  slug, credits charged). No mail content is in them. June's only product
+  slug, credits charged). No connector content is in them. June's only product
   telemetry remains opt-in, coarse-bucketed P3A aggregates; connectors add no
   per-user app telemetry.
 
@@ -45,8 +53,12 @@ backend (June API) is not involved in connector calls.
 
 Local mode adds exactly these things to what you already trust by running June:
 
-1. **Google.** You are granting June's OAuth client access to the scopes you
-   approve. Google sees the same API calls any mail client would.
+1. **The connected provider.** For Google, you are granting June's OAuth client
+   access to the scopes you approve. For Notion v1, you are creating or choosing
+   a Notion token. Internal connections see pages and data sources you share
+   with that connection in Notion; PATs act as the creating user and are broader
+   than a shared internal connection. The provider sees the same API calls any
+   local client would.
 2. **Your device's Keychain and June's code signature.** Token secrecy rests on
    macOS Keychain access control and June being correctly signed. A local
    attacker with your unlocked machine and your login keychain can reach the
@@ -60,16 +72,20 @@ Local mode adds exactly these things to what you already trust by running June:
   profile denies both direct reads of Keychain database paths and Mach lookup
   of the `securityd` services used by Keychain APIs. Tokens live in the
   unsandboxed Rust host, and MCP tool servers hold only a scoped loopback token,
-  never a Google token. Signed rc builds verify this with both the `security`
-  CLI and a direct `SecItemCopyMatching` probe before release.
-- Connector tool descriptions mark email and calendar content as untrusted
-  input, because a hostile email can carry instructions (prompt injection).
+  never a Google or Notion token. Signed rc builds verify this with both the
+  `security` CLI and a direct `SecItemCopyMatching` probe before release.
+- Connector tool descriptions mark provider content as untrusted input,
+  including email, calendar content, Notion pages, and Notion data-source rows,
+  because hostile provider content can carry instructions (prompt injection).
 - Mutating actions (send, draft, label changes, event changes, invite
-  responses) are gated by **trust mode**. Plain and read-only routines cannot
-  call mutating tools. A routine that enables actions starts in approval: the
-  action parks in June's own approval surface, shows the exact recipients or
-  object and change, and waits for you. Autonomous execution must be earned
-  (three successful approval-mode runs) and is granted per tool.
+  responses, Notion page creation, Notion property updates, and Notion block
+  appends) are gated by **trust mode**. Plain and read-only routines cannot call
+  mutating tools. A routine that enables actions starts in approval: the action
+  parks in June's own approval surface, shows the exact recipients or object and
+  change, and waits for you. Autonomous execution must be earned (three
+  successful approval-mode runs) and is granted per tool. Notion v1 is stricter:
+  creates and updates always park for approval, and autonomous Notion publishing
+  is deferred.
 
 ## Interactive-session isolation
 
@@ -85,5 +101,7 @@ the user intentionally gave a routine. See
 
 Disconnecting an account deletes its tokens from the Keychain immediately.
 "Also revoke June's access with Google" additionally calls Google's revoke
-endpoint so the grant is dead server-side. Both paths are in Settings ->
-Connectors.
+endpoint so the grant is dead server-side. Notion token-paste connections do
+not give June a REST OAuth revocation path; to revoke server-side access, remove
+the internal connection or personal access token in Notion. These paths are in
+Settings -> Connectors.

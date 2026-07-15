@@ -2,7 +2,7 @@
 
 - **Mode:** CTO
 - **Date:** 2026-07-13
-- **Status:** Proposed; auth spike required
+- **Status:** Proposed; Phase 0A auth decision recorded in [ADR 0024](../adr/0024-notion-local-token-custody.md)
 - **PRD:** [notion-prd.md](notion-prd.md)
 - **Issue:** JUN-283
 
@@ -13,20 +13,27 @@ authorized page graph enforced in Rust and all writes parked for approval.
 
 ## Phase 0: auth boundary
 
-Notion's documented public OAuth flow requires HTTP Basic authentication with
-a client id and client secret during code exchange. A desktop binary cannot
-protect that secret. Before implementation:
+Resolved by [ADR 0024](../adr/0024-notion-local-token-custody.md). Notion's
+REST public OAuth flow requires HTTP Basic authentication with a client id and
+client secret during code exchange, refresh, and revocation. A desktop binary
+cannot protect that secret, and the REST OAuth surface does not provide a
+public-client PKCE path. June therefore rejects embedded secrets, a generic
+OpenSoftware token vault, and a June API OAuth broker for v1.
 
-1. Confirm whether Notion supports PKCE or another public-client flow for
-   distributed desktop apps.
-2. Confirm whether the authorized access token can be returned to and stored
-   only on the device after a narrowly scoped confidential exchange.
-3. Reject an embedded secret and a generic OpenSoftware token vault.
-4. If a TEE exchange, user-created internal connection, or other compromise is
-   chosen, document the credential/data boundary in an ADR and consent copy.
+V1 uses a local token-paste connection flow: the user creates or selects a
+Notion internal connection token, or an advanced personal access token, and
+pastes it into June. Internal connections see pages and data sources shared with
+that connection in Notion. PATs act as the creating user and are broader, so
+June presents them as an advanced fallback and narrows use through
+June-selected roots. June stores the token only in the Keychain, sends Notion
+REST calls directly from the device, and keeps June API out of the Notion
+connector data path. Disconnect deletes local credentials; server-side
+invalidation is done by removing the internal connection or PAT in Notion.
 
-Exit with a supported auth design, revoke flow, Marketplace/review requirements,
-and an honest privacy claim.
+This preserves the local-mode credential claim at the cost of onboarding
+friction and no Notion OAuth page picker. Notion hosted MCP with PKCE remains a
+future option, but it changes the request path and requires its own ADR and
+threat model update before implementation.
 
 ## Proposed servers
 
@@ -41,17 +48,22 @@ representation. Full block trees are bounded by depth, count, and bytes.
 
 ## Authorization boundary
 
-Notion's page picker and API permissions determine the maximum accessible
-graph. Rust keeps a non-secret index of authorized root ids returned at connect
-time and treats provider 403/404 as permission outcomes. It never infers access
-from a cached path alone. Writes additionally require an approved parent within
-the current accessible graph.
+Notion's token capabilities and provider permissions determine the maximum
+accessible graph. Internal connections are additionally bounded by which pages
+or data sources the user shares with that connection in Notion. PATs follow the
+creating user's Notion permissions and can be broader. Because the v1
+token-paste flow does not use Notion's OAuth page picker, June must provide its
+own post-connect resource picker. Rust stores only June-selected roots as
+authority and treats cached metadata as non-authoritative. It verifies ancestry
+live against current provider state and treats provider 403/404 as permission
+outcomes, never as cached proof of access. Writes additionally require an
+approved parent within the current selected graph.
 
 ## State and events
 
-- Keychain token if the Phase 0 design preserves device custody.
-- Workspace/account id, bot id, authorized roots, capabilities, and health in
-  SQLite.
+- Notion local token in Keychain only.
+- Workspace/account id, bot id when available, selected roots, capabilities,
+  and health in SQLite.
 - No page bodies or database row corpus at rest.
 - V1 freshness is live fetch plus optional bounded polling of user-followed
   pages. Provider webhooks require public HTTPS and belong to away mode.
@@ -69,8 +81,8 @@ the current accessible graph.
 
 ## Delivery slices after Phase 0
 
-1. **Connection shell (1 week):** workspace state, authorized roots, revoke,
-   health, plugin detail.
+1. **Connection shell (1 week):** workspace state, selected roots, disconnect
+   and revocation guidance, health, plugin detail.
 2. **Read path (2 weeks):** search, page/block read, data-source query, comments,
    limits and pagination.
 3. **Approved create (1 week):** create page with exact-parent approval.
@@ -80,8 +92,8 @@ the current accessible graph.
 
 ## Verification
 
-- Auth, reconnect, revoke, removed-page-access, workspace removal, and partial
-  capability matrix.
+- Auth, reconnect, disconnect and revocation guidance, removed-page-access,
+  workspace removal, and partial capability matrix.
 - Block-tree property tests for depth, pagination, unsupported types, mentions,
   embeds, equations, and files.
 - Boundary tests that forged page/parent ids cannot escape authorized access.
