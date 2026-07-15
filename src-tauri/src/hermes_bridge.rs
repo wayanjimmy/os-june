@@ -2326,7 +2326,7 @@ fn write_managed_skill_file(
 }
 
 #[cfg(windows)]
-fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+pub(crate) fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
     match fs::rename(temp_path, path) {
         Ok(()) => Ok(()),
         Err(error)
@@ -2343,7 +2343,7 @@ fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+pub(crate) fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
     fs::rename(temp_path, path)
 }
 

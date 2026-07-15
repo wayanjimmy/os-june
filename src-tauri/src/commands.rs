@@ -449,7 +449,10 @@ fn persist_memory_settings(path: &Path, settings: &MemorySettingsDto) -> Result<
     let temporary_path = path.with_extension("json.tmp");
     fs::write(&temporary_path, serialized)
         .map_err(|error| AppError::new("memory_settings_save_failed", error.to_string()))?;
-    fs::rename(&temporary_path, path).map_err(|error| {
+    // `fs::rename` does not replace an existing destination on Windows;
+    // `replace_file` is the repo's platform-aware wrapper (POSIX rename, or a
+    // remove-then-rename fallback on Windows) so a second toggle can't fail.
+    crate::hermes_bridge::replace_file(&temporary_path, path).map_err(|error| {
         let _ = fs::remove_file(&temporary_path);
         AppError::new("memory_settings_save_failed", error.to_string())
     })
@@ -2708,6 +2711,15 @@ mod tests {
         persist_memory_settings(&path, &MemorySettingsDto { enabled: false })
             .expect("persist settings");
         assert!(!load_memory_settings(&path).enabled);
+        assert!(!temporary_path.exists());
+
+        // A second toggle must replace the now-existing file (regression: a
+        // bare `fs::rename` does not overwrite on Windows, which stranded the
+        // toggle after its first write — persist_memory_settings goes through
+        // the platform-aware replace_file wrapper instead).
+        persist_memory_settings(&path, &MemorySettingsDto { enabled: true })
+            .expect("persist over existing file");
+        assert!(load_memory_settings(&path).enabled);
         assert!(!temporary_path.exists());
 
         std::fs::write(&path, r#"{"enabled":true}"#).expect("restore previous settings");
