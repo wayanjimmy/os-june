@@ -73,6 +73,7 @@ pub struct GeneratedNote {
     pub content: String,
     pub title_suggestion: Option<String>,
     pub provider: String,
+    pub route: UpstreamRouteMetadata,
     pub usage: TokenUsage,
 }
 
@@ -81,6 +82,7 @@ pub struct GeneratedNote {
 pub struct CleanedText {
     pub text: String,
     pub provider: String,
+    pub route: UpstreamRouteMetadata,
     pub usage: TokenUsage,
 }
 
@@ -90,7 +92,16 @@ pub struct AgentChatCompletion {
     pub body: Vec<u8>,
     pub content_type: String,
     pub provider: String,
+    pub route: UpstreamRouteMetadata,
     pub usage: TokenUsage,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamRouteMetadata {
+    pub provider: Option<String>,
+    pub privacy_level: Option<String>,
+    pub endpoint: Option<String>,
 }
 
 /// A streaming agent chat completion: response headers have been received
@@ -104,6 +115,7 @@ pub struct AgentChatCompletion {
 pub struct AgentChatStream {
     pub content_type: String,
     pub provider: String,
+    pub route: UpstreamRouteMetadata,
     pub chunks: tokio::sync::mpsc::UnboundedReceiver<Result<bytes::Bytes, DomainError>>,
     pub outcome: tokio::sync::oneshot::Receiver<AgentChatStreamOutcome>,
 }
@@ -621,6 +633,15 @@ pub trait OsAccountsClient: Send + Sync {
 #[async_trait]
 pub trait TokenVerifier: Send + Sync {
     async fn verify(&self, access_jwt: &str) -> Result<UserId, AuthError>;
+
+    /// Verify the token and require one exact OS Accounts OAuth scope.
+    /// Security-sensitive callers must use this instead of trusting that any
+    /// audience-valid token carries the authority needed for their endpoint.
+    async fn verify_scope(
+        &self,
+        access_jwt: &str,
+        required_scope: &str,
+    ) -> Result<UserId, AuthError>;
 }
 
 #[async_trait]

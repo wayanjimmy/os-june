@@ -8,7 +8,7 @@
 //! OS Accounts sign-in uses PKCE; the token exchange is proxied through
 //! `/v1/share-viewer/token` so the browser never needs cross-origin CORS.
 
-use crate::{error::ApiError, state::ApiState};
+use crate::{auth::client_address, error::ApiError, state::ApiState};
 use axum::{
     Json,
     extract::State,
@@ -104,8 +104,8 @@ pub(crate) struct TokenExchangeRequest {
 
 /// PKCE code exchange proxy. Unauthenticated by nature (the code IS the
 /// credential); rate-limited per client address; forwards to OS Accounts
-/// and relays the envelope verbatim so the page sees the same shape the
-/// desktop client does.
+/// and returns only the short-lived, profile-scoped access token the viewer
+/// needs. The refresh token is never exposed to browser JavaScript.
 pub(crate) async fn token_exchange(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -190,16 +190,6 @@ fn viewer_token_body(
         "success": true,
         "data": { "access_token": access_token },
     }))
-}
-
-fn client_address(headers: &HeaderMap) -> String {
-    // dstack-ingress appends the peer address as the FINAL x-forwarded-for
-    // entry; everything before it arrived from the client and is spoofable.
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next_back())
-        .map_or_else(|| "unknown".to_string(), |value| value.trim().to_string())
 }
 
 #[cfg(test)]

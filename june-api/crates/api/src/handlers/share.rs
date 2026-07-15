@@ -5,7 +5,10 @@
 //! uninvited all surface as the same `share_not_found` 404.
 
 use crate::{
-    auth::{authenticated_user, bearer_token},
+    auth::{
+        PROFILE_READ_SCOPE, authenticated_user, authenticated_user_with_scope, bearer_token,
+        client_address,
+    },
     envelope::ApiResponse,
     error::ApiError,
     state::ApiState,
@@ -243,7 +246,9 @@ pub(crate) async fn view(
     Path(share_id): Path<String>,
     Query(query): Query<ViewQuery>,
 ) -> Result<Json<ApiResponse<ShareViewResponse>>, ApiError> {
-    let (service, user) = share_context(&state, &headers).await?;
+    let service = state.share().ok_or(ApiError::SharingUnavailable)?;
+    let user = authenticated_user_with_scope(&state, &headers, PROFILE_READ_SCOPE).await?;
+    enforce_share_rate(&state, &headers, &user)?;
     let token = bearer_token(&headers)?.to_string();
     let record = service
         .view(&user, &token, &share_id, query.invite.as_deref())
@@ -269,10 +274,21 @@ async fn share_context<'a>(
 ) -> Result<(&'a ShareService, UserId), ApiError> {
     let service = state.share().ok_or(ApiError::SharingUnavailable)?;
     let user = authenticated_user(state, headers).await?;
-    if !state.share_rate().allow(&user.0) {
+    enforce_share_rate(state, headers, &user)?;
+    Ok((service, user))
+}
+
+fn enforce_share_rate(
+    state: &ApiState,
+    headers: &HeaderMap,
+    user: &UserId,
+) -> Result<(), ApiError> {
+    let user_key = format!("user:{}", user.0);
+    let client_key = format!("ip:{}", client_address(headers));
+    if !state.share_rate().allow(&user_key) || !state.share_rate().allow(&client_key) {
         return Err(ApiError::AuthorizationDenied);
     }
-    Ok((service, user))
+    Ok(())
 }
 
 fn parse_kind(kind: &str) -> Result<ShareKind, ApiError> {

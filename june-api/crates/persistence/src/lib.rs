@@ -152,6 +152,7 @@ impl ShareStore for PgShareStore {
             r"
             SELECT id FROM shares
             WHERE share_id = $1 AND owner_user_id = $2 AND deleted_at IS NULL
+            FOR UPDATE
             ",
         )
         .bind(share_id)
@@ -309,6 +310,7 @@ impl ShareStore for PgShareStore {
               AND ($4::text IS NULL OR invite_id = $4)
             ORDER BY (recipient_user_id = $2) DESC, created_at ASC
             LIMIT 1
+            FOR UPDATE
             ",
         )
         .bind(row_id)
@@ -323,20 +325,27 @@ impl ShareStore for PgShareStore {
         let envelope: Vec<u8> = invite_row.try_get("envelope").map_err(query_error)?;
         let envelope_iv: Vec<u8> = invite_row.try_get("envelope_iv").map_err(query_error)?;
 
-        sqlx::query(
+        let updated = sqlx::query(
             r"
             UPDATE share_invites
             SET recipient_user_id = COALESCE(recipient_user_id, $2),
                 accepted_at = COALESCE(accepted_at, now()),
                 last_access_at = now()
             WHERE id = $1
+              AND revoked_at IS NULL
+              AND email = ANY($3)
+              AND (recipient_user_id IS NULL OR recipient_user_id = $2)
             ",
         )
         .bind(invite_row_id)
         .bind(viewer_user_id)
+        .bind(viewer_emails)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
+        if updated.rows_affected() == 0 {
+            return Err(ShareStoreError::NotFound);
+        }
         tx.commit().await.map_err(query_error)?;
 
         Ok(ShareViewRecord {

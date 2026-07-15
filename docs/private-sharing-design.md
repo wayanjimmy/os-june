@@ -160,7 +160,10 @@ explicit self allowances). Flow:
 2. OS Accounts PKCE sign-in (public OAuth client "June share viewer",
    redirect back to `/s/callback`; the fragment survives via sessionStorage).
 3. `GET /v1/shares/{id}/view?invite={invite_id}` with the Bearer token (the
-   invite id, not the key, selects the envelope).
+   invite id, not the key, selects the envelope). The viewer OAuth client
+   requests only `profile:read`; June API requires `credits:spend` on every
+   other authenticated surface, so this browser-readable token cannot invoke
+   paid June operations.
 4. Decrypt envelope with IK -> CK; decrypt ciphertext with CK; render
    read-only (markdown for notes, chat transcript for sessions).
 5. First-entry Granola-style prompt: "[Owner] shared this [meeting note /
