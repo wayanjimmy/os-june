@@ -1545,12 +1545,29 @@ pub(crate) async fn reapply_hermes_runtime(
         .iter()
         .map(|connection| (connection.full_mode, connection.cwd.clone()))
         .collect();
+    // Reapply to EVERY captured mode even if one fails. A bare `?` here would
+    // abandon the remaining modes on the first error: with both sandboxed and
+    // unrestricted runtimes live, a failure restarting the first mode would
+    // leave the second running with its old SOUL and cron toolset — so after a
+    // memory-off toggle that mode keeps the native memory tool while the file
+    // and UI show memory disabled. Restart each mode best-effort, remember the
+    // first failure, and still fall through to the gateway restart; surface the
+    // first error only after every mode has been attempted.
+    let mut first_error: Option<AppError> = None;
     for (full_mode, cwd) in connections {
         // Mode-scoped restart (same path the MCP admin uses): stop that one
         // runtime, then re-start it so `sync_hermes_config` re-renders
         // config.yaml.
-        stop_hermes_mode(bridge, full_mode)?;
-        start_hermes_bridge_inner(
+        if let Err(error) = stop_hermes_mode(bridge, full_mode) {
+            tracing::warn!(
+                ?error,
+                full_mode,
+                "reapply: stopping a runtime mode failed; continuing with the other modes",
+            );
+            first_error.get_or_insert(error);
+            continue;
+        }
+        if let Err(error) = start_hermes_bridge_inner(
             app,
             bridge,
             StartHermesBridgeRequest {
@@ -1558,7 +1575,15 @@ pub(crate) async fn reapply_hermes_runtime(
                 full_mode: Some(full_mode),
             },
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(
+                ?error,
+                full_mode,
+                "reapply: restarting a runtime mode failed; continuing with the other modes",
+            );
+            first_error.get_or_insert(error);
+        }
     }
     // Best-effort gateway restart so scheduled routines pick up the new config.
     if let Some(connection) = live_connections(bridge)?.into_iter().next() {
@@ -1570,7 +1595,10 @@ pub(crate) async fn reapply_hermes_runtime(
         )
         .await;
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[tauri::command]
