@@ -293,23 +293,29 @@ integration (too broad), plugin for a Tauri framework package.
 ### Connectors
 
 **Connector**:
-A private-by-architecture integration between June and a third-party account
-(launch: Google Gmail + Calendar). The user authorizes the provider on their
-Mac; the grant lives in the Keychain and every provider API call originates
-on-device. June ships each connector as a read MCP server (`june_gmail`,
-`june_gcal`) plus a mutating actions server (`june_gmail_actions`,
-`june_gcal_actions`); neither holds the token, which stays in Rust behind the
-on-device provider proxy (see [ADR-0016](docs/adr/0016-private-connectors-local-mode.md)).
+A private-by-architecture integration between June and a third-party account.
+The user authorizes the provider on their Mac; the grant lives in the Keychain;
+and OpenSoftware infrastructure is not in the credential path or connector data
+path. Google connectors call provider REST APIs directly from the device.
+Notion v1 is different: June calls Notion's provider-operated hosted MCP service
+from the device, and hosted MCP calls Notion as part of Notion's service (see
+[ADR-0025](docs/adr/0025-notion-oauth-via-hosted-mcp.md)). June exposes
+connectors to Hermes only through local facade MCP servers (for example
+`june_gmail`, `june_gcal`, and their `*_actions` counterparts); those servers
+never hold provider credentials, which stay in Rust behind the on-device
+provider proxy (see [ADR-0016](docs/adr/0016-private-connectors-local-mode.md)).
 _Avoid_: integration (unqualified), plugin, the Google API.
 
 **Local mode**:
-The default (and, in v1, only) connector trust model: the OAuth grant is
-minted to the device and stored in the Keychain, and connector calls go
-straight from the device to the provider. OpenSoftware holds no credential that
-can read the user's mail and is not in the *connector* data path. (Routine
-model inference still follows the user's provider selection: June API by
-default, or a local model. The "not in the data path" claim covers token
-custody and provider calls, never inference.)
+The default (and, in v1, only) connector trust model: the provider grant is
+minted to the device and stored in the Keychain, connector calls originate from
+the device, and OpenSoftware holds no credential that can read provider data and
+is not in the *connector* data path. Google local mode is device -> Google REST.
+Notion v1 local mode is device -> Notion hosted MCP -> Notion, with Notion
+hosted MCP in the provider request path but OpenSoftware still outside it.
+(Routine model inference still follows the user's provider selection: June API
+by default, or a local model. The "not in the data path" claim covers token
+custody and provider connector calls, never inference.)
 _Avoid_: on-device mode, private mode (unqualified). Contrast with **away
 mode** (the proposed Phase 3 TEE relay, not yet shipped).
 
