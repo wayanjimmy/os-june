@@ -179,6 +179,8 @@ vi.mock("../lib/tauri", () => ({
   renameFolder: mocks.renameFolder,
   assignNoteToFolder: mocks.assignNoteToFolder,
   listSessionFolders: vi.fn(async () => []),
+  listCompletedSessions: vi.fn(async () => []),
+  setSessionCompleted: vi.fn(async () => undefined),
   assignSessionToFolder: vi.fn(async () => undefined),
   removeSessionFromFolder: vi.fn(async () => undefined),
   removeNoteFromFolder: mocks.removeNoteFromFolder,

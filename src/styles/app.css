@@ -9072,14 +9072,16 @@ input:focus-visible,
   gap: var(--sp-1);
 }
 
-.sidebar-pinned-section {
+.sidebar-pinned-section,
+.sidebar-completed-section {
   flex: 0 0 auto;
 }
 
 /* Doubled class so these beat the later .notes-nav rule, whose height: 100%
  * and 16px fade padding are meant for the open-ended agent list — the pinned
  * list hugs its rows instead. */
-.notes-nav.sidebar-pinned-list {
+.notes-nav.sidebar-pinned-list,
+.notes-nav.sidebar-completed-list {
   height: auto;
   max-height: var(--sidebar-pinned-list-max-h);
   overflow-y: auto;

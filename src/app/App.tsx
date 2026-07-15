@@ -76,6 +76,7 @@ import {
   getRecordingStatus,
   getNote,
   LIVE_TRANSCRIPT_EVENT,
+  listCompletedSessions,
   listNotes,
   listSessionFolders,
   openPrivacySettings,
@@ -89,6 +90,7 @@ import {
   resolveAgentRecorderRequest,
   resumeRecording,
   retryProcessing,
+  setSessionCompleted,
   startRecording,
   updateNote,
   agentHudHide,
@@ -412,6 +414,8 @@ export function App() {
   // sessionId -> project (folder) ids. Sessions live in Hermes, so their
   // project assignments are tracked separately from the notes state.
   const [sessionFolders, setSessionFolders] = useState<Record<string, string[]>>({});
+  // stored Hermes session id -> completed_at ISO. June-owned; see JUN-203.
+  const [completedSessions, setCompletedSessions] = useState<Record<string, string>>({});
   const [moveDialogSessionIds, setMoveDialogSessionIds] = useState<string[] | null>(null);
   // Where an open agent session was drilled into from — a project or the
   // Routines run history — drives the breadcrumb above the agent workspace,
@@ -1850,6 +1854,13 @@ export function App() {
       .catch((err: unknown) => {
         if (!cancelled) setError(messageFromError(err));
       });
+    void listCompletedSessions()
+      .then((rows) => {
+        const next: Record<string, string> = {};
+        for (const row of rows) next[row.sessionId] = row.completedAt;
+        setCompletedSessions(next);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -2641,6 +2652,27 @@ export function App() {
     } catch (err) {
       setError(messageFromError(err));
       if (options?.rethrow) throw err;
+    }
+  }
+
+  async function handleToggleSessionCompleted(sessionId: string, completed: boolean) {
+    setCompletedSessions((prev) => {
+      const next = { ...prev };
+      if (completed) next[sessionId] = new Date().toISOString();
+      else delete next[sessionId];
+      return next;
+    });
+    try {
+      await setSessionCompleted(sessionId, completed);
+    } catch {
+      // reload truth on failure
+      void listCompletedSessions()
+        .then((rows) => {
+          const fresh: Record<string, string> = {};
+          for (const row of rows) fresh[row.sessionId] = row.completedAt;
+          setCompletedSessions(fresh);
+        })
+        .catch(() => {});
     }
   }
 
@@ -3604,6 +3636,8 @@ export function App() {
           setActiveView("agent");
         }}
         sessionFolderIds={sessionFolders}
+        completedSessionIds={completedSessions}
+        onToggleSessionCompleted={handleToggleSessionCompleted}
         onOpenSessionMoveDialog={(sessionId) => setMoveDialogSessionIds([sessionId])}
         onRemoveSessionFromFolder={(sessionId, folderId) =>
           void handleRemoveSessionFromFolder(sessionId, folderId)
