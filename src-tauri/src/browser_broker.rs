@@ -95,11 +95,36 @@ impl BrowserOutcomeClass {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTransportPolicy {
+    pub attended_enabled: bool,
+    pub managed_enabled: bool,
+}
+
+impl Default for BrowserTransportPolicy {
+    fn default() -> Self {
+        Self {
+            attended_enabled: true,
+            managed_enabled: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct BrowserOutcomeDeclaration {
     id: String,
     session_id: String,
     outcome_class: Option<BrowserOutcomeClass>,
+}
+
+impl BrowserTransportPolicy {
+    fn enabled(self, kind: BrowserTransportKind) -> bool {
+        match kind {
+            BrowserTransportKind::Attended => self.attended_enabled,
+            BrowserTransportKind::Managed => self.managed_enabled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +273,7 @@ struct BrowserBrokerState {
     approvals_changed: Option<Arc<dyn Fn() + Send + Sync>>,
     routine_grants: Vec<RoutineBrowserGrant>,
     outcome_repository: Option<Repositories>,
+    transport_policy: BrowserTransportPolicy,
 }
 
 struct BrowserSession {
@@ -468,6 +494,68 @@ impl BrowserBroker {
         Ok(())
     }
 
+    pub(crate) fn transport_policy(&self) -> BrowserTransportPolicy {
+        self.lock().transport_policy
+    }
+
+    /// Apply the last successfully fetched remote policy. The in-memory gate
+    /// closes before transport teardown begins, and only sessions owned by a
+    /// newly disabled transport are removed.
+    pub(crate) async fn set_transport_policy(&self, policy: BrowserTransportPolicy) {
+        let _action = self.action_lock.lock().await;
+        let (transports, sessions, approvals_changed) = {
+            let mut state = self.lock();
+            state.transport_policy = policy;
+            let session_ids = state
+                .sessions
+                .iter()
+                .filter(|(_, session)| !policy.enabled(session.transport_kind))
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            let sessions = session_ids
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .sessions
+                        .remove(&id)
+                        .map(|session| (id, session.transport_kind))
+                })
+                .collect::<Vec<_>>();
+            let approvals_changed = if policy.attended_enabled {
+                false
+            } else {
+                let changed = !state.pending_approvals.is_empty();
+                state.pending_approvals.clear();
+                state.pending_by_action.clear();
+                state.resolved_actions.clear();
+                changed
+            };
+            (state.transports.clone(), sessions, approvals_changed)
+        };
+        if approvals_changed {
+            self.notify_approvals_changed();
+        }
+        for (session_id, kind) in &sessions {
+            if let Some(transport) = transports.get(kind) {
+                transport.terminate_session(session_id);
+            }
+        }
+        for (session_id, kind) in sessions {
+            if let Some(transport) = transports.get(&kind) {
+                if let Err(error) = transport
+                    .execute("close_session", json!({ "session_id": session_id }))
+                    .await
+                {
+                    tracing::warn!(
+                        code = %error.code,
+                        transport = kind.as_str(),
+                        "browser session teardown failed after remote transport disable"
+                    );
+                }
+            }
+        }
+    }
+
     /// App-exit backstop. Managed transports terminate synchronously so no
     /// in-flight request can keep Chromium or its ephemeral profile alive.
     pub(crate) fn terminate_sessions(&self) {
@@ -609,6 +697,34 @@ impl BrowserBroker {
                 "Browser use is not enabled.",
             ))
         }
+    }
+
+    fn require_transport_enabled(
+        &self,
+        kind: BrowserTransportKind,
+        tool: &str,
+        arguments: &Value,
+        routine_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        if self.lock().transport_policy.enabled(kind) {
+            return Ok(());
+        }
+        let mut details = json!({
+            "operation": tool,
+            "transport": kind.as_str(),
+        });
+        if let Some(session_id) = arguments.get("session_id").and_then(Value::as_str) {
+            details["sessionId"] = json!(session_id);
+        }
+        if let Some(routine_id) = routine_id {
+            details["routineId"] = json!(routine_id);
+        }
+        let mut error = AppError::new(
+            "browser_transport_disabled_remotely",
+            "This browser capability is temporarily disabled.",
+        );
+        error.details = Some(details);
+        Err(error)
     }
 
     fn transport(&self, kind: BrowserTransportKind) -> Result<Arc<dyn BrowserTransport>, AppError> {
@@ -792,6 +908,15 @@ impl BrowserBroker {
     ) -> Result<Value, AppError> {
         self.require_enabled()?;
         let kind = context.transport_kind();
+        self.require_transport_enabled(
+            kind,
+            tool,
+            &arguments,
+            match &context {
+                BrowserBrokerContext::Attended => None,
+                BrowserBrokerContext::Routine(job_id) => Some(job_id.as_str()),
+            },
+        )?;
         let routine_id = match &context {
             BrowserBrokerContext::Attended => None,
             BrowserBrokerContext::Routine(job_id) => {
@@ -809,6 +934,8 @@ impl BrowserBroker {
         tool: &str,
         arguments: Value,
     ) -> Result<Value, AppError> {
+        self.require_enabled()?;
+        self.require_transport_enabled(kind, tool, &arguments, None)?;
         self.execute_inner(kind, None, tool, arguments).await
     }
 
@@ -820,6 +947,7 @@ impl BrowserBroker {
         mut arguments: Value,
     ) -> Result<Value, AppError> {
         self.require_enabled()?;
+        self.require_transport_enabled(kind, tool, &arguments, routine_id)?;
         if !matches!(
             tool,
             "start_session"
@@ -889,6 +1017,7 @@ impl BrowserBroker {
                 }
                 let mut state = self.lock();
                 let enabled = !state.transition_blocked
+                    && state.transport_policy.enabled(kind)
                     && state
                         .access_flag_path
                         .as_ref()
@@ -943,6 +1072,7 @@ impl BrowserBroker {
             let still_owned = {
                 let state = self.lock();
                 !state.transition_blocked
+                    && state.transport_policy.enabled(kind)
                     && state.sessions.get(&session_id).is_some_and(|session| {
                         session.transport_kind == kind
                             && session.routine_id.as_deref() == routine_id
@@ -1365,6 +1495,16 @@ impl BrowserBroker {
         self.notify_approvals_changed();
 
         if let Err(error) = self.require_enabled() {
+            self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                .await;
+            return Err(error);
+        }
+        if let Err(error) = self.require_transport_enabled(
+            BrowserTransportKind::Attended,
+            "approve_action",
+            &json!({ "session_id": &pending.key.session_id }),
+            None,
+        ) {
             self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
                 .await;
             return Err(error);
@@ -2624,6 +2764,191 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[tokio::test]
+    async fn remote_transport_policy_refuses_each_transport_independently() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flag = temp.path().join("browser-access");
+        std::fs::write(&flag, b"1").expect("grant");
+        let broker = BrowserBroker::default();
+        broker.set_access_flag_path(flag);
+        for kind in [
+            BrowserTransportKind::Attended,
+            BrowserTransportKind::Managed,
+        ] {
+            broker.configure_transport(
+                kind,
+                Arc::new(FakeTransport),
+                temp.path().join(format!("{}-images", kind.as_str())),
+                temp.path().join(format!("{}-artifacts", kind.as_str())),
+            );
+        }
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-1".into(),
+            server_name: "june_browser_routine_1".into(),
+            token: "routine-token".into(),
+            enabled: true,
+        });
+
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: false,
+                managed_enabled: true,
+            })
+            .await;
+        let attended = broker
+            .execute_for(
+                BrowserBrokerContext::Attended,
+                "start_session",
+                json!({ "url": "https://private.example/secret" }),
+            )
+            .await
+            .expect_err("attended transport must be disabled");
+        assert_eq!(attended.code, "browser_transport_disabled_remotely");
+        assert_eq!(
+            attended
+                .details
+                .as_ref()
+                .and_then(|value| value["operation"].as_str()),
+            Some("start_session")
+        );
+        assert!(!attended.message.contains("private.example"));
+        broker
+            .execute_for(
+                BrowserBrokerContext::Routine("routine-1".into()),
+                "start_session",
+                json!({}),
+            )
+            .await
+            .expect("managed transport stays enabled");
+
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: true,
+                managed_enabled: false,
+            })
+            .await;
+        broker
+            .execute_for(BrowserBrokerContext::Attended, "start_session", json!({}))
+            .await
+            .expect("attended transport stays enabled");
+        let managed = broker
+            .execute_for(
+                BrowserBrokerContext::Routine("routine-1".into()),
+                "start_session",
+                json!({}),
+            )
+            .await
+            .expect_err("managed transport must be disabled");
+        assert_eq!(managed.code, "browser_transport_disabled_remotely");
+        assert_eq!(
+            managed
+                .details
+                .as_ref()
+                .and_then(|value| value["routineId"].as_str()),
+            Some("routine-1")
+        );
+
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: false,
+                managed_enabled: false,
+            })
+            .await;
+        for context in [
+            BrowserBrokerContext::Attended,
+            BrowserBrokerContext::Routine("routine-1".into()),
+        ] {
+            let error = broker
+                .execute_for(context, "start_session", json!({}))
+                .await
+                .expect_err("both transports must be disabled");
+            assert_eq!(error.code, "browser_transport_disabled_remotely");
+        }
+    }
+
+    #[derive(Default)]
+    struct TeardownTrackingTransport {
+        closed: std::sync::atomic::AtomicUsize,
+        terminated: std::sync::atomic::AtomicUsize,
+    }
+
+    impl BrowserTransport for TeardownTrackingTransport {
+        fn execute<'a>(&'a self, tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
+            Box::pin(async move {
+                if tool == "close_session" {
+                    self.closed
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(TransportResponse::data(json!({})))
+            })
+        }
+
+        fn terminate_session(&self, _session_id: &str) {
+            self.terminated
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_kill_ends_only_live_sessions_for_that_transport() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flag = temp.path().join("browser-access");
+        std::fs::write(&flag, b"1").expect("grant");
+        let attended = Arc::new(TeardownTrackingTransport::default());
+        let managed = Arc::new(TeardownTrackingTransport::default());
+        let broker = BrowserBroker::default();
+        broker.set_access_flag_path(flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            attended.clone(),
+            temp.path().join("attended-images"),
+            temp.path().join("attended-artifacts"),
+        );
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            managed.clone(),
+            temp.path().join("managed-images"),
+            temp.path().join("managed-artifacts"),
+        );
+        broker
+            .execute(BrowserTransportKind::Attended, "start_session", json!({}))
+            .await
+            .expect("attended start");
+        let managed_session = broker
+            .execute(BrowserTransportKind::Managed, "start_session", json!({}))
+            .await
+            .expect("managed start");
+
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: false,
+                managed_enabled: true,
+            })
+            .await;
+
+        assert_eq!(broker.active_session_count(), 1);
+        assert_eq!(
+            attended
+                .terminated
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(attended.closed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            managed.terminated.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(managed.closed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        broker
+            .execute(
+                BrowserTransportKind::Managed,
+                "snapshot",
+                json!({ "session_id": managed_session["sessionId"] }),
+            )
+            .await
+            .expect("managed session remains live");
     }
 
     struct AttendedInteractionTransport {
