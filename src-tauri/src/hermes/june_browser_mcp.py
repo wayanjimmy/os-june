@@ -26,8 +26,7 @@ SERVER_INFO = {"name": "june-browser", "version": "0.1.0"}
 REQUEST_TIMEOUT_SECONDS = 30
 ROUTINE_TOKEN_ENV_VAR = "JUNE_BROWSER_ROUTINE_PROXY_TOKEN"
 ATTENDED_TOKEN_ENV_VAR = "JUNE_BROWSER_ATTENDED_PROXY_TOKEN"
-CRON_CONTEXT_ENV_VAR = "JUNE_BROWSER_CRON_SESSION"
-GATEWAY_CONTEXT_ENV_VAR = "JUNE_BROWSER_GATEWAY_SESSION"
+CALL_CONTEXT_ENV_VAR = "JUNE_BROWSER_CALL_CONTEXT"
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -295,17 +294,15 @@ def call_tool(
 def browser_call_context() -> str:
     """Describe the runtime path that owns this MCP subprocess.
 
-    Hermes sets HERMES_CRON_SESSION for scheduled jobs and
-    HERMES_GATEWAY_SESSION for interactive gateway sessions. June's rendered
-    MCP config passes both values through the runtime's filtered subprocess
-    environment. Cron wins if both are present, matching Hermes's own approval
-    context precedence; anything else remains unknown so the Rust broker can
-    fail closed.
+    June renders separate attended and per-routine MCP entries. Binding the
+    context to that entry keeps it stable for the subprocess lifetime; Hermes
+    sets its gateway/cron session markers only after long-lived MCP processes
+    are initialized. Anything else remains unknown so the Rust broker can fail
+    closed.
     """
-    if os.environ.get(CRON_CONTEXT_ENV_VAR) == "1":
-        return "routine"
-    if os.environ.get(GATEWAY_CONTEXT_ENV_VAR) == "1":
-        return "attended"
+    context = os.environ.get(CALL_CONTEXT_ENV_VAR)
+    if context in {"routine", "attended"}:
+        return context
     return "unknown"
 
 

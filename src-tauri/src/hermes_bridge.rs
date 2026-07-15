@@ -158,11 +158,12 @@ const JUNE_BROWSER_MCP_SCRIPT: &str = include_str!("hermes/june_browser_mcp.py")
 /// so a routine can read its own config without learning the attended secret.
 const JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV: &str = "JUNE_BROWSER_ROUTINE_PROXY_TOKEN";
 const JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV: &str = "JUNE_BROWSER_ATTENDED_PROXY_TOKEN";
-/// Runtime-owned session markers passed through to `june_browser`. Hermes
-/// filters subprocess environments, so the rendered MCP entry explicitly
-/// interpolates both values for the child process.
-const JUNE_BROWSER_MCP_CRON_CONTEXT_ENV: &str = "JUNE_BROWSER_CRON_SESSION";
-const JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV: &str = "JUNE_BROWSER_GATEWAY_SESSION";
+/// Each distinct MCP entry carries the caller context bound to its credential.
+/// Hermes initializes long-lived MCP processes before it sets gateway/cron
+/// session markers, so those runtime markers cannot identify the subprocess.
+const JUNE_BROWSER_MCP_CALL_CONTEXT_ENV: &str = "JUNE_BROWSER_CALL_CONTEXT";
+const LEGACY_JUNE_BROWSER_MCP_CRON_CONTEXT_ENV: &str = "JUNE_BROWSER_CRON_SESSION";
+const LEGACY_JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV: &str = "JUNE_BROWSER_GATEWAY_SESSION";
 // Private Google connectors: four MCP servers (read + action split per
 // provider), registered only when at least one Google account is connected.
 // They call the loopback provider proxy's /v1/gmail*, /v1/gcal* routes, which
@@ -8069,6 +8070,7 @@ fn merge_hermes_config(existing_path: &std::path::Path, rendered: &str) -> Strin
     // always-rendered entries (june_context, june_web, ...) are untouched.
     prune_connector_mcp_servers(&mut existing);
     prune_routine_browser_mcp_servers(&mut existing);
+    prune_legacy_browser_context_env(&mut existing);
     let merged = deep_merge_yaml(existing, overlay);
     serde_yaml::to_string(&merged).unwrap_or_else(|_| rendered.to_string())
 }
@@ -8102,6 +8104,27 @@ fn prune_routine_browser_mcp_servers(config: &mut serde_yaml::Value) {
         key.as_str()
             .map(|name| !is_routine_browser_server_name(name))
             .unwrap_or(true)
+    });
+}
+
+/// Removes the session-marker interpolation used before browser MCP entries
+/// carried an explicit context. A recursive merge preserves omitted mapping
+/// leaves, so this migration must delete the obsolete June-owned env keys.
+fn prune_legacy_browser_context_env(config: &mut serde_yaml::Value) {
+    let Some(env) = config
+        .get_mut("mcp_servers")
+        .and_then(|servers| servers.get_mut(JUNE_BROWSER_MCP_SERVER_NAME))
+        .and_then(|browser| browser.get_mut("env"))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+    env.retain(|key, _| {
+        !matches!(
+            key.as_str(),
+            Some(LEGACY_JUNE_BROWSER_MCP_CRON_CONTEXT_ENV)
+                | Some(LEGACY_JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV)
+        )
     });
 }
 
@@ -8670,8 +8693,7 @@ fn render_browser_mcp_entry(config: &JuneBrowserMcpConfig, base_url: &str) -> St
       - {base_url}
     env:
       PYTHONUNBUFFERED: "1"
-      {cron_context_env}: "${{HERMES_CRON_SESSION}}"
-      {gateway_context_env}: "${{HERMES_GATEWAY_SESSION}}"
+      {call_context_env}: "attended"
 {token_entry}    timeout: 30
     connect_timeout: 10
 "#,
@@ -8680,8 +8702,7 @@ fn render_browser_mcp_entry(config: &JuneBrowserMcpConfig, base_url: &str) -> St
         command = yaml_string(&config.command),
         script_path = yaml_string(&config.script_path.to_string_lossy()),
         base_url = yaml_string(base_url),
-        cron_context_env = JUNE_BROWSER_MCP_CRON_CONTEXT_ENV,
-        gateway_context_env = JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV,
+        call_context_env = JUNE_BROWSER_MCP_CALL_CONTEXT_ENV,
     )
 }
 
@@ -8699,8 +8720,7 @@ fn render_routine_browser_mcp_entry(
       - {base_url}
     env:
       PYTHONUNBUFFERED: "1"
-      {cron_context_env}: "${{HERMES_CRON_SESSION}}"
-      {gateway_context_env}: "${{HERMES_GATEWAY_SESSION}}"
+      {call_context_env}: "routine"
       {routine_token_env}: {routine_token}
     timeout: 30
     connect_timeout: 10
@@ -8709,8 +8729,7 @@ fn render_routine_browser_mcp_entry(
         command = yaml_string(&config.command),
         script_path = yaml_string(&config.script_path.to_string_lossy()),
         base_url = yaml_string(base_url),
-        cron_context_env = JUNE_BROWSER_MCP_CRON_CONTEXT_ENV,
-        gateway_context_env = JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV,
+        call_context_env = JUNE_BROWSER_MCP_CALL_CONTEXT_ENV,
         routine_token_env = JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV,
         routine_token = yaml_string(&grant.token),
     )
@@ -13591,10 +13610,9 @@ mod tests {
         assert!(config.contains("    enabled: false\n"));
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_browser_mcp.py\"\n"));
         assert!(config.contains("      - \"http://127.0.0.1:9/v1\"\n"));
-        assert!(config.contains("      JUNE_BROWSER_CRON_SESSION: \"${HERMES_CRON_SESSION}\"\n"));
-        assert!(
-            config.contains("      JUNE_BROWSER_GATEWAY_SESSION: \"${HERMES_GATEWAY_SESSION}\"\n")
-        );
+        assert!(config.contains("      JUNE_BROWSER_CALL_CONTEXT: \"attended\"\n"));
+        assert!(!config.contains("${HERMES_CRON_SESSION}"));
+        assert!(!config.contains("${HERMES_GATEWAY_SESSION}"));
         assert!(!config.contains("browser-proxy-tok"));
         assert!(!config.contains(JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV));
         assert!(!config.contains(JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV));
@@ -13680,6 +13698,9 @@ mod tests {
 
         assert!(config.contains("  june_browser_routine_on:\n"));
         assert!(config.contains("routine-on-token"));
+        assert!(config.contains("      JUNE_BROWSER_CALL_CONTEXT: \"routine\"\n"));
+        assert!(!config.contains("${HERMES_CRON_SESSION}"));
+        assert!(!config.contains("${HERMES_GATEWAY_SESSION}"));
         assert!(!config.contains("june_browser_routine_off"));
         assert!(!config.contains("routine-off-token"));
     }
@@ -14720,6 +14741,55 @@ mcp_servers:
 
         std::fs::write(&missing, ": not yaml : [").expect("seed corrupt");
         assert_eq!(merge_hermes_config(&missing, rendered), rendered);
+    }
+
+    #[test]
+    fn merge_hermes_config_removes_legacy_browser_session_markers() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config_path = home.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"mcp_servers:
+  june_browser:
+    env:
+      PYTHONUNBUFFERED: "1"
+      JUNE_BROWSER_CRON_SESSION: "${HERMES_CRON_SESSION}"
+      JUNE_BROWSER_GATEWAY_SESSION: "${HERMES_GATEWAY_SESSION}"
+"#,
+        )
+        .expect("seed config");
+
+        let rendered = render_hermes_config(
+            "m",
+            false,
+            "http://127.0.0.1:9/v1",
+            "t",
+            "recorder",
+            "browser",
+            "connector",
+            "web",
+            &[],
+            BuiltinMcpConfigs {
+                context: None,
+                web: None,
+                image: None,
+                video: None,
+                recorder: None,
+                browser: Some(&test_june_browser_mcp_config(true)),
+                gmail: None,
+                gmail_actions: None,
+                gcal: None,
+                gcal_actions: None,
+                connector_autos: &[],
+            },
+        );
+        let merged = merge_hermes_config(&config_path, &rendered);
+
+        assert!(merged.contains("JUNE_BROWSER_CALL_CONTEXT: attended"));
+        assert!(!merged.contains("JUNE_BROWSER_CRON_SESSION"));
+        assert!(!merged.contains("JUNE_BROWSER_GATEWAY_SESSION"));
+        assert!(!merged.contains("${HERMES_CRON_SESSION}"));
+        assert!(!merged.contains("${HERMES_GATEWAY_SESSION}"));
     }
 
     #[test]

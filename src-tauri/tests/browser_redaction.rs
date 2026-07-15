@@ -93,6 +93,52 @@ except module.ToolError as error:
 }
 
 #[test]
+fn python_mcp_selects_the_credential_bound_to_its_configured_call_context() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("hermes")
+        .join("june_browser_mcp.py");
+    let program = r#"
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("june_browser_mcp", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+os.environ[module.ATTENDED_TOKEN_ENV_VAR] = "attended-token"
+os.environ[module.ROUTINE_TOKEN_ENV_VAR] = "routine-token"
+
+os.environ[module.CALL_CONTEXT_ENV_VAR] = "attended"
+assert module.browser_call_context() == "attended"
+assert module.browser_proxy_token() == "attended-token"
+
+os.environ[module.CALL_CONTEXT_ENV_VAR] = "routine"
+assert module.browser_call_context() == "routine"
+assert module.browser_proxy_token() == "routine-token"
+
+os.environ[module.CALL_CONTEXT_ENV_VAR] = "unexpected"
+assert module.browser_call_context() == "unknown"
+assert module.browser_proxy_token() == ""
+"#;
+
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(program)
+        .arg(script)
+        .output()
+        .expect("run browser MCP context check");
+
+    assert!(
+        output.status.success(),
+        "python stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn python_mcp_parse_failure_writes_only_generic_stderr() {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
