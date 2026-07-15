@@ -1508,22 +1508,36 @@ pub async fn connectors_apply_runtime(
     app: AppHandle,
     bridge: State<'_, HermesBridge>,
 ) -> Result<(), AppError> {
+    reapply_hermes_runtime(&app, &bridge).await
+}
+
+/// Re-render `config.yaml` for every live runtime and restart the routine
+/// gateway so a settings change that feeds the rendered config (connector MCP
+/// servers, the `platform_toolsets.cron` allowlist, SOUL.md) takes effect
+/// without waiting for the next natural spawn. A bare stop is not enough: the
+/// cron allowlist is recomputed only when `sync_hermes_config` runs on start,
+/// and the launchd routine gateway keeps serving the old `config.yaml` until
+/// it is restarted.
+pub(crate) async fn reapply_hermes_runtime(
+    app: &AppHandle,
+    bridge: &HermesBridge,
+) -> Result<(), AppError> {
     // Capture each live runtime's working directory alongside its mode so the
     // restart lands in the same project the user was in. Restarting with
     // cwd: None would drop a custom cwd back to the default workspace, so a
-    // connector settings change would silently relocate the agent's files.
-    let connections: Vec<(bool, Option<String>)> = live_connections(&bridge)?
+    // settings change would silently relocate the agent's files.
+    let connections: Vec<(bool, Option<String>)> = live_connections(bridge)?
         .iter()
         .map(|connection| (connection.full_mode, connection.cwd.clone()))
         .collect();
     for (full_mode, cwd) in connections {
         // Mode-scoped restart (same path the MCP admin uses): stop that one
-        // runtime, then re-start it so `sync_hermes_config` re-renders the
-        // connector MCP servers into config.yaml.
-        stop_hermes_mode(&bridge, full_mode)?;
+        // runtime, then re-start it so `sync_hermes_config` re-renders
+        // config.yaml.
+        stop_hermes_mode(bridge, full_mode)?;
         start_hermes_bridge_inner(
-            &app,
-            &bridge,
+            app,
+            bridge,
             StartHermesBridgeRequest {
                 cwd,
                 full_mode: Some(full_mode),
@@ -1532,7 +1546,7 @@ pub async fn connectors_apply_runtime(
         .await?;
     }
     // Best-effort gateway restart so scheduled routines pick up the new config.
-    if let Some(connection) = live_connections(&bridge)?.into_iter().next() {
+    if let Some(connection) = live_connections(bridge)?.into_iter().next() {
         let _ = hermes_connection_json(
             &connection,
             reqwest::Method::POST,
@@ -2522,15 +2536,6 @@ pub fn set_june_character(
     stop_hermes_mode(&bridge, false)?;
     stop_hermes_mode(&bridge, true)?;
     Ok(june_character_status(&hermes_home))
-}
-
-/// Stops both runtime mode slots so the next spawn re-syncs SOUL.md. The
-/// CHARACTER.md pattern (`set_june_character`) for any setting that feeds
-/// `sync_june_soul`: the memory toggle uses it so guidance never disagrees
-/// with the tools' actual enabled state longer than the current process.
-pub fn restart_hermes_for_soul_change(bridge: &HermesBridge) -> Result<(), AppError> {
-    stop_hermes_mode(bridge, false)?;
-    stop_hermes_mode(bridge, true)
 }
 
 /// Stops the runtime in one mode slot, leaving the other mode running.

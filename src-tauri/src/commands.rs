@@ -388,10 +388,12 @@ pub async fn set_memory_enabled(
         persist_memory_settings(&path, &settings)?;
         settings
     };
-    // SOUL.md memory guidance is assembled at spawn; restart the runtime
-    // modes (the set_june_character pattern) so the running agent's guidance
-    // never disagrees with the tools' actual enabled state.
-    crate::hermes_bridge::restart_hermes_for_soul_change(&bridge)?;
+    // The toggle feeds two things assembled from settings at spawn: the SOUL
+    // memory stanza and the native `memory` entry in `platform_toolsets.cron`.
+    // Re-render config.yaml for live runtimes AND restart the routine gateway
+    // (a bare stop would leave the launchd gateway serving a stale config that
+    // still grants routines the native memory toolset behind the off switch).
+    crate::hermes_bridge::reapply_hermes_runtime(&app, &bridge).await?;
     Ok(settings)
 }
 
