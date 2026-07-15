@@ -14,20 +14,10 @@ import { IconMoveFolder } from "central-icons/IconMoveFolder";
 import { IconNoteText } from "central-icons/IconNoteText";
 import { IconPageSearch } from "central-icons/IconPageSearch";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
+import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconSortArrowUpDown } from "central-icons/IconSortArrowUpDown";
 import { IconTrashCan } from "central-icons/IconTrashCan";
-import {
-  deleteMemory,
-  listMemories,
-  memorySettings,
-  setFolderInstructions,
-  setFolderMemoryDisabled,
-  updateMemory,
-  type FolderDto,
-  type HermesSessionInfo,
-  type MemoryDto,
-  type NoteListItemDto,
-} from "../../lib/tauri";
+import type { FolderDto, HermesSessionInfo, NoteListItemDto } from "../../lib/tauri";
 import { sessionTimestamp } from "../../lib/hermes-adapter";
 import {
   type DragEvent,
@@ -44,12 +34,11 @@ import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { EmptyState } from "../ui/EmptyState";
-import { Switch } from "../ui/Switch";
-import { MemoryRows } from "../settings/MemorySettingsSection";
 import { AddNotesToFolderDialog } from "./AddNotesToFolderDialog";
 import { AddSessionsToProjectDialog } from "./AddSessionsToProjectDialog";
 import { CreateFolderDialog } from "./CreateFolderDialog";
 import { EditFolderDialog } from "./EditFolderDialog";
+import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 
 const NO_FOLDERS: FolderDto[] = [];
 
@@ -82,6 +71,8 @@ type FoldersWorkspaceProps = {
   onAssignSessionToFolder: (sessionId: string, folderId: string) => Promise<unknown>;
   onRemoveSessionFromFolder: (sessionId: string, folderId: string) => void;
   onOpenSessionMoveDialog: (sessionId: string) => void;
+  /** Open the full Memory manager (Settings > Memory) filtered to a project. */
+  onManageProjectMemory: (folderId: string) => void;
 };
 
 export function FoldersWorkspace(props: FoldersWorkspaceProps) {
@@ -586,19 +577,15 @@ function FolderDetail({
   onAssignSessionToFolder,
   onRemoveSessionFromFolder,
   onOpenSessionMoveDialog,
+  onManageProjectMemory,
 }: FoldersWorkspaceProps & { folder: FolderDto }) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(folder.name);
   const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [addSessionsOpen, setAddSessionsOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [instructionsDraft, setInstructionsDraft] = useState(folder.instructions ?? "");
-  const [instructionsError, setInstructionsError] = useState<string>();
-  const [memories, setMemories] = useState<MemoryDto[]>([]);
-  const [memoryEnabled, setMemoryEnabledState] = useState(false);
-  const [memoryError, setMemoryError] = useState<string>();
   const titleRef = useRef<HTMLInputElement | null>(null);
 
   useLayoutEffect(() => {
@@ -611,30 +598,6 @@ function FolderDetail({
   useEffect(() => {
     if (!editingTitle) setTitleDraft(folder.name);
   }, [folder.name, editingTitle]);
-
-  useEffect(() => {
-    setInstructionsDraft(folder.instructions ?? "");
-    setInstructionsError(undefined);
-  }, [folder.id, folder.instructions]);
-
-  useEffect(() => {
-    let active = true;
-    setMemories([]);
-    setMemoryError(undefined);
-    void Promise.all([listMemories(folder.id, false), memorySettings()])
-      .then(([nextMemories, settings]) => {
-        if (!active) return;
-        setMemories(sortMemoriesNewestFirst(nextMemories));
-        setMemoryEnabledState(settings.enabled);
-        setMemoryError(undefined);
-      })
-      .catch((caught) => {
-        if (active) setMemoryError(messageFromCaught(caught));
-      });
-    return () => {
-      active = false;
-    };
-  }, [folder.id]);
 
   useEffect(() => {
     if (!menu) return;
@@ -698,49 +661,6 @@ function FolderDetail({
       right: window.innerWidth - rect.right,
       top: rect.bottom + 4,
     });
-  }
-
-  async function saveInstructions() {
-    const next = instructionsDraft.trim();
-    if (next === (folder.instructions ?? "")) return;
-    try {
-      const updated = await setFolderInstructions(folder.id, next || undefined);
-      onFolderUpdated(updated);
-      setInstructionsDraft(updated.instructions ?? "");
-      setInstructionsError(undefined);
-    } catch (caught) {
-      setInstructionsError(messageFromCaught(caught));
-    }
-  }
-
-  async function toggleProjectMemory(remember: boolean) {
-    try {
-      const updated = await setFolderMemoryDisabled(folder.id, !remember);
-      onFolderUpdated(updated);
-      setMemoryError(undefined);
-    } catch (caught) {
-      setMemoryError(messageFromCaught(caught));
-    }
-  }
-
-  async function editProjectMemory(id: string, content: string) {
-    const updated = await updateMemory(id, content);
-    setMemories((current) =>
-      sortMemoriesNewestFirst(
-        current.map((memory) => (memory.id === updated.id ? updated : memory)),
-      ),
-    );
-  }
-
-  async function removeProjectMemory(id: string) {
-    try {
-      await deleteMemory(id);
-      setMemories((current) => current.filter((memory) => memory.id !== id));
-      setMemoryError(undefined);
-    } catch (caught) {
-      setMemoryError(messageFromCaught(caught));
-      throw caught;
-    }
   }
 
   return (
@@ -844,80 +764,6 @@ function FolderDetail({
           </p>
         </header>
 
-        <section className="folder-context-section" aria-labelledby="folder-instructions-heading">
-          <h2 id="folder-instructions-heading" className="folder-notes-title">
-            Instructions
-          </h2>
-          <div className="settings-card folder-context-card">
-            <textarea
-              className="folder-instructions-textarea"
-              value={instructionsDraft}
-              placeholder="Add instructions June should follow in this project's sessions."
-              aria-label="Project instructions"
-              aria-invalid={instructionsError ? true : undefined}
-              onChange={(event) => {
-                setInstructionsDraft(event.currentTarget.value);
-                setInstructionsError(undefined);
-              }}
-              onBlur={() => void saveInstructions()}
-            />
-            {instructionsDraft.length >= 3_600 ? (
-              <p
-                className="folder-instructions-count"
-                data-over-limit={instructionsDraft.length > 4_000 || undefined}
-              >
-                {instructionsDraft.length} / 4000 characters
-              </p>
-            ) : null}
-            {instructionsError ? (
-              <p className="settings-row-error" role="alert">
-                {instructionsError}
-              </p>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="folder-context-section" aria-labelledby="folder-memory-heading">
-          <h2 id="folder-memory-heading" className="folder-notes-title">
-            Memory
-          </h2>
-          <div className="settings-card folder-context-card">
-            <div className="settings-row folder-memory-toggle-row">
-              <div className="settings-row-info">
-                <h3 className="settings-row-title">Remember things in this project</h3>
-                <p className="settings-row-description">
-                  {memoryEnabled
-                    ? "June can save and use memories for this project."
-                    : "Memory is turned off in Settings > Memory."}
-                </p>
-              </div>
-              <div className="settings-row-control">
-                <Switch
-                  checked={!folder.memoryDisabled}
-                  disabled={!memoryEnabled}
-                  aria-label="Remember things in this project"
-                  onCheckedChange={(remember) => void toggleProjectMemory(remember)}
-                />
-              </div>
-            </div>
-            {memories.length > 0 ? (
-              <MemoryRows
-                memories={memories}
-                editable={memoryEnabled && !folder.memoryDisabled}
-                onUpdate={editProjectMemory}
-                onDelete={removeProjectMemory}
-              />
-            ) : (
-              <p className="folder-memory-empty">No memories for this project yet.</p>
-            )}
-            {memoryError ? (
-              <p className="settings-row-error" role="alert">
-                {memoryError}
-              </p>
-            ) : null}
-          </div>
-        </section>
-
         {folderNotes.length > 0 || folderSessions.length > 0 ? (
           <>
             {/* Agents lead the project; the add menu lives up in the
@@ -956,10 +802,7 @@ function FolderDetail({
           <FolderEmptyState
             onCreateSession={() => onCreateSession(folder.id)}
             onCreateNote={() => onCreateNote(folder.id)}
-            onAddExisting={() => setAddOpen(true)}
-            onAddSessions={() => setAddSessionsOpen(true)}
-            hasNotesElsewhere={notes.some((note) => !note.folderIds.includes(folder.id))}
-            hasSessionsElsewhere={hasSessionsElsewhere}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
         )}
       </div>
@@ -976,11 +819,11 @@ function FolderDetail({
             role="menuitem"
             onClick={() => {
               setMenu(null);
-              setEditOpen(true);
+              setSettingsOpen(true);
             }}
           >
-            <IconPencil size={14} />
-            Edit details
+            <IconSettingsGear4 size={14} />
+            Project settings
           </button>
           <button
             type="button"
@@ -1025,11 +868,14 @@ function FolderDetail({
         confirmLabel="Delete project"
         destructive
       />
-      <EditFolderDialog
-        open={editOpen}
-        onClose={() => setEditOpen(false)}
+      <ProjectSettingsDialog
+        open={settingsOpen}
         folder={folder}
-        onSave={(name, description) => onRenameFolder(folder.id, name, description)}
+        onClose={() => setSettingsOpen(false)}
+        onSaveDetails={(name, description) => onRenameFolder(folder.id, name, description)}
+        onFolderUpdated={onFolderUpdated}
+        onManageMemory={onManageProjectMemory}
+        onRequestDelete={() => setDeleteOpen(true)}
       />
     </section>
   );
@@ -1314,45 +1160,6 @@ function FolderAddMenu({
   );
 }
 
-function FolderEmptyActions({
-  onCreateSession,
-  onCreateNote,
-  onAddExisting,
-  onAddSessions,
-  hasNotesElsewhere,
-  hasSessionsElsewhere,
-}: {
-  onCreateSession: () => void;
-  onCreateNote: () => void;
-  onAddExisting: () => void;
-  onAddSessions: () => void;
-  hasNotesElsewhere: boolean;
-  hasSessionsElsewhere: boolean;
-}) {
-  return (
-    <div className="folder-empty-actions">
-      {hasSessionsElsewhere ? (
-        <button type="button" className="primary-action" onClick={onAddSessions}>
-          Add existing session
-        </button>
-      ) : null}
-      {hasNotesElsewhere ? (
-        <button type="button" className="primary-action" onClick={onAddExisting}>
-          Add existing meeting note
-        </button>
-      ) : null}
-      <button type="button" className="primary-action" onClick={onCreateSession}>
-        <IconBubble3 size={13} />
-        New session
-      </button>
-      <button type="button" className="primary-action primary-solid" onClick={onCreateNote}>
-        <IconPlusMedium size={13} />
-        New meeting note
-      </button>
-    </div>
-  );
-}
-
 function FolderNoteRow({
   note,
   folder: _folder,
@@ -1487,33 +1294,44 @@ function FolderNoteRow({
 function FolderEmptyState({
   onCreateSession,
   onCreateNote,
-  onAddExisting,
-  onAddSessions,
-  hasNotesElsewhere,
-  hasSessionsElsewhere,
+  onOpenSettings,
 }: {
   onCreateSession: () => void;
   onCreateNote: () => void;
-  onAddExisting: () => void;
-  onAddSessions: () => void;
-  hasNotesElsewhere: boolean;
-  hasSessionsElsewhere: boolean;
+  onOpenSettings: () => void;
 }) {
   return (
-    <div className="folder-empty-surface" role="group">
-      <p className="folder-empty-hint">
-        Capture a meeting, a phone call, or a half-formed thought. Or start an agent session on this
-        project.
-      </p>
-      <FolderEmptyActions
-        onCreateSession={onCreateSession}
-        onCreateNote={onCreateNote}
-        onAddExisting={onAddExisting}
-        onAddSessions={onAddSessions}
-        hasNotesElsewhere={hasNotesElsewhere}
-        hasSessionsElsewhere={hasSessionsElsewhere}
-      />
-    </div>
+    <EmptyState
+      label="Add to this project"
+      icon={<IconFolderOpen size={28} />}
+      title="Nothing here yet"
+      description="Start an agent session or capture a meeting note. Everything you add stays in this project."
+      action={
+        <>
+          <div className="folder-empty-cta">
+            <button type="button" className="primary-action" onClick={onCreateSession}>
+              <IconBubble3 size={13} />
+              New session
+            </button>
+            <button type="button" className="primary-action primary-solid" onClick={onCreateNote}>
+              <IconPlusMedium size={13} />
+              New meeting note
+            </button>
+          </div>
+          <p className="folder-empty-nudge">
+            Want June to follow instructions or remember details here? Set it up in{" "}
+            <button
+              type="button"
+              className="settings-inline-link folder-empty-nudge-link"
+              onClick={onOpenSettings}
+            >
+              project settings
+            </button>
+            .
+          </p>
+        </>
+      }
+    />
   );
 }
 
@@ -1546,17 +1364,6 @@ function formatDate(iso: string): string {
     day: "numeric",
     year: sameYear ? undefined : "numeric",
   });
-}
-
-function sortMemoriesNewestFirst(memories: MemoryDto[]) {
-  return [...memories].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-}
-
-function messageFromCaught(caught: unknown) {
-  if (caught && typeof caught === "object" && "message" in caught) {
-    return String((caught as { message: unknown }).message);
-  }
-  return String(caught);
 }
 
 /** Right-aligned timestamp inside a folder's note row. Same-day shows

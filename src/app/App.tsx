@@ -438,12 +438,33 @@ export function App() {
   // is opened so "back" lands the user where they were, not on Notes.
   const [settingsReturnView, setSettingsReturnView] = useState<SidebarView>("notes");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  // When the Memory tab is opened from a project ("Manage memories"), the
+  // manager pre-filters to that project. Cleared on any normal tab navigation.
+  const [memoryFolderFilter, setMemoryFolderFilter] = useState<string | undefined>();
   const openSettings = useCallback(() => {
     const returnView = activeViewRef.current;
     if (returnView !== "settings") {
       setSettingsReturnView(returnView);
     }
+    setMemoryFolderFilter(undefined);
     setActiveView("settings");
+  }, []);
+  // Deep-link into Settings > Memory filtered to a project (from the project
+  // settings dialog's "Manage memories").
+  const openMemorySettings = useCallback((folderId?: string) => {
+    const returnView = activeViewRef.current;
+    if (returnView !== "settings") {
+      setSettingsReturnView(returnView);
+    }
+    setMemoryFolderFilter(folderId);
+    setSettingsTab("memory");
+    setActiveView("settings");
+  }, []);
+  // Any deliberate tab change clears the project pre-filter so opening Memory
+  // from the settings nav shows all memories, not a stale project scope.
+  const changeSettingsTab = useCallback((tab: SettingsTab) => {
+    setMemoryFolderFilter(undefined);
+    setSettingsTab(tab);
   }, []);
   const [originFolderId, setOriginFolderId] = useState<string | undefined>();
   // Tracks that the open note was drilled into from the All notes view, so the
@@ -3552,7 +3573,7 @@ export function App() {
         activeView={activeView}
         account={account}
         settingsTab={settingsTab}
-        onSettingsTabChange={setSettingsTab}
+        onSettingsTabChange={changeSettingsTab}
         onChangeView={(view) => {
           if (takeNewTabIntent()) {
             openTab({ view });
@@ -3718,7 +3739,6 @@ export function App() {
             <div className="workspace">
               {activeView === "settings" ? (
                 <AppSettings
-                  folders={state.folders}
                   account={account}
                   accountLoading={accountLoading}
                   sourceMode={sourceMode}
@@ -3732,8 +3752,14 @@ export function App() {
                   onEnableMicrophone={handleEnableMicrophone}
                   onEnableAccessibility={handleEnableAccessibility}
                   onEnableSystemAudio={handleEnableSystemAudio}
+                  folders={state.folders}
+                  memoryFolderFilter={memoryFolderFilter}
+                  onOpenProject={(folderId) => {
+                    handleSelectFolder(folderId);
+                    setActiveView("folders");
+                  }}
                   activeTab={settingsTab}
-                  onTabChange={setSettingsTab}
+                  onTabChange={changeSettingsTab}
                   onDetailPinnedChange={setSettingsDetailPinned}
                   onCheckForUpdates={() => runUpdateCheck("manual")}
                   updateReadyToRelaunch={readyUpdate != null}
@@ -4014,6 +4040,7 @@ export function App() {
                     void handleRemoveSessionFromFolder(sessionId, folderId)
                   }
                   onOpenSessionMoveDialog={(sessionId) => setMoveDialogSessionIds([sessionId])}
+                  onManageProjectMemory={(folderId) => openMemorySettings(folderId)}
                 />
               ) : selectedNote ? (
                 <div className="note-shell">

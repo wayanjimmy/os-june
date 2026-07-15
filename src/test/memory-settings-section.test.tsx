@@ -18,46 +18,36 @@ vi.mock("../lib/tauri", async (importOriginal) => {
   return { ...actual, ...mocks };
 });
 
+const stamp = "2026-07-01T00:00:00Z";
+
 const folders: FolderDto[] = [
-  {
-    id: "project-a",
-    name: "Alpha",
-    memoryDisabled: false,
-    createdAt: "2026-07-01T00:00:00Z",
-    updatedAt: "2026-07-01T00:00:00Z",
-  },
-  {
-    id: "project-b",
-    name: "Beta",
-    memoryDisabled: true,
-    createdAt: "2026-07-01T00:00:00Z",
-    updatedAt: "2026-07-01T00:00:00Z",
-  },
+  { id: "project-a", name: "Alpha", memoryDisabled: false, createdAt: stamp, updatedAt: stamp },
+  { id: "project-b", name: "Beta", memoryDisabled: false, createdAt: stamp, updatedAt: stamp },
 ];
 
+// The manager shows every memory — global and per-project.
 const memories: MemoryDto[] = [
   {
-    id: "global",
+    id: "global-user",
     content: "Use concise answers",
     source: "user",
     createdAt: "2026-07-03T00:00:00Z",
     updatedAt: "2026-07-03T00:00:00Z",
   },
   {
-    id: "alpha",
-    folderId: "project-a",
-    content: "Launch day is Friday",
+    id: "global-agent",
+    content: "Prefers metric units",
     source: "agent",
     createdAt: "2026-07-04T00:00:00Z",
     updatedAt: "2026-07-04T00:00:00Z",
   },
   {
-    id: "beta",
-    folderId: "project-b",
-    content: "The budget is approved",
-    source: "user",
-    createdAt: "2026-07-02T00:00:00Z",
-    updatedAt: "2026-07-02T00:00:00Z",
+    id: "alpha",
+    folderId: "project-a",
+    content: "Launch day is Friday",
+    source: "agent",
+    createdAt: "2026-07-05T00:00:00Z",
+    updatedAt: "2026-07-05T00:00:00Z",
   },
 ];
 
@@ -72,8 +62,8 @@ beforeEach(() => {
       folderId,
       content,
       source: "user",
-      createdAt: "2026-07-05T00:00:00Z",
-      updatedAt: "2026-07-05T00:00:00Z",
+      createdAt: "2026-07-06T00:00:00Z",
+      updatedAt: "2026-07-06T00:00:00Z",
     }),
   );
   mocks.updateMemory.mockImplementation(async (id: string, content: string) => {
@@ -85,20 +75,52 @@ beforeEach(() => {
 });
 
 describe("MemorySettingsSection", () => {
-  it("renders global memories first, project groups, sources, and project-off state", async () => {
+  it("lists every memory with project tags, sources, and a count", async () => {
     render(<MemorySettingsSection folders={folders} />);
 
-    expect(await screen.findByText("Use concise answers")).toBeInTheDocument();
-    const headings = screen
-      .getAllByRole("heading", { level: 2 })
-      .map((heading) => heading.textContent);
-    expect(headings).toEqual(["Memory", "All projects", "Alpha", "Beta"]);
-    expect(screen.getByText("Added by June")).toBeInTheDocument();
-    expect(screen.getAllByText("Added by you")).toHaveLength(2);
-    expect(screen.getByText("Memory off for this project")).toBeInTheDocument();
+    expect(await screen.findByText("Launch day is Friday")).toBeInTheDocument();
+    // Fetches all memories, global and per-project.
+    expect(mocks.listMemories).toHaveBeenCalledWith(undefined, true);
+    // Total count sits in the section heading pill, matching Agent / Skills.
+    const heading = screen.getByRole("heading", { level: 2, name: /Saved memories/ });
+    expect(within(heading).getByText("3")).toBeInTheDocument();
+    // Project tag only on the scoped memory; un-scoped rows show no chip.
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+    expect(screen.queryByText("General")).toBeNull();
+    expect(screen.getByText("Added by you")).toBeInTheDocument();
+    expect(screen.getAllByText("Added by June")).toHaveLength(2);
   });
 
-  it("adds, edits, and deletes memories through the bindings", async () => {
+  it("filters the list by search query", async () => {
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} />);
+    await screen.findByText("Launch day is Friday");
+
+    await user.type(screen.getByRole("searchbox", { name: "Search memories" }), "metric");
+    expect(screen.getByText("Prefers metric units")).toBeInTheDocument();
+    expect(screen.queryByText("Launch day is Friday")).toBeNull();
+  });
+
+  it("filters the list to a single project", async () => {
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} />);
+    await screen.findByText("Launch day is Friday");
+
+    await user.click(screen.getByRole("button", { name: "Filter memories by project" }));
+    await user.click(screen.getByRole("option", { name: /Alpha/ }));
+
+    expect(screen.getByText("Launch day is Friday")).toBeInTheDocument();
+    expect(screen.queryByText("Use concise answers")).toBeNull();
+  });
+
+  it("pre-filters to the project passed as initialFolderFilter", async () => {
+    render(<MemorySettingsSection folders={folders} initialFolderFilter="project-a" />);
+
+    expect(await screen.findByText("Launch day is Friday")).toBeInTheDocument();
+    expect(screen.queryByText("Use concise answers")).toBeNull();
+  });
+
+  it("adds a memory, then edits and deletes through the bindings", async () => {
     const user = userEvent.setup();
     render(<MemorySettingsSection folders={folders} />);
     await screen.findByText("Use concise answers");
@@ -106,31 +128,34 @@ describe("MemorySettingsSection", () => {
     await user.click(screen.getByRole("button", { name: "Add memory" }));
     const addDialog = screen.getByRole("dialog", { name: "Add memory" });
     await user.type(within(addDialog).getByRole("textbox", { name: "Memory" }), "Call Sam");
-    await user.click(within(addDialog).getByRole("button", { name: "Memory project" }));
-    await user.click(screen.getByRole("option", { name: "Alpha" }));
     await user.click(within(addDialog).getByRole("button", { name: "Add memory" }));
     await waitFor(() =>
       expect(mocks.createMemory).toHaveBeenCalledWith({
         content: "Call Sam",
-        folderId: "project-a",
         source: "user",
       }),
     );
 
-    await user.click(screen.getAllByRole("button", { name: "Edit memory" })[0]);
+    const conciseRow = screen.getByText("Use concise answers").closest(".memory-row");
+    await user.click(
+      within(conciseRow as HTMLElement).getByRole("button", { name: "Edit memory" }),
+    );
     const editDialog = screen.getByRole("dialog", { name: "Edit memory" });
     const editField = within(editDialog).getByRole("textbox", { name: "Memory" });
     await user.clear(editField);
     await user.type(editField, "Use very concise answers");
     await user.click(within(editDialog).getByRole("button", { name: "Save changes" }));
     await waitFor(() =>
-      expect(mocks.updateMemory).toHaveBeenCalledWith("global", "Use very concise answers"),
+      expect(mocks.updateMemory).toHaveBeenCalledWith("global-user", "Use very concise answers"),
     );
 
-    await user.click(screen.getAllByRole("button", { name: "Delete memory" })[0]);
+    const updatedRow = screen.getByText("Use very concise answers").closest(".memory-row");
+    await user.click(
+      within(updatedRow as HTMLElement).getByRole("button", { name: "Delete memory" }),
+    );
     const deleteDialog = screen.getByRole("dialog", { name: "Delete memory?" });
     await user.click(within(deleteDialog).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(mocks.deleteMemory).toHaveBeenCalledWith("global"));
+    await waitFor(() => expect(mocks.deleteMemory).toHaveBeenCalledWith("global-user"));
   });
 
   it("wires the global toggle and keeps saved memories inspectable while off", async () => {

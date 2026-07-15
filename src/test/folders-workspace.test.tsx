@@ -114,6 +114,7 @@ function baseProps() {
     onAssignSessionToFolder: vi.fn(async () => undefined),
     onRemoveSessionFromFolder: vi.fn(),
     onOpenSessionMoveDialog: vi.fn(),
+    onManageProjectMemory: vi.fn(),
   };
 }
 
@@ -838,14 +839,38 @@ describe("FoldersWorkspace — detail view", () => {
     expect(props.onRemoveNoteFromFolder).toHaveBeenCalledWith("note-1", "folder-2");
   });
 
-  it("autosaves project instructions on blur and surfaces the 4000 character limit", async () => {
+  it("prefills the instructions field in Project settings from the folder", async () => {
+    const user = userEvent.setup();
+    render(
+      <FoldersWorkspace
+        {...baseProps()}
+        folders={[{ ...folders[1], instructions: "Answer in French" }]}
+        selectedFolderId="folder-2"
+      />,
+    );
+
+    // Instructions live in Project settings, not on the surface.
+    expect(screen.queryByRole("button", { name: /^Instructions/ })).toBeNull();
+
+    await openProjectSettings(user, "Work");
+    const dialog = screen.getByRole("dialog", { name: "Project settings" });
+    expect(within(dialog).getByRole("textbox", { name: "Project instructions" })).toHaveValue(
+      "Answer in French",
+    );
+  });
+
+  it("saves project instructions from Project settings", async () => {
     const user = userEvent.setup();
     const props = baseProps();
     render(<FoldersWorkspace {...props} selectedFolderId="folder-2" />);
 
-    const textarea = screen.getByRole("textbox", { name: "Project instructions" });
-    await user.type(textarea, "Keep answers concise");
-    fireEvent.blur(textarea);
+    await openProjectSettings(user, "Work");
+    const dialog = screen.getByRole("dialog", { name: "Project settings" });
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "Project instructions" }),
+      "Keep answers concise",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
       expect(mocks.setFolderInstructions).toHaveBeenCalledWith("folder-2", "Keep answers concise"),
@@ -853,19 +878,22 @@ describe("FoldersWorkspace — detail view", () => {
     expect(props.onFolderUpdated).toHaveBeenCalledWith(
       expect.objectContaining({ instructions: "Keep answers concise" }),
     );
-
-    fireEvent.change(textarea, { target: { value: "x".repeat(4_001) } });
-    expect(screen.getByText("4001 / 4000 characters")).toBeInTheDocument();
-    mocks.setFolderInstructions.mockRejectedValueOnce(
-      new Error("Project instructions cannot exceed 4000 characters."),
-    );
-    fireEvent.blur(textarea);
-    expect(
-      await screen.findByText("Project instructions cannot exceed 4000 characters."),
-    ).toBeInTheDocument();
   });
 
-  it("loads project memories and wires the project memory toggle", async () => {
+  it("disables Save when instructions exceed the 4000 character limit", async () => {
+    const user = userEvent.setup();
+    render(<FoldersWorkspace {...baseProps()} selectedFolderId="folder-2" />);
+
+    await openProjectSettings(user, "Work");
+    const dialog = screen.getByRole("dialog", { name: "Project settings" });
+    const textarea = within(dialog).getByRole("textbox", { name: "Project instructions" });
+    fireEvent.change(textarea, { target: { value: "x".repeat(4_001) } });
+
+    expect(within(dialog).getByText("4001 / 4000 characters")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("shows a memory count + toggle and deep-links to the manager from Project settings", async () => {
     mocks.listMemories.mockResolvedValueOnce([
       {
         id: "memory-1",
@@ -880,22 +908,43 @@ describe("FoldersWorkspace — detail view", () => {
     const props = baseProps();
     render(<FoldersWorkspace {...props} selectedFolderId="folder-2" />);
 
-    expect(await screen.findByText("The launch is Friday")).toBeInTheDocument();
-    expect(screen.getByText("Added by June")).toBeInTheDocument();
-    await user.click(screen.getByRole("switch", { name: "Remember things in this project" }));
+    await openProjectSettings(user, "Work");
+    const dialog = screen.getByRole("dialog", { name: "Project settings" });
+
+    // Memory is a count + link here, not an inline list.
+    expect(await within(dialog).findByText("1 memory saved")).toBeInTheDocument();
+    expect(within(dialog).queryByText("The launch is Friday")).toBeNull();
+
+    await user.click(
+      within(dialog).getByRole("switch", { name: "Remember things in this project" }),
+    );
     expect(mocks.setFolderMemoryDisabled).toHaveBeenCalledWith("folder-2", true);
     expect(props.onFolderUpdated).toHaveBeenCalledWith(
       expect.objectContaining({ memoryDisabled: true }),
     );
+
+    // "Manage memories" hands off to the full manager, scoped to this project.
+    await user.click(within(dialog).getByRole("button", { name: "Manage memories" }));
+    expect(props.onManageProjectMemory).toHaveBeenCalledWith("folder-2");
   });
 
-  it("shows global memory off and disables the project toggle", async () => {
+  it("shows global memory off and disables the project toggle in Project settings", async () => {
     mocks.memorySettings.mockResolvedValueOnce({ enabled: false });
+    const user = userEvent.setup();
     render(<FoldersWorkspace {...baseProps()} selectedFolderId="folder-2" />);
 
+    await openProjectSettings(user, "Work");
+    const dialog = screen.getByRole("dialog", { name: "Project settings" });
     expect(
-      await screen.findByText("Memory is turned off in Settings > Memory."),
+      await within(dialog).findByText("Memory is turned off in Settings > Memory."),
     ).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "Remember things in this project" })).toBeDisabled();
+    expect(
+      within(dialog).getByRole("switch", { name: "Remember things in this project" }),
+    ).toBeDisabled();
   });
 });
+
+async function openProjectSettings(user: ReturnType<typeof userEvent.setup>, folderName: string) {
+  await user.click(screen.getByRole("button", { name: `Actions for ${folderName}` }));
+  await user.click(screen.getByRole("menuitem", { name: "Project settings" }));
+}

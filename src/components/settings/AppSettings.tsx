@@ -376,6 +376,10 @@ export function SettingsPageHeader({
 
 type AppSettingsProps = {
   folders?: FolderDto[];
+  /** When Memory is opened from a project, the manager pre-filters to it. */
+  memoryFolderFilter?: string;
+  /** Drill from a memory's project tag into that project. */
+  onOpenProject?: (folderId: string) => void;
   account: AccountStatus;
   accountLoading: boolean;
   sourceMode: RecordingSourceMode;
@@ -419,6 +423,8 @@ type AppSettingsProps = {
 
 export function AppSettings({
   folders = [],
+  memoryFolderFilter,
+  onOpenProject,
   account,
   accountLoading,
   sourceMode,
@@ -2343,7 +2349,13 @@ export function AppSettings({
           />
         ) : null}
 
-        {activeTab === "memory" ? <MemorySettingsSection folders={folders} /> : null}
+        {activeTab === "memory" ? (
+          <MemorySettingsSection
+            folders={folders}
+            initialFolderFilter={memoryFolderFilter}
+            onOpenProject={onOpenProject}
+          />
+        ) : null}
 
         {activeTab === "connectors" ? <ConnectorsSection /> : null}
 
