@@ -1,12 +1,12 @@
-//! Google native-app OAuth for private connectors.
+//! OAuth helpers for private connectors.
 //!
-//! PKCE (S256) + loopback redirect on an ephemeral 127.0.0.1 port, for BOTH
-//! debug and release builds: Google desktop-app clients use the loopback
-//! flow, not a custom URI scheme. Google requires the Desktop client's
-//! `client_secret` at its token endpoint even though an installed application
-//! cannot keep that credential confidential; PKCE remains the protection for
-//! an intercepted authorization code. Mirrors the os_accounts.rs login flow
-//! mechanics.
+//! PKCE (S256) + loopback redirect on 127.0.0.1, for BOTH debug and release
+//! builds. Google desktop-app clients use an ephemeral loopback port; some
+//! providers require fixed, pre-registered loopback ports. Google requires the
+//! Desktop client's `client_secret` at its token endpoint even though an
+//! installed application cannot keep that credential confidential; PKCE remains
+//! the protection for an intercepted authorization code. Mirrors the
+//! os_accounts.rs login flow mechanics.
 //!
 //! NEVER log, print, or serialize tokens (or authorization codes) into
 //! errors. Error messages carry stable codes and short human text only.
@@ -16,7 +16,13 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -51,18 +57,44 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     })
 }
 
+struct ActiveConnectFlow {
+    id: u64,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
 /// Cancel slot for an in-flight connect, mirroring `os_accounts::LoginFlow`.
-/// Managed as Tauri state; `connectors_cancel_connect` drains it.
+/// Managed as Tauri state; `connectors_cancel_connect` drains it. The active
+/// entry remains present after cancellation until the owning flow exits, so a
+/// second flow cannot start and then be cleared by stale cleanup from the first.
 #[derive(Default)]
 pub struct ConnectFlow {
-    cancel: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    active: std::sync::Mutex<Option<ActiveConnectFlow>>,
 }
 
 impl ConnectFlow {
     pub fn cancel(&self) {
-        if let Ok(mut slot) = self.cancel.lock() {
-            if let Some(sender) = slot.take() {
-                let _ = sender.send(());
+        if let Ok(mut slot) = self.active.lock() {
+            if let Some(active) = slot.as_mut() {
+                if let Some(sender) = active.cancel.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+    }
+}
+
+static CONNECT_FLOW_ID: AtomicU64 = AtomicU64::new(1);
+
+struct ActiveFlowGuard<'a> {
+    flow: &'a ConnectFlow,
+    id: u64,
+}
+
+impl Drop for ActiveFlowGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.flow.active.lock() {
+            if slot.as_ref().is_some_and(|active| active.id == self.id) {
+                *slot = None;
             }
         }
     }
@@ -108,9 +140,144 @@ pub enum RefreshOutcome {
     Transient,
 }
 
-/// Run the full authorization handoff: open the consent screen in the
-/// default browser, wait on a loopback listener for the redirect, exchange
-/// the code, and resolve the account email.
+/// Outcome of the provider-neutral PKCE + loopback handoff: the authorization
+/// code, its PKCE verifier, and the exact `redirect_uri` the code was issued
+/// for. The caller still owns the token exchange and identity resolution, which
+/// differ per provider.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct LoopbackAuthorization {
+    pub code: String,
+    pub verifier: String,
+    #[zeroize(skip)]
+    pub redirect_uri: String,
+}
+
+/// How the loopback listener picks its port. Google ignores the loopback port
+/// when matching redirect URIs (RFC 8252 native-app behavior), so an OS-assigned
+/// ephemeral port works. Other providers may match registered callback URLs
+/// exactly, port included, so callers can supply fixed candidates.
+pub(crate) enum LoopbackPort {
+    Ephemeral,
+    Candidates(Vec<u16>),
+}
+
+async fn bind_loopback(port: &LoopbackPort) -> Result<TcpListener, AppError> {
+    let bind_failed = |detail: String| {
+        AppError::new(
+            "connector_loopback_bind_failed",
+            format!("Could not start the local connect listener: {detail}"),
+        )
+    };
+    match port {
+        LoopbackPort::Ephemeral => TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(|error| bind_failed(error.to_string())),
+        LoopbackPort::Candidates(ports) => {
+            let candidates = ports
+                .iter()
+                .copied()
+                .filter(|port| *port != 0)
+                .collect::<Vec<_>>();
+            if candidates.len() != ports.len() || candidates.is_empty() {
+                return Err(bind_failed(
+                    "fixed callback ports must be non-zero".to_string(),
+                ));
+            }
+            for candidate in candidates.iter().copied() {
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", candidate)).await {
+                    return Ok(listener);
+                }
+            }
+            let list = candidates
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(bind_failed(format!(
+                "ports {list} are all in use on this Mac"
+            )))
+        }
+    }
+}
+
+/// Provider-neutral half of a native-app OAuth connect: mint PKCE + CSRF state,
+/// bind a 127.0.0.1 listener per the port strategy, ask `build_auth_url` to
+/// assemble the provider's consent URL, open it in the system browser, and race
+/// the loopback callback against timeout/cancel. The caller still exchanges the
+/// returned code.
+pub(crate) async fn loopback_authorize(
+    flow: &ConnectFlow,
+    provider_label: &str,
+    port: LoopbackPort,
+    build_auth_url: impl FnOnce(&str, &str, &str) -> String,
+) -> Result<LoopbackAuthorization, AppError> {
+    let flow_id = CONNECT_FLOW_ID.fetch_add(1, Ordering::Relaxed);
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut slot = flow.active.lock().map_err(|_| {
+            AppError::new(
+                "connector_connect_state_unavailable",
+                "The connector connect flow is unavailable.",
+            )
+        })?;
+        if slot.is_some() {
+            return Err(AppError::new(
+                "connector_connect_in_progress",
+                "Another connector connect flow is already in progress.",
+            ));
+        }
+        *slot = Some(ActiveConnectFlow {
+            id: flow_id,
+            cancel: Some(cancel_tx),
+        });
+    }
+    let _active_flow = ActiveFlowGuard { flow, id: flow_id };
+
+    let (verifier, challenge) = pkce();
+    let csrf = random_b64url(24);
+
+    let listener = bind_loopback(&port).await?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| AppError::new("connector_loopback_bind_failed", error.to_string()))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let auth_url = build_auth_url(&redirect_uri, &challenge, &csrf);
+
+    if cancel_rx.try_recv().is_ok() {
+        return Err(AppError::new(
+            "connector_connect_canceled",
+            format!("Connecting to {provider_label} was canceled."),
+        ));
+    }
+
+    crate::os_accounts::open_in_browser(&auth_url)?;
+    let outcome = tokio::select! {
+        result = tokio::time::timeout(CONNECT_TIMEOUT, await_callback(&listener, &csrf, provider_label)) => {
+            result.unwrap_or_else(|_| {
+                Err(AppError::new(
+                    "connector_connect_timed_out",
+                    format!("Connecting to {provider_label} timed out. Please try again."),
+                ))
+            })
+        }
+        _ = &mut cancel_rx => Err(AppError::new(
+            "connector_connect_canceled",
+            format!("Connecting to {provider_label} was canceled."),
+        )),
+    };
+    let code = outcome?;
+
+    Ok(LoopbackAuthorization {
+        code,
+        verifier,
+        redirect_uri,
+    })
+}
+
+/// Run the full Google authorization handoff: open the consent screen in the
+/// default browser, wait on a loopback listener for the redirect, exchange the
+/// code, and resolve the account email.
 pub async fn authorize(
     flow: &ConnectFlow,
     client_id: &str,
@@ -118,55 +285,31 @@ pub async fn authorize(
     scopes: &[&str],
     login_hint: Option<&str>,
 ) -> Result<AuthorizedGrant, AppError> {
-    let (verifier, challenge) = pkce();
-    let csrf = random_b64url(24);
+    let authorization = loopback_authorize(
+        flow,
+        "Google",
+        LoopbackPort::Ephemeral,
+        |redirect_uri, code_challenge, state| {
+            build_auth_url(
+                client_id,
+                redirect_uri,
+                scopes,
+                code_challenge,
+                state,
+                login_hint,
+            )
+        },
+    )
+    .await?;
 
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| {
-        AppError::new(
-            "connector_loopback_bind_failed",
-            format!("Could not start the local connect listener: {e}"),
-        )
-    })?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| AppError::new("connector_loopback_bind_failed", e.to_string()))?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let auth_url = build_auth_url(
+    let tokens = exchange_code(
         client_id,
-        &redirect_uri,
-        scopes,
-        &challenge,
-        &csrf,
-        login_hint,
-    );
-
-    crate::os_accounts::open_in_browser(&auth_url)?;
-
-    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-    if let Ok(mut slot) = flow.cancel.lock() {
-        *slot = Some(cancel_tx);
-    }
-    let outcome = tokio::select! {
-        result = tokio::time::timeout(CONNECT_TIMEOUT, await_callback(&listener, &csrf)) => {
-            result.unwrap_or_else(|_| {
-                Err(AppError::new(
-                    "connector_connect_timed_out",
-                    "Connecting to Google timed out. Please try again.",
-                ))
-            })
-        }
-        _ = cancel_rx => Err(AppError::new(
-            "connector_connect_canceled",
-            "Connecting to Google was canceled.",
-        )),
-    };
-    if let Ok(mut slot) = flow.cancel.lock() {
-        *slot = None;
-    }
-    let code = outcome?;
-
-    let tokens = exchange_code(client_id, client_secret, &code, &verifier, &redirect_uri).await?;
+        client_secret,
+        &authorization.code,
+        &authorization.verifier,
+        &authorization.redirect_uri,
+    )
+    .await?;
     let email = resolve_email(&tokens).await?;
     Ok(AuthorizedGrant { tokens, email })
 }
@@ -229,29 +372,54 @@ const SUCCESS_BODY: &str = r##"<!doctype html>
 </body>
 </html>"##;
 
+async fn read_request_line(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    const MAX_REQUEST_LINE_BYTES: usize = 4096;
+    async fn read_until_line(stream: &mut tokio::net::TcpStream) -> Option<String> {
+        let mut bytes = Vec::with_capacity(256);
+        let mut one = [0u8; 1];
+        while bytes.len() < MAX_REQUEST_LINE_BYTES {
+            let n = stream.read(&mut one).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            bytes.push(one[0]);
+            if one[0] == b'\n' {
+                let line = String::from_utf8_lossy(&bytes);
+                return Some(line.trim_end_matches(['\r', '\n']).to_string());
+            }
+        }
+        None
+    }
+
+    tokio::time::timeout(SOCKET_READ_TIMEOUT, read_until_line(stream))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Accept connections until one hits `/callback` with a matching state.
 /// Every per-socket read is bounded so a slow client on the loopback port
 /// cannot stall the listener for the full connect timeout.
-async fn await_callback(listener: &TcpListener, expected_state: &str) -> Result<String, AppError> {
+async fn await_callback(
+    listener: &TcpListener,
+    expected_state: &str,
+    provider_label: &str,
+) -> Result<String, AppError> {
     loop {
         let (mut stream, _) = listener
             .accept()
             .await
             .map_err(|e| AppError::new("connector_loopback_accept_failed", e.to_string()))?;
 
-        let mut buf = [0u8; 4096];
-        let n = match tokio::time::timeout(SOCKET_READ_TIMEOUT, stream.read(&mut buf)).await {
-            Ok(Ok(n)) => n,
-            Ok(Err(_)) | Err(_) => continue,
+        let Some(request_line) = read_request_line(&mut stream).await else {
+            write_http(&mut stream, "400 Bad Request", "Invalid connect callback").await;
+            continue;
         };
-        let request = String::from_utf8_lossy(&buf[..n]);
-        let path = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("");
 
-        if !is_loopback_callback_path(path) {
+        if method != "GET" || !is_loopback_callback_path(path) {
             write_http(&mut stream, "404 Not Found", "Not found").await;
             continue;
         }
@@ -265,14 +433,14 @@ async fn await_callback(listener: &TcpListener, expected_state: &str) -> Result<
                 write_http(&mut stream, "200 OK", "You can close this tab.").await;
                 return Err(AppError::new(
                     "connector_connect_denied",
-                    "Google access was declined.",
+                    format!("{provider_label} access was declined."),
                 ));
             }
             CallbackOutcome::MissingCode => {
                 write_http(&mut stream, "400 Bad Request", "Missing authorization code").await;
                 return Err(AppError::new(
                     "connector_missing_code",
-                    "Google's response was missing an authorization code.",
+                    format!("{provider_label}'s response was missing an authorization code."),
                 ));
             }
             CallbackOutcome::Code(code) => {
