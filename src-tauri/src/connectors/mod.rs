@@ -14,6 +14,8 @@
 pub mod approvals;
 pub mod commands;
 pub mod google;
+#[cfg(debug_assertions)]
+pub mod notion_mcp_oauth;
 pub mod notion_prototype;
 pub mod oauth;
 pub mod scopes;

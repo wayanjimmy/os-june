@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
+#[cfg(debug_assertions)]
+use super::notion_mcp_oauth;
 use super::{
     begin_connect, disconnect, list_accounts, notion_prototype, scopes::ScopeBundle, ConnectFlow,
     ConnectorAccount, ConnectorAccountStatus,
@@ -100,6 +102,35 @@ pub async fn connectors_disconnect(
     request: ConnectorsDisconnectRequest,
 ) -> Result<(), AppError> {
     disconnect(&app, &request.account_id, request.revoke).await
+}
+
+// --- Notion hosted MCP OAuth spike ------------------------------------------
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn notion_mcp_oauth_connect(
+    flow: tauri::State<'_, ConnectFlow>,
+) -> Result<notion_mcp_oauth::NotionMcpOAuthConnection, AppError> {
+    notion_mcp_oauth::connect(&flow).await
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn notion_mcp_oauth_status() -> Result<notion_mcp_oauth::NotionMcpOAuthStatus, AppError> {
+    notion_mcp_oauth::status().await
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn notion_mcp_oauth_disconnect() -> Result<(), AppError> {
+    notion_mcp_oauth::disconnect().await
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn notion_mcp_oauth_list_tools(
+) -> Result<notion_mcp_oauth::NotionMcpToolListResult, AppError> {
+    notion_mcp_oauth::list_tools().await
 }
 
 // --- Notion ADR 0024 prototype ----------------------------------------------

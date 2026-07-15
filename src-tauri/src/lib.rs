@@ -301,6 +301,14 @@ pub fn run() {
             connectors::commands::connectors_connect,
             connectors::commands::connectors_cancel_connect,
             connectors::commands::connectors_disconnect,
+            #[cfg(debug_assertions)]
+            connectors::commands::notion_mcp_oauth_connect,
+            #[cfg(debug_assertions)]
+            connectors::commands::notion_mcp_oauth_status,
+            #[cfg(debug_assertions)]
+            connectors::commands::notion_mcp_oauth_disconnect,
+            #[cfg(debug_assertions)]
+            connectors::commands::notion_mcp_oauth_list_tools,
             connectors::commands::notion_prototype_connect,
             connectors::commands::notion_prototype_status,
             connectors::commands::notion_prototype_disconnect,
