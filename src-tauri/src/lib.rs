@@ -157,6 +157,8 @@ pub fn run() {
             commands::list_session_folders,
             commands::assign_session_to_folder,
             commands::remove_session_from_folder,
+            commands::list_completed_sessions,
+            commands::set_session_completed,
             commands::list_dictionary_entries,
             commands::create_dictionary_entry,
             commands::update_dictionary_entry,

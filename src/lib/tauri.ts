@@ -35,6 +35,11 @@ export type SessionFolderDto = {
   folderId: string;
 };
 
+export type CompletedSessionDto = {
+  sessionId: string;
+  completedAt: string;
+};
+
 export type DictionaryEntryDto = {
   id: string;
   phrase: string;
@@ -812,6 +817,16 @@ export async function assignSessionToFolder(sessionId: string, folderId: string)
 export async function removeSessionFromFolder(sessionId: string, folderId: string) {
   return invoke<void>("remove_session_from_folder", {
     request: { sessionId, folderId },
+  });
+}
+
+export async function listCompletedSessions() {
+  return invoke<CompletedSessionDto[]>("list_completed_sessions");
+}
+
+export async function setSessionCompleted(sessionId: string, completed: boolean) {
+  return invoke<void>("set_session_completed", {
+    request: { sessionId, completed },
   });
 }
 
