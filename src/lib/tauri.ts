@@ -1,6 +1,10 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { parseDictationHelperEvent } from "./dictation-events";
 
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  Object.assign(window, { juneInvoke: invoke });
+}
+
 // Re-exported so modules that build their own command calls (e.g. the Hermes
 // admin Rust transport) route through the same `invoke` the rest of the app's
 // bindings use, rather than reaching into `@tauri-apps/api/core` directly.
