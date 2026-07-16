@@ -191,9 +191,30 @@ async function saveStoreState(metadataPath, metadata, status) {
   await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
 }
 
+async function checkUnchangedExtensionState({ client, metadata }) {
+  const status = await client.fetchStatus();
+  const classified = classifyStoreStatus(status, metadata.extension.version);
+  assertSafeStoreStatus(classified);
+  if (!classified.publishedExpected) {
+    throw new Error(
+      `Unchanged extension metadata expects published version ${metadata.extension.version}; ` +
+        `Chrome reports ${classified.publishedVersion ?? "none"}/${classified.publishedState ?? "none"}.`,
+    );
+  }
+  if (classified.submittedState && !TERMINAL_FAILURE_STATES.has(classified.submittedState)) {
+    throw new Error(
+      `Chrome Web Store has an uncorrelated ${classified.submittedVersion ?? "unknown"} ` +
+        `submission in ${classified.submittedState}; resolve it before releasing unchanged bytes.`,
+    );
+  }
+  return status;
+}
+
 export async function submitExtensionRc({ client, metadataPath, packagePath }) {
   const metadata = await loadMetadata(metadataPath);
-  assert(metadata.release.required, "Unchanged extension metadata must not be submitted.");
+  if (!metadata.release.required) {
+    return checkUnchangedExtensionState({ client, metadata });
+  }
   assert(packagePath, `${EXTENSION_PACKAGE_NAME} is required for an extension submission.`);
   assert(SHA256_RE.test(metadata.release.packageSha256), "Extension package hash is invalid.");
   assert(
@@ -261,13 +282,40 @@ export async function submitExtensionRc({ client, metadataPath, packagePath }) {
   return status;
 }
 
-export async function checkExtensionRcReady({ client, metadataPath }) {
+export async function previousRcCanBeReused({ client, metadataPath }) {
   const metadata = await loadMetadata(metadataPath);
-  if (!metadata.release.required) return { metadata, status: undefined };
+  if (!metadata.release.required) return false;
   const status = await client.fetchStatus();
   const classified = classifyStoreStatus(status, metadata.extension.version);
   assertSafeStoreStatus(classified);
-  if (classified.publishedExpected) return { metadata, status };
+  if (ACTIVE_SUBMISSION_STATES.has(classified.submittedState)) {
+    if (!classified.submittedExpected) {
+      throw new Error(
+        `Chrome Web Store has active version ${classified.submittedVersion ?? "unknown"}; ` +
+          `expected prior RC ${metadata.extension.version}.`,
+      );
+    }
+    return true;
+  }
+  return false;
+}
+
+export async function checkExtensionRcReady({ client, metadataPath, allowPublished = false }) {
+  const metadata = await loadMetadata(metadataPath);
+  if (!metadata.release.required) {
+    const status = await checkUnchangedExtensionState({ client, metadata });
+    return { metadata, status };
+  }
+  const status = await client.fetchStatus();
+  const classified = classifyStoreStatus(status, metadata.extension.version);
+  assertSafeStoreStatus(classified);
+  if (classified.publishedExpected) {
+    if (allowPublished) return { metadata, status };
+    throw new Error(
+      `Extension ${metadata.extension.version} was published before desktop stable promotion; ` +
+        "refusing to treat it as a staged release candidate.",
+    );
+  }
   if (!classified.submittedExpected || classified.submittedState !== "STAGED") {
     throw new Error(
       `Extension ${metadata.extension.version} is not ready for stable promotion: ` +
@@ -281,6 +329,7 @@ export async function promoteExtensionStable({ client, metadataPath }) {
   const { metadata, status: initialStatus } = await checkExtensionRcReady({
     client,
     metadataPath,
+    allowPublished: true,
   });
   if (!metadata.release.required) return undefined;
   const initial = classifyStoreStatus(initialStatus, metadata.extension.version);
@@ -309,10 +358,6 @@ function parseArgs(args) {
 async function main() {
   const { command, options } = parseArgs(process.argv.slice(2));
   const metadata = await loadMetadata(options.metadata);
-  if (!metadata.release.required) {
-    console.log("Extension build inputs are unchanged; no Chrome Web Store action is required.");
-    return;
-  }
   const client = new ChromeWebStoreClient({
     publisherId: process.env.CHROME_WEB_STORE_PUBLISHER_ID,
     extensionId: metadata.extension.id,
@@ -324,12 +369,26 @@ async function main() {
       metadataPath: options.metadata,
       packagePath: options.package,
     });
-    console.log(`Extension ${metadata.extension.version} submitted for staged publication.`);
+    console.log(
+      metadata.release.required
+        ? `Extension ${metadata.extension.version} submitted for staged publication.`
+        : `Extension ${metadata.extension.version} is unchanged and its store state is clean.`,
+    );
+    return;
+  }
+  if (command === "reuse-status") {
+    console.log(
+      (await previousRcCanBeReused({ client, metadataPath: options.metadata })) ? "true" : "false",
+    );
     return;
   }
   if (command === "check-staged") {
     await checkExtensionRcReady({ client, metadataPath: options.metadata });
-    console.log(`Extension ${metadata.extension.version} is staged and ready to promote.`);
+    console.log(
+      metadata.release.required
+        ? `Extension ${metadata.extension.version} is staged and ready to promote.`
+        : `Extension ${metadata.extension.version} is unchanged and its store state is clean.`,
+    );
     return;
   }
   if (command === "promote") {
@@ -337,7 +396,9 @@ async function main() {
     console.log(`Extension ${metadata.extension.version} published to stable.`);
     return;
   }
-  throw new Error("Usage: chrome-web-store.mjs <submit|check-staged|promote> --metadata <path>");
+  throw new Error(
+    "Usage: chrome-web-store.mjs <submit|reuse-status|check-staged|promote> --metadata <path>",
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

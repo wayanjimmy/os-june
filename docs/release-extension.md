@@ -84,7 +84,8 @@ either `PENDING_REVIEW` or already `STAGED`; it does not bypass review.
 Run `promote-desktop-release` with the exact RC version. Its first job checks the
 Chrome Web Store before starting the costly macOS build:
 
-- unchanged extension inputs pass immediately;
+- unchanged extension inputs must match the expected published version and
+  have no uncorrelated active submission;
 - changed inputs must match the frozen metadata and ZIP hash, and Chrome must
   report the exact version as `STAGED`;
 - pending, rejected, warned, taken-down, missing, or mismatched state fails the
@@ -92,8 +93,8 @@ Chrome Web Store before starting the costly macOS build:
 
 After the desktop release succeeds, `Publish reviewed extension to stable`
 calls `DEFAULT_PUBLISH` for the staged submission and verifies the version is
-`PUBLISHED`. The stable GitHub release receives the same ZIP and a stable
-`extension-build.json`.
+`PUBLISHED`. The stable release in the Releases repo receives the same ZIP and
+a stable `extension-build.json`.
 
 ## Review timing and recovery
 
@@ -103,8 +104,9 @@ email notifications and do not start stable promotion until the submission is
 staged.
 
 - **`PENDING_REVIEW`** - wait. The stable preflight is expected to fail.
-- **`REJECTED`** - address the dashboard feedback and cut a higher desktop RC.
-  Chrome versions cannot be reused.
+- **`REJECTED` or `CANCELLED`** - address the dashboard feedback and cut a
+  higher desktop RC. The next run rebuilds identical bytes with that higher
+  technical store version because terminal versions cannot be reused.
 - **Wrong active submission** - the workflow refuses to cancel it. Resolve the
   uncorrelated dashboard state before rerunning.
 - **Superseded correlated RC** - a higher RC with changed extension inputs may

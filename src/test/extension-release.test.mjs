@@ -7,6 +7,7 @@ import {
   checkExtensionRcReady,
   classifyStoreStatus,
   compareChromeVersions,
+  previousRcCanBeReused,
   promoteExtensionStable,
   submitExtensionRc,
 } from "../../scripts/chrome-web-store.mjs";
@@ -14,6 +15,7 @@ import {
   chromeStoreVersionFromDesktopRc,
   extensionIdFromManifestKey,
   extensionPayloadFingerprint,
+  prepareExtensionRelease,
   validateExtensionMetadata,
   writeStableExtensionMetadata,
 } from "../../scripts/extension-release.mjs";
@@ -144,6 +146,33 @@ describe("extension release metadata", () => {
     expect(stable.store.state).toBe("published");
     expect(JSON.parse(await readFile(output, "utf8"))).toEqual(stable);
   });
+
+  it("rebuilds with the higher RC version when a reusable package is missing or mismatched", async () => {
+    const root = await mkdtemp(join(tmpdir(), "june-extension-prepare-"));
+    const dist = join(root, "extension", "dist");
+    const output = join(root, "output");
+    await mkdir(dist, { recursive: true });
+    await writeFile(join(dist, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(join(dist, "background.js"), "console.log('release');\n");
+    const previous = await releaseFixture();
+    previous.metadata.source.fingerprint = await extensionPayloadFingerprint(dist);
+    await writeFile(previous.metadataPath, `${JSON.stringify(previous.metadata, null, 2)}\n`);
+    await writeFile(previous.packagePath, "mismatched package");
+
+    const result = await prepareExtensionRelease({
+      root,
+      desktopVersion: "1.2.3-rc.5",
+      sourceCommit,
+      outputDir: output,
+      previousRcMetadataPath: previous.metadataPath,
+      previousRcPackagePath: previous.packagePath,
+      reusePreviousRc: true,
+    });
+
+    expect(result.metadata.release.reason).toBe("changed");
+    expect(result.metadata.release.supersedes).toBe("2.2.3.4");
+    expect(result.metadata.extension.version).toBe("2.2.3.5");
+  });
 });
 
 describe("Chrome Web Store state gates", () => {
@@ -172,12 +201,68 @@ describe("Chrome Web Store state gates", () => {
     );
   });
 
+  it("rejects a package published before desktop stable promotion", async () => {
+    const { metadataPath } = await releaseFixture();
+    const client = {
+      fetchStatus: vi.fn().mockResolvedValue(status("PUBLISHED", "2.2.3.4", { published: true })),
+    };
+    await expect(checkExtensionRcReady({ client, metadataPath })).rejects.toThrow(
+      "published before desktop stable promotion",
+    );
+  });
+
   it("makes RC submission idempotent when the same package is already under review", async () => {
     const { metadataPath, packagePath } = await releaseFixture();
     const client = { fetchStatus: vi.fn().mockResolvedValue(status("PENDING_REVIEW", "2.2.3.4")) };
     await submitExtensionRc({ client, metadataPath, packagePath });
     expect(client.fetchStatus).toHaveBeenCalledOnce();
     expect(JSON.parse(await readFile(metadataPath, "utf8")).store.state).toBe("PENDING_REVIEW");
+  });
+
+  it("reuses only the exact prior version while it is pending or staged", async () => {
+    const { metadataPath } = await releaseFixture();
+    const pendingClient = {
+      fetchStatus: vi.fn().mockResolvedValue(status("PENDING_REVIEW", "2.2.3.4")),
+    };
+    await expect(previousRcCanBeReused({ client: pendingClient, metadataPath })).resolves.toBe(
+      true,
+    );
+
+    const rejectedClient = {
+      fetchStatus: vi.fn().mockResolvedValue(status("REJECTED", "2.2.3.4")),
+    };
+    await expect(previousRcCanBeReused({ client: rejectedClient, metadataPath })).resolves.toBe(
+      false,
+    );
+
+    const unrelatedClient = {
+      fetchStatus: vi.fn().mockResolvedValue(status("STAGED", "2.2.3.5")),
+    };
+    await expect(previousRcCanBeReused({ client: unrelatedClient, metadataPath })).rejects.toThrow(
+      "expected prior RC 2.2.3.4",
+    );
+  });
+
+  it("verifies unchanged bytes still match a clean published store state", async () => {
+    const { metadataPath } = await releaseFixture({ required: false });
+    const published = status("PUBLISHED", "2.2.3.4", { published: true });
+    const client = { fetchStatus: vi.fn().mockResolvedValue(published) };
+    await expect(
+      submitExtensionRc({ client, metadataPath, packagePath: undefined }),
+    ).resolves.toEqual(published);
+  });
+
+  it("blocks unchanged promotion while an uncorrelated submission is active", async () => {
+    const { metadataPath } = await releaseFixture({ required: false });
+    const client = {
+      fetchStatus: vi.fn().mockResolvedValue({
+        ...status("PUBLISHED", "2.2.3.4", { published: true }),
+        ...status("PENDING_REVIEW", "2.2.3.5"),
+      }),
+    };
+    await expect(checkExtensionRcReady({ client, metadataPath })).rejects.toThrow(
+      "uncorrelated 2.2.3.5 submission",
+    );
   });
 
   it("promotes only a staged package and verifies it becomes public", async () => {
@@ -192,5 +277,18 @@ describe("Chrome Web Store state gates", () => {
     await promoteExtensionStable({ client, metadataPath });
     expect(client.publish).toHaveBeenCalledWith("DEFAULT_PUBLISH");
     expect(client.waitForRevision).toHaveBeenCalledWith("2.2.3.4", new Set(["PUBLISHED"]));
+  });
+
+  it("makes a direct stable-publish job retry idempotent after publication", async () => {
+    const { metadataPath } = await releaseFixture({ state: "PUBLISHED" });
+    const published = status("PUBLISHED", "2.2.3.4", { published: true });
+    const client = {
+      fetchStatus: vi.fn().mockResolvedValue(published),
+      publish: vi.fn(),
+      waitForRevision: vi.fn(),
+    };
+    await expect(promoteExtensionStable({ client, metadataPath })).resolves.toEqual(published);
+    expect(client.publish).not.toHaveBeenCalled();
+    expect(client.waitForRevision).not.toHaveBeenCalled();
   });
 });

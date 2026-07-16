@@ -259,6 +259,7 @@ export async function prepareExtensionRelease({
   previousStableMetadataPath,
   previousRcMetadataPath,
   previousRcPackagePath,
+  reusePreviousRc = false,
 }) {
   assert(SHA_RE.test(sourceCommit), "sourceCommit must be a 40-char lowercase SHA.");
   const { baseVersion, storeVersion } = chromeStoreVersionFromDesktopRc(desktopVersion);
@@ -273,6 +274,18 @@ export async function prepareExtensionRelease({
   const metadataPath = join(resolvedOutputDir, EXTENSION_METADATA_NAME);
   const packagePath = join(resolvedOutputDir, EXTENSION_PACKAGE_NAME);
   await mkdir(resolvedOutputDir, { recursive: true });
+
+  let reusableRcPackage = false;
+  if (
+    reusePreviousRc &&
+    previousRc?.desktop.baseVersion === baseVersion &&
+    previousRc.source.fingerprint === sourceFingerprint &&
+    previousRc.release.required &&
+    previousRcPackagePath
+  ) {
+    reusableRcPackage =
+      (await hashFile(previousRcPackagePath)) === previousRc.release.packageSha256;
+  }
 
   let metadata;
   if (previousStable?.source.fingerprint === sourceFingerprint) {
@@ -290,17 +303,7 @@ export async function prepareExtensionRelease({
         packageSha256: null,
       },
     };
-  } else if (
-    previousRc?.desktop.baseVersion === baseVersion &&
-    previousRc.source.fingerprint === sourceFingerprint &&
-    previousRc.release.required
-  ) {
-    assert(previousRcPackagePath, "Reusing an RC requires its package asset.");
-    const actualHash = await hashFile(previousRcPackagePath);
-    assert(
-      actualHash === previousRc.release.packageSha256,
-      "Previous RC package hash does not match its metadata.",
-    );
+  } else if (reusableRcPackage) {
     await copyFile(previousRcPackagePath, packagePath);
     metadata = {
       ...previousRc,
@@ -415,6 +418,7 @@ async function main() {
       previousStableMetadataPath: options["previous-stable-metadata"],
       previousRcMetadataPath: options["previous-rc-metadata"],
       previousRcPackagePath: options["previous-rc-package"],
+      reusePreviousRc: options["reuse-previous-rc"] === "true",
     });
     return;
   }

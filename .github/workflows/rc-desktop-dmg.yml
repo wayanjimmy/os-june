@@ -31,7 +31,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: rc-desktop-release
+  group: desktop-release-pipeline
   cancel-in-progress: false
 
 env:
@@ -567,6 +567,45 @@ jobs:
               --dir "$prior/stable"
           fi
 
+      - name: Validate Web Store identity configuration
+        env:
+          WORKLOAD_IDENTITY_PROVIDER: ${{ vars.CHROME_WEB_STORE_WORKLOAD_IDENTITY_PROVIDER }}
+          SERVICE_ACCOUNT: ${{ vars.CHROME_WEB_STORE_SERVICE_ACCOUNT }}
+          PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in WORKLOAD_IDENTITY_PROVIDER SERVICE_ACCOUNT PUBLISHER_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is required for Chrome Web Store publishing."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Authenticate to Google Cloud
+        id: google-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.CHROME_WEB_STORE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.CHROME_WEB_STORE_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+
+      - name: Inspect prior extension submission
+        id: prior-store
+        env:
+          CHROME_WEB_STORE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          CHROME_WEB_STORE_PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/extension-prior/rc/extension-build.json"
+          reusable=false
+          if [ -f "$metadata" ]; then
+            reusable="$(node scripts/chrome-web-store.mjs reuse-status --metadata "$metadata")"
+          fi
+          echo "reusable=$reusable" >> "$GITHUB_OUTPUT"
+
       - name: Prepare correlated extension package
         id: extension
         env:
@@ -591,44 +630,22 @@ jobs:
           if [ -f "$prior/rc/June-extension.zip" ]; then
             args+=(--previous-rc-package "$prior/rc/June-extension.zip")
           fi
+          if [ "${{ steps.prior-store.outputs.reusable }}" = "true" ]; then
+            args+=(--reuse-previous-rc true)
+          fi
           node scripts/extension-release.mjs "${args[@]}"
 
-      - name: Validate Web Store identity configuration
-        if: steps.extension.outputs.release_required == 'true'
-        env:
-          WORKLOAD_IDENTITY_PROVIDER: ${{ vars.CHROME_WEB_STORE_WORKLOAD_IDENTITY_PROVIDER }}
-          SERVICE_ACCOUNT: ${{ vars.CHROME_WEB_STORE_SERVICE_ACCOUNT }}
-          PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
-        run: |
-          set -euo pipefail
-          missing=0
-          for name in WORKLOAD_IDENTITY_PROVIDER SERVICE_ACCOUNT PUBLISHER_ID; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::${name} is required for Chrome Web Store publishing."
-              missing=1
-            fi
-          done
-          exit "$missing"
-
-      - name: Authenticate to Google Cloud
-        if: steps.extension.outputs.release_required == 'true'
-        id: google-auth
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ vars.CHROME_WEB_STORE_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.CHROME_WEB_STORE_SERVICE_ACCOUNT }}
-          token_format: access_token
-          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
-
-      - name: Submit extension for review
-        if: steps.extension.outputs.release_required == 'true'
+      - name: Submit extension for review or verify unchanged state
         env:
           CHROME_WEB_STORE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
           CHROME_WEB_STORE_PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
         run: |
-          node scripts/chrome-web-store.mjs submit \
-            --metadata "${{ steps.extension.outputs.metadata_path }}" \
-            --package "${{ steps.extension.outputs.package_path }}"
+          set -euo pipefail
+          args=(submit --metadata "${{ steps.extension.outputs.metadata_path }}")
+          if [ "${{ steps.extension.outputs.release_required }}" = "true" ]; then
+            args+=(--package "${{ steps.extension.outputs.package_path }}")
+          fi
+          node scripts/chrome-web-store.mjs "${args[@]}"
 
       - name: Publish extension RC assets
         env:
@@ -637,9 +654,6 @@ jobs:
         run: |
           set -euo pipefail
           metadata="${{ steps.extension.outputs.metadata_path }}"
-          gh release upload rc "$metadata" \
-            --repo open-software-network/os-june-releases \
-            --clobber
           if [ "$RELEASE_REQUIRED" = "true" ]; then
             gh release upload rc "${{ steps.extension.outputs.package_path }}" \
               --repo open-software-network/os-june-releases \
@@ -651,6 +665,11 @@ jobs:
               --repo open-software-network/os-june-releases \
               --yes
           fi
+          # Metadata is the commit marker. Publishing it last means promotion
+          # never trusts a package upload that did not complete.
+          gh release upload rc "$metadata" \
+            --repo open-software-network/os-june-releases \
+            --clobber
 
       - name: Summary
         run: |

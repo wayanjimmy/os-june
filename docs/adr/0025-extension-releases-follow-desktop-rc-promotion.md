@@ -38,9 +38,10 @@ After `rc-desktop-release` publishes the desktop RC, an Ubuntu job checks out
 the commit in `rc-build.json`, tests and builds the extension, and fingerprints
 the normalized package payload before its release version is stamped. If that
 fingerprint equals the latest stable extension metadata, the job records
-`unchanged` and makes no Chrome Web Store write. Unrelated lockfile or desktop
-changes therefore cannot trigger a store review when the produced extension
-bytes are identical.
+`unchanged` and makes no Chrome Web Store write. It still verifies that the
+expected version is published and no uncorrelated submission is active.
+Unrelated lockfile or desktop changes therefore cannot trigger a store review
+when the produced extension bytes are identical.
 
 When the fingerprint changed, the job:
 
@@ -57,9 +58,12 @@ When the fingerprint changed, the job:
 The first numeric component is the desktop major plus one, and the fourth is the
 RC iteration. Every replacement package therefore advances monotonically while
 the user-visible version stays aligned to the desktop release. A later RC with
-identical extension inputs reuses the existing submission and package. A later
-RC with changed inputs may cancel only the specific active version named by the
-prior RC metadata; an uncorrelated active submission fails closed.
+identical extension inputs reuses the existing submission and package only when
+live store state confirms that exact version is still `PENDING_REVIEW` or
+`STAGED`. Missing, mismatched, rejected, cancelled, or expired prior artifacts
+are rebuilt with the higher RC version. A later RC with changed inputs may
+cancel only the specific active version named by the prior RC metadata; an
+uncorrelated active submission fails closed.
 
 ### Stable is gated on Chrome approval
 
@@ -70,7 +74,8 @@ desktop build starts. It verifies the metadata correlation and package hash.
 If the extension changed, Chrome must report that exact store version as
 `STAGED`. `PENDING_REVIEW`, `REJECTED`, a policy warning, a takedown, a different
 version, a missing asset, or a mismatched hash blocks desktop promotion. If the
-extension did not change, the store gate is skipped.
+extension did not change, preflight verifies the expected published version and
+refuses any uncorrelated active submission without writing to the store.
 
 After the stable desktop release succeeds, a final job publishes the already
 reviewed staged package with `DEFAULT_PUBLISH`. It then attaches the exact ZIP
@@ -78,7 +83,9 @@ and stable `extension-build.json` to the `vX.Y.Z` release. Publishing the
 extension before the desktop is deliberately rejected: a desktop failure would
 otherwise expose users to an extension that depends on an unreleased app.
 
-The two external stores cannot be updated atomically. The desktop therefore
+The RC and stable-promotion workflows share one non-cancelling concurrency lock,
+so a newer fixed RC release cannot replace a candidate during promotion. The
+two external stores cannot be updated atomically. The desktop therefore
 publishes first; an extension publish failure leaves the workflow red and is
 safe to retry because the store operations are idempotent.
 
