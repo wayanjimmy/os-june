@@ -3,7 +3,7 @@
 //! This module owns Notion's hosted MCP OAuth flow, a read-only hosted MCP
 //! bridge for the `june_notion` Hermes toolset, and a narrow approved action
 //! bridge for Notion page creation. Other write/action tools stay denied;
-//! selected-resource scoping is not verified in this preview. See ADR 0025.
+//! selected-resource scoping is not verified in this preview. See ADR 0028.
 
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
