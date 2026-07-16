@@ -168,7 +168,7 @@ pub fn begin_login(app: tauri::AppHandle, state: tauri::State<LoginFlow>) -> Res
         config.accounts_url,
         urlencoding::encode(CLIENT_ID),
         urlencoding::encode(REDIRECT_URI),
-        urlencoding::encode("profile:read billing:read"),
+        urlencoding::encode("profile:read profile:write billing:read"),
     );
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string()) // system browser
 }
@@ -289,7 +289,11 @@ the new pair), then retry.
 
 ```rust
 #[derive(Serialize, Deserialize)]
-pub struct Me { pub id: String, pub handle: String }
+pub struct Me {
+    pub id: String,
+    pub handle: String,
+    pub avatar_seed: Option<String>,
+}
 
 #[tauri::command]
 pub async fn who_am_i() -> Result<Me, String> {

@@ -101,7 +101,10 @@ POST {API}/auth/token    { grant_type:"authorization_code", code, code_verifier,
                           → { access_token, refresh_token }
 POST {API}/auth/refresh  { refresh_token } → { access_token, refresh_token }   # rotates
 POST {API}/auth/logout   { refresh_token }
-GET  {API}/me            → { id:"usr_…", handle, email, display_name, avatar_url }
+GET  {API}/me            → { id:"usr_…", handle, email, display_name, avatar_url, avatar_seed }
+PATCH {API}/me           Bearer user JWT with `profile:write`
+                          { avatar_seed:"<opaque ASCII value, 1..128 chars>" }
+                          → updated `/me` shape
 
 # Metering (App API key, server-to-server) ──────────────────────────
 POST {API}/authorize     Bearer osk_…

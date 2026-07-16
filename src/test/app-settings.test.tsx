@@ -43,6 +43,7 @@ const mocks = vi.hoisted(() => ({
   osAccountsUpgrade: vi.fn(),
   osAccountsUpgradeSession: vi.fn(),
   osAccountsChangePlan: vi.fn(),
+  osAccountsSetAvatarSeed: vi.fn(),
   hermesBridgeSkills: vi.fn(),
   hermesBridgeToolsets: vi.fn(),
   hermesBridgeMessagingPlatforms: vi.fn(),
@@ -114,6 +115,7 @@ vi.mock("../lib/tauri", () => ({
   osAccountsUpgrade: mocks.osAccountsUpgrade,
   osAccountsUpgradeSession: mocks.osAccountsUpgradeSession,
   osAccountsChangePlan: mocks.osAccountsChangePlan,
+  osAccountsSetAvatarSeed: mocks.osAccountsSetAvatarSeed,
   hermesBridgeSkills: mocks.hermesBridgeSkills,
   hermesBridgeToolsets: mocks.hermesBridgeToolsets,
   hermesBridgeMessagingPlatforms: mocks.hermesBridgeMessagingPlatforms,
@@ -501,6 +503,10 @@ describe("AppSettings", () => {
       plan: "max",
       status: "active",
     });
+    mocks.osAccountsSetAvatarSeed.mockImplementation(async (avatarSeed: string) => ({
+      ...signedInAccount.user,
+      avatarSeed,
+    }));
     mocks.agentHudShow.mockResolvedValue(undefined);
     mocks.agentHudHide.mockResolvedValue(undefined);
     mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
@@ -668,6 +674,7 @@ describe("AppSettings", () => {
 
   it("refreshes and persists the account avatar from General settings", async () => {
     const user = userEvent.setup();
+    const onAccountChanged = vi.fn();
     const renderSettings = () =>
       render(
         <AppSettings
@@ -675,7 +682,7 @@ describe("AppSettings", () => {
           accountLoading={false}
           sourceMode="microphoneOnly"
           checkingSourceReadiness={false}
-          onAccountChanged={vi.fn()}
+          onAccountChanged={onAccountChanged}
           onAccountRefresh={vi.fn()}
           onSourceModeChange={vi.fn()}
           onEnableSystemAudio={vi.fn()}
@@ -696,7 +703,14 @@ describe("AppSettings", () => {
       key.startsWith("june:account-avatar-variant:"),
     );
     expect(avatarStorageKey).toBeDefined();
-    expect(avatarStorageKey ? localStorage.getItem(avatarStorageKey) : undefined).toBe("1");
+    const seed = avatarStorageKey ? localStorage.getItem(avatarStorageKey) : undefined;
+    expect(seed).toMatch(/^v1:[0-9a-f]{32}$/);
+    expect(mocks.osAccountsSetAvatarSeed).toHaveBeenCalledWith(seed);
+    expect(onAccountChanged).toHaveBeenCalledWith({
+      ...signedInAccount,
+      user: { ...signedInAccount.user, avatarSeed: seed },
+    });
+    expect(screen.getByText("Avatar synced with your OpenSoftware account.")).toBeInTheDocument();
     unmount();
 
     renderSettings();

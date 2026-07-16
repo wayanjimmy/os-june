@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
+import { osAccountsSetAvatarSeed } from "../../lib/tauri";
 import type { AccountStatus } from "../../lib/tauri";
 
 const ACCOUNT_AVATAR_VARIANT_STORAGE_PREFIX = "june:account-avatar-variant:";
@@ -32,18 +33,23 @@ export function AccountAvatar({
 
 export function useAccountAvatar(account: AccountStatus) {
   const identity = accountAvatarIdentity(account);
-  const getSnapshot = useCallback(() => readAccountAvatarVariant(identity), [identity]);
-  const variant = useSyncExternalStore(subscribeAccountAvatar, getSnapshot, () => 0);
+  const remoteSeed = validAccountAvatarSeed(account.user?.avatarSeed);
+  const getSnapshot = useCallback(
+    () => remoteSeed ?? readLocalAccountAvatarSeed(identity),
+    [identity, remoteSeed],
+  );
+  const seed = useSyncExternalStore(subscribeAccountAvatar, getSnapshot, () => `${identity}:0`);
 
   return {
-    style: accountAvatarStyle(identity, variant),
-    refresh: () => {
-      const current = readAccountAvatarVariant(identity);
-      const next = current >= Number.MAX_SAFE_INTEGER ? 0 : current + 1;
-      writeAccountAvatarVariant(identity, next);
+    style: accountAvatarStyle(seed),
+    refresh: async () => {
+      const next = createAccountAvatarSeed();
+      writeLocalAccountAvatarSeed(identity, next);
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent(ACCOUNT_AVATAR_CHANGED_EVENT));
       }
+      if (!account.signedIn || account.localDev) return undefined;
+      return osAccountsSetAvatarSeed(next);
     },
   };
 }
@@ -66,9 +72,7 @@ function accountAvatarIdentity(account: AccountStatus): string {
   );
 }
 
-function accountAvatarStyle(identity: string, variant: number): AccountAvatarStyle {
-  const seed = `${identity}:${variant}`;
-
+function accountAvatarStyle(seed: string): AccountAvatarStyle {
   return {
     "--avatar-cloud-x": `${seededInteger(seed, "x", 14, 40)}%`,
     "--avatar-cloud-y": `${seededInteger(seed, "y", 12, 38)}%`,
@@ -96,26 +100,40 @@ function accountAvatarVariantStorageKey(identity: string): string {
   return `${ACCOUNT_AVATAR_VARIANT_STORAGE_PREFIX}${avatarHash(identity).toString(36)}`;
 }
 
-function readAccountAvatarVariant(identity: string): number {
-  if (typeof window === "undefined") return 0;
+function readLocalAccountAvatarSeed(identity: string): string {
+  if (typeof window === "undefined") return `${identity}:0`;
   try {
-    const stored = Number.parseInt(
-      window.localStorage.getItem(accountAvatarVariantStorageKey(identity)) ?? "0",
-      10,
-    );
-    return Number.isSafeInteger(stored) && stored >= 0 ? stored : 0;
+    const stored = window.localStorage.getItem(accountAvatarVariantStorageKey(identity));
+    const legacyVariant = Number.parseInt(stored ?? "0", 10);
+    if (stored !== null && /^\d+$/.test(stored)) {
+      const variant = Number.isSafeInteger(legacyVariant) && legacyVariant >= 0 ? legacyVariant : 0;
+      return `${identity}:${variant}`;
+    }
+    return validAccountAvatarSeed(stored) ?? `${identity}:0`;
   } catch {
-    return 0;
+    return `${identity}:0`;
   }
 }
 
-function writeAccountAvatarVariant(identity: string, variant: number) {
+function writeLocalAccountAvatarSeed(identity: string, seed: string) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(accountAvatarVariantStorageKey(identity), String(variant));
+    window.localStorage.setItem(accountAvatarVariantStorageKey(identity), seed);
   } catch {
     // A locked-down WebView can reject localStorage; the default remains usable.
   }
+}
+
+function validAccountAvatarSeed(value: string | null | undefined): string | undefined {
+  const hasNonAscii = value ? [...value].some((character) => character.charCodeAt(0) > 127) : false;
+  if (!value || value.length > 128 || hasNonAscii) return undefined;
+  return value;
+}
+
+function createAccountAvatarSeed(): string {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `v1:${hex}`;
 }
 
 function subscribeAccountAvatar(onChange: () => void) {

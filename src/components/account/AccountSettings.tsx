@@ -83,8 +83,26 @@ export function AccountSettings({ account, loading, onAccountChanged, onRefresh 
 
 export function AccountSettingsSection({ account, loading, onAccountChanged }: Props) {
   const [busy, setBusy] = useState(false);
+  const [avatarBusy, setAvatarBusy] = useState(false);
   const [accountStatus, setAccountStatus] = useState<string>();
   const { refresh: refreshAvatar } = useAccountAvatar(account);
+
+  async function handleRefreshAvatar() {
+    setAvatarBusy(true);
+    try {
+      const user = await refreshAvatar();
+      if (user) onAccountChanged({ ...account, user });
+      setAccountStatus(
+        account.localDev
+          ? "Avatar refreshed on this device."
+          : "Avatar synced with your OpenSoftware account.",
+      );
+    } catch (error) {
+      setAccountStatus(messageFromError(error));
+    } finally {
+      setAvatarBusy(false);
+    }
+  }
 
   async function handleSignIn() {
     setBusy(true);
@@ -187,12 +205,19 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
               <div className="settings-row-info">
                 <h3 className="settings-row-title">Avatar</h3>
                 <p className="settings-row-description">
-                  A private pattern generated locally for this account.
+                  {account.localDev
+                    ? "A generated pattern saved on this device."
+                    : "A generated pattern synced with your OpenSoftware account."}
                 </p>
               </div>
               <div className="settings-row-control">
                 <AccountAvatar account={account} className="account-avatar-preview" />
-                <button type="button" className="btn btn-secondary" onClick={refreshAvatar}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={avatarBusy}
+                  onClick={() => void handleRefreshAvatar()}
+                >
                   <IconShuffle size={14} />
                   Refresh
                 </button>

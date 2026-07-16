@@ -29,11 +29,11 @@ use tokio::{
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const DEFAULT_LOOPBACK_PORT: u16 = 8765;
-// Scopes June needs. profile:read for /me, billing:read for /billing/balance,
-// billing:write for subscription checkout, and credits:spend so June API can
-// authorize-and-charge against the user's credits for transcription /
-// generation / dictation work.
-const OAUTH_SCOPES: &str = "profile:read billing:read billing:write credits:spend";
+// Scopes June needs. profile:read/profile:write for /me and the User's avatar
+// seed, billing:read for /billing/balance, billing:write for subscription
+// checkout, and credits:spend so June API can authorize-and-charge against the
+// user's credits for transcription / generation / dictation work.
+const OAUTH_SCOPES: &str = "profile:read profile:write billing:read billing:write credits:spend";
 // June's OS Accounts token store. Keep this app-scoped so June does not
 // touch credentials written by other Open Software apps on startup.
 const KEYCHAIN_SERVICE: &str = "co.opensoftware.june.accounts";
@@ -87,6 +87,7 @@ const AUTH_REFRESH_MAX_ATTEMPTS: usize = 3;
 /// Base backoff between transient refresh retries; multiplied by the attempt
 /// number for a short linear backoff (0.3s, 0.6s).
 const AUTH_REFRESH_RETRY_BACKOFF: Duration = Duration::from_millis(300);
+const AVATAR_SEED_MAX_LENGTH: usize = 128;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static REFRESH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
@@ -167,7 +168,11 @@ fn access_token_subject(jwt: &str) -> Option<String> {
 }
 
 fn stored_account_matches_snapshot(stored: &StoredAccount, snapshot: &AccountSnapshot) -> bool {
-    access_token_subject(&stored.pair.access_token).as_deref() == Some(snapshot.user.id.as_str())
+    stored_account_matches_user(stored, &snapshot.user)
+}
+
+fn stored_account_matches_user(stored: &StoredAccount, user: &AccountUser) -> bool {
+    access_token_subject(&stored.pair.access_token).as_deref() == Some(user.id.as_str())
 }
 
 #[derive(Deserialize)]
@@ -177,6 +182,7 @@ struct MeWire {
     email: Option<String>,
     display_name: Option<String>,
     avatar_url: Option<String>,
+    avatar_seed: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -250,6 +256,8 @@ pub struct AccountUser {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_seed: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -324,6 +332,7 @@ impl From<MeWire> for AccountUser {
             email: w.email,
             display_name: w.display_name,
             avatar_url: w.avatar_url,
+            avatar_seed: w.avatar_seed,
         }
     }
 }
@@ -491,6 +500,7 @@ fn local_dev_account_status() -> AccountStatus {
             email: None,
             display_name: Some("Local developer".to_string()),
             avatar_url: None,
+            avatar_seed: None,
         }),
         balance: Some(AccountBalance {
             credits: 0,
@@ -735,6 +745,51 @@ pub async fn os_accounts_logout(request: Option<AccountsLogoutRequest>) -> Resul
         let _ = open_accounts_browser_logout(&cfg);
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn os_accounts_set_avatar_seed(seed: String) -> Result<AccountUser, AppError> {
+    let seed = validate_avatar_seed(seed)?;
+    if local_dev_enabled() {
+        let mut user = local_dev_account_status()
+            .user
+            .expect("local dev status always carries a user");
+        user.avatar_seed = Some(seed);
+        return Ok(user);
+    }
+    let cfg = Config::load();
+    if !cfg.configured() {
+        return Err(AppError::new(
+            "os_accounts_unconfigured",
+            "OS Accounts is not configured for this build.",
+        ));
+    }
+
+    let requested_seed = seed.clone();
+    let me: MeWire = authed_patch(&cfg, "/me", avatar_seed_request(&seed)).await?;
+    let user = AccountUser::from(me);
+    if user.avatar_seed.as_deref() != Some(requested_seed.as_str()) {
+        return Err(AppError::new(
+            "avatar_sync_unavailable",
+            "Synced avatars are not available on this OS Accounts deployment yet.",
+        ));
+    }
+    persist_account_user_in_background(user.clone());
+    Ok(user)
+}
+
+fn validate_avatar_seed(seed: String) -> Result<String, AppError> {
+    if seed.is_empty() || seed.len() > AVATAR_SEED_MAX_LENGTH || !seed.is_ascii() {
+        return Err(AppError::new(
+            "invalid_avatar_seed",
+            "The avatar seed must be 1 to 128 ASCII characters.",
+        ));
+    }
+    Ok(seed)
+}
+
+fn avatar_seed_request(seed: &str) -> serde_json::Value {
+    serde_json::json!({ "avatar_seed": seed })
 }
 
 fn open_accounts_browser_logout(cfg: &Config) -> Result<(), AppError> {
@@ -1706,7 +1761,7 @@ fn accounts_request_error_for_response(
 fn accounts_request_failed_message(message: Option<String>) -> String {
     match message.as_deref() {
         Some("access token is missing required scope") => {
-            "Sign in again to refresh your billing permissions.".to_string()
+            "Sign in again to refresh your account permissions.".to_string()
         }
         Some(message) => message.to_string(),
         None => "OS Accounts request failed.".to_string(),
@@ -1831,6 +1886,33 @@ fn persist_snapshot_in_background(snapshot: AccountSnapshot) {
         stored.snapshot = Some(snapshot);
         if let Err(error) = store_tokens(&stored).await {
             tracing::warn!(error_code = %error.code, "failed to cache account snapshot");
+        }
+    });
+}
+
+/// Keep the keychain snapshot aligned after a successful profile write so the
+/// next offline/launch fast-path sees the new generated avatar immediately.
+/// Like the full snapshot writer, this is detached and guarded against token
+/// rotation, logout, and a different User signing in while the task waits.
+fn persist_account_user_in_background(user: AccountUser) {
+    tokio::spawn(async move {
+        let _guard = refresh_lock().lock().await;
+        let Some(mut stored) = load_account().await else {
+            return;
+        };
+        if !stored_account_matches_user(&stored, &user) {
+            tracing::debug!("skipped stale cached account user");
+            return;
+        }
+        let Some(snapshot) = stored.snapshot.as_mut() else {
+            return;
+        };
+        if snapshot.user == user {
+            return;
+        }
+        snapshot.user = user;
+        if let Err(error) = store_tokens(&stored).await {
+            tracing::warn!(error_code = %error.code, "failed to cache account user");
         }
     });
 }
@@ -2140,8 +2222,27 @@ mod tests {
 
     #[test]
     fn oauth_scope_allows_checkout_and_credit_spend() {
+        assert!(OAUTH_SCOPES.contains("profile:write"));
         assert!(OAUTH_SCOPES.contains("billing:write"));
         assert!(OAUTH_SCOPES.contains("credits:spend"));
+    }
+
+    #[test]
+    fn avatar_seed_request_matches_the_accounts_profile_contract() {
+        assert_eq!(
+            avatar_seed_request("v1:0123456789abcdef0123456789abcdef"),
+            serde_json::json!({
+                "avatar_seed": "v1:0123456789abcdef0123456789abcdef"
+            })
+        );
+    }
+
+    #[test]
+    fn avatar_seed_validation_matches_the_accounts_contract() {
+        assert!(validate_avatar_seed("v1:seed".to_string()).is_ok());
+        assert!(validate_avatar_seed(String::new()).is_err());
+        assert!(validate_avatar_seed("☁".to_string()).is_err());
+        assert!(validate_avatar_seed("x".repeat(AVATAR_SEED_MAX_LENGTH + 1)).is_err());
     }
 
     #[test]
@@ -2520,6 +2621,7 @@ mod tests {
                 email: Some("june@example.com".to_string()),
                 display_name: Some("June User".to_string()),
                 avatar_url: None,
+                avatar_seed: Some("v1:0123456789abcdef0123456789abcdef".to_string()),
             },
             balance: AccountBalance {
                 credits: 4200,

@@ -29,7 +29,7 @@ Identity comes from the user's access JWT (via the BFF), not the App API key:
 
 ```
 GET {API}/me   Authorization: Bearer <access JWT>
-→ { id: "usr_…", handle, email, display_name, avatar_url }
+→ { id: "usr_…", handle, email, display_name, avatar_url, avatar_seed }
 ```
 
 The `id` (`usr_…`) is the **only** user reference you pass on the charge path.

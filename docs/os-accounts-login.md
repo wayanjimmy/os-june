@@ -22,7 +22,13 @@ see [june-api-prd.md](june-api-prd.md). Implementation lives in
    `OS_JUNE_DEV_PLAINTEXT_TOKEN_STORE=1` to use a file instead and skip Keychain
    prompts.
 5. The app fetches an **account snapshot** — `/me` + `/billing/balance` +
-   `/billing/subscription` — surfaced to the UI as `AccountStatus`.
+   `/billing/subscription` — surfaced to the UI as `AccountStatus`. `/me`
+   includes the optional opaque `avatar_seed` used to keep generated avatars
+   stable across devices.
+
+June requests `profile:write` in addition to `profile:read` so the User can
+refresh that seed from General settings. Existing sessions minted without the
+write scope must sign in again before the refresh can sync.
 
 ## Gates
 
