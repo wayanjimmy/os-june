@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { ConnectorProviderIcon } from "../connectors/ConnectorProviderIcon";
 import {
@@ -19,10 +20,15 @@ import {
   connectorsLinearTeams,
   connectorsList,
   connectorsSetSelectedTeams,
+  obsidianApplyRuntime,
+  obsidianConfigure,
+  obsidianDisconnect,
+  obsidianStatus,
   type ConnectorAccount,
   type ConnectorProvider,
   type ConnectorScopeBundle,
   type LinearTeam,
+  type ObsidianStatus,
 } from "../../lib/tauri";
 import { Checkbox } from "../ui/Checkbox";
 import { Dialog } from "../ui/Dialog";
@@ -162,6 +168,9 @@ export function ConnectorsSection() {
   // available for a deliberate reconnect-soon disconnect.
   const [revoke, setRevoke] = useState(true);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [obsidian, setObsidian] = useState<ObsidianStatus | null>(null);
+  const [obsidianError, setObsidianError] = useState<string | null>(null);
+  const [obsidianBusy, setObsidianBusy] = useState(false);
 
   // Linear team-selection dialog: the account id it's open for (null =
   // closed). Kept separate from the fetched team list/selection so a fetch
@@ -208,6 +217,13 @@ export function ConnectorsSection() {
     } catch (err) {
       setAccounts((current) => current ?? []);
       setLoadError(messageFromError(err));
+    }
+    try {
+      setObsidian(await obsidianStatus());
+      setObsidianError(null);
+    } catch (err) {
+      setObsidian((current) => current ?? { connected: false });
+      setObsidianError(messageFromError(err));
     }
   }, []);
 
@@ -374,6 +390,40 @@ export function ConnectorsSection() {
     }
   }
 
+  async function chooseObsidianVault() {
+    if (obsidianBusy) return;
+    setObsidianError(null);
+    const selected = await openFileDialog({ directory: true, multiple: false });
+    if (typeof selected !== "string") return;
+    setObsidianBusy(true);
+    try {
+      setObsidian(await obsidianConfigure(selected));
+      await obsidianApplyRuntime();
+      await refresh();
+      toast.success("Obsidian vault connected");
+    } catch (err) {
+      setObsidianError(messageFromError(err));
+    } finally {
+      setObsidianBusy(false);
+    }
+  }
+
+  async function disconnectObsidian() {
+    if (obsidianBusy) return;
+    setObsidianError(null);
+    setObsidianBusy(true);
+    try {
+      setObsidian(await obsidianDisconnect());
+      await obsidianApplyRuntime();
+      await refresh();
+      toast.success("Obsidian disconnected");
+    } catch (err) {
+      setObsidianError(messageFromError(err));
+    } finally {
+      setObsidianBusy(false);
+    }
+  }
+
   function toggleBundle(bundle: ConnectorScopeBundle, checked: boolean) {
     setBundles((current) => {
       const next = new Set(current);
@@ -459,9 +509,51 @@ export function ConnectorsSection() {
       {loadError ? (
         <InlineNotice tone="warning" body={loadError} aria-label="Connectors load error" />
       ) : null}
+      {obsidianError ? (
+        <InlineNotice tone="warning" body={obsidianError} aria-label="Obsidian connector error" />
+      ) : null}
 
       <div className="settings-card connectors-card">
         <ul className="connectors-list">
+          <li className="connector-row">
+            <span className="connector-logo" aria-hidden>
+              <ConnectorProviderIcon provider="obsidian" />
+            </span>
+            <div className="connector-main">
+              <span className="connector-name">Obsidian</span>
+              <p className="connector-subtitle" title={obsidian?.vaultPath}>
+                {obsidian?.connected
+                  ? `${obsidian.vaultName ?? "Vault"} · ${obsidian.vaultPath}`
+                  : "Local vault read and update capability."}
+              </p>
+            </div>
+            <div className="connector-actions">
+              {obsidian?.connected ? (
+                <span className="status-pill" data-tone="ok">Connected</span>
+              ) : null}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                aria-label={obsidian?.connected ? "Change Obsidian vault" : "Connect Obsidian"}
+                disabled={obsidian === null || obsidianBusy}
+                aria-busy={obsidianBusy || undefined}
+                onClick={() => void chooseObsidianVault()}
+              >
+                {obsidian?.connected ? "Change vault" : "Connect"}
+              </button>
+              {obsidian?.connected ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  aria-label="Disconnect Obsidian"
+                  disabled={obsidianBusy}
+                  onClick={() => void disconnectObsidian()}
+                >
+                  Disconnect
+                </button>
+              ) : null}
+            </div>
+          </li>
           {PROVIDER_ORDER.map((provider) => {
             const account = accounts?.find((entry) => entry.provider === provider) ?? null;
             const name = PROVIDER_NAMES[provider];
