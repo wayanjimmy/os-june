@@ -885,6 +885,41 @@ describe("AppSettings", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows a local refresh made while the account uses a future Avatar version", async () => {
+    const user = userEvent.setup();
+    mocks.osAccountsSetAvatarSeed.mockRejectedValueOnce({
+      code: "account_permission_required",
+      message: "Your current sign-in does not include this permission.",
+    });
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          user: { ...signedInAccount.user, avatarSeed: "v2:future" },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        activeTab="general"
+        onTabChange={vi.fn()}
+      />,
+    );
+    const avatar = document.querySelector(".account-avatar-preview");
+    const defaultStyle = avatar?.getAttribute("style");
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(avatar?.getAttribute("style")).not.toBe(defaultStyle);
+    expect(screen.getByText("This pattern is saved only on this device.")).toBeInTheDocument();
+    expect(mocks.toastWarning).toHaveBeenCalledWith(
+      "Avatar changed on this device, but it couldn't sync. Sign out and sign in again to update your account permissions.",
+    );
+  });
+
   it("ignores an avatar response that lands after the account signs out", async () => {
     const user = userEvent.setup();
     const onAccountChanged = vi.fn();

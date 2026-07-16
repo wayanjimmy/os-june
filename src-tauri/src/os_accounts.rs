@@ -579,14 +579,15 @@ pub async fn os_accounts_status() -> Result<AccountStatus, AppError> {
     match fetch_snapshot(&cfg).await {
         Ok((user, balance, subscription)) => {
             set_cached_signed_in(true);
-            // Refresh the cached snapshot for the next launch fast-path
-            // (write-if-changed, detached so the response never waits on the
-            // refresh lock).
-            persist_snapshot_in_background(AccountSnapshot {
+            // Refresh the cached snapshot for the next launch fast-path. Keep
+            // the write inside the account-operation boundary so its ordering
+            // matches the User value returned to the frontend.
+            persist_snapshot(AccountSnapshot {
                 user: user.clone(),
                 balance: balance.clone(),
                 subscription: subscription.clone(),
-            });
+            })
+            .await;
             Ok(AccountStatus {
                 signed_in: true,
                 configured: cfg.configured(),
@@ -693,15 +694,20 @@ pub async fn os_accounts_login(
 
     let code = await_authorization_code(&cfg, &flow, &login_url, &csrf).await?;
     let pair = exchange_code(&cfg, &code, &verifier, &redirect_uri).await?;
+    let _operation_guard = account_operation_lock().lock().await;
+    // Account replacement is ordered with status, profile writes, and logout.
+    // Otherwise an in-flight operation for the previous User could land after
+    // this token pair and attach its result to the new session.
     store_tokens(&StoredAccount::new(pair, None)).await?;
     let (user, balance, subscription) = fetch_snapshot(&cfg).await?;
     // Warm the cache from first sign-in so the next launch fast-path paints the
     // real identity instead of fallbacks.
-    persist_snapshot_in_background(AccountSnapshot {
+    persist_snapshot(AccountSnapshot {
         user: user.clone(),
         balance: balance.clone(),
         subscription: subscription.clone(),
-    });
+    })
+    .await;
     set_cached_signed_in(true);
     Ok(AccountStatus {
         signed_in: true,
@@ -737,10 +743,11 @@ pub async fn os_accounts_logout(request: Option<AccountsLogoutRequest>) -> Resul
     }
     let cfg = Config::load();
     {
-        // Serialize logout with token refreshes and detached snapshot writers.
-        // Otherwise a writer that loaded credentials before clear_tokens could
-        // restore the entire keychain entry after the User signed out.
-        let _guard = refresh_lock().lock().await;
+        // Take locks in the same operation -> refresh order as status, login,
+        // and Avatar writes. This prevents an in-flight account request from
+        // returning signed-in state or mutating the profile after sign-out.
+        let _operation_guard = account_operation_lock().lock().await;
+        let _refresh_guard = refresh_lock().lock().await;
         if let Some(pair) = load_tokens().await {
             let _ = http_client()
                 .post(format!("{}/auth/logout", cfg.api_url.trim_end_matches('/')))
@@ -788,7 +795,7 @@ pub async fn os_accounts_set_avatar_seed(seed: String) -> Result<AccountUser, Ap
             "Synced avatars are not available on this OS Accounts deployment yet.",
         ));
     }
-    persist_account_user_in_background(user.clone());
+    persist_account_user(user.clone()).await;
     Ok(user)
 }
 
@@ -1882,66 +1889,58 @@ fn net_error(e: reqwest::Error) -> AppError {
 
 /// Refresh the cached account snapshot, rewriting the keychain entry only when
 /// the snapshot actually changed. Status runs on every window focus, so a
-/// blind rewrite would churn the keychain each time; comparing first keeps the
-/// stored token pair untouched when nothing moved. Best-effort and detached
-/// from the caller: the write serialises on the refresh lock, which a
-/// concurrent refresh can hold for a full HTTP round-trip, and the status
-/// response must not stall behind it; a missed write is corrected by the next
-/// successful status. Errors are swallowed after logging.
-fn persist_snapshot_in_background(snapshot: AccountSnapshot) {
-    tokio::spawn(async move {
-        // Hold the refresh lock across the load-modify-write: refresh_locked
-        // rotates the token pair under this lock, and writing back a pair
-        // loaded before the rotation would resurrect a consumed refresh token
-        // (and sign the user out on the next refresh).
-        let _guard = refresh_lock().lock().await;
-        let Some(mut stored) = load_account().await else {
-            // Tokens vanished between the fetch and here (e.g. a concurrent
-            // logout); nothing to attach the snapshot to.
-            return;
-        };
-        if !stored_account_matches_snapshot(&stored, &snapshot) {
-            // The user may have signed out and into another OS Accounts identity
-            // while this best-effort task waited on the refresh lock. Never attach
-            // one user's cached identity/balance to a different token pair.
-            tracing::debug!("skipped stale cached account snapshot");
-            return;
-        }
-        if stored.snapshot.as_ref() == Some(&snapshot) {
-            return;
-        }
-        stored.snapshot = Some(snapshot);
-        if let Err(error) = store_tokens(&stored).await {
-            tracing::warn!(error_code = %error.code, "failed to cache account snapshot");
-        }
-    });
+/// blind rewrite would churn the keychain each time. The caller holds the
+/// account-operation lock through this write, keeping the cached snapshot in
+/// the same order as the User value returned to the frontend.
+async fn persist_snapshot(snapshot: AccountSnapshot) {
+    // Hold the refresh lock across the load-modify-write: refresh_locked
+    // rotates the token pair under this lock, and writing back a pair loaded
+    // before the rotation would resurrect a consumed refresh token.
+    let _guard = refresh_lock().lock().await;
+    let Some(mut stored) = load_account().await else {
+        // Tokens vanished between the fetch and here (e.g. a concurrent
+        // logout); nothing to attach the snapshot to.
+        return;
+    };
+    if !stored_account_matches_snapshot(&stored, &snapshot) {
+        // The user may have signed out and into another OS Accounts identity
+        // while this best-effort write waited on the refresh lock. Never attach
+        // one User's cached identity/balance to a different token pair.
+        tracing::debug!("skipped stale cached account snapshot");
+        return;
+    }
+    if stored.snapshot.as_ref() == Some(&snapshot) {
+        return;
+    }
+    stored.snapshot = Some(snapshot);
+    if let Err(error) = store_tokens(&stored).await {
+        tracing::warn!(error_code = %error.code, "failed to cache account snapshot");
+    }
 }
 
 /// Keep the keychain snapshot aligned after a successful profile write so the
 /// next offline/launch fast-path sees the new generated avatar immediately.
-/// Like the full snapshot writer, this is detached and guarded against token
-/// rotation, logout, and a different User signing in while the task waits.
-fn persist_account_user_in_background(user: AccountUser) {
-    tokio::spawn(async move {
-        let _guard = refresh_lock().lock().await;
-        let Some(mut stored) = load_account().await else {
-            return;
-        };
-        if !stored_account_matches_user(&stored, &user) {
-            tracing::debug!("skipped stale cached account user");
-            return;
-        }
-        let Some(snapshot) = stored.snapshot.as_mut() else {
-            return;
-        };
-        if snapshot.user == user {
-            return;
-        }
-        snapshot.user = user;
-        if let Err(error) = store_tokens(&stored).await {
-            tracing::warn!(error_code = %error.code, "failed to cache account user");
-        }
-    });
+/// The caller holds the account-operation lock, while the refresh lock guards
+/// token rotation, logout, and a different User signing in during the write.
+async fn persist_account_user(user: AccountUser) {
+    let _guard = refresh_lock().lock().await;
+    let Some(mut stored) = load_account().await else {
+        return;
+    };
+    if !stored_account_matches_user(&stored, &user) {
+        tracing::debug!("skipped stale cached account user");
+        return;
+    }
+    let Some(snapshot) = stored.snapshot.as_mut() else {
+        return;
+    };
+    if snapshot.user == user {
+        return;
+    }
+    snapshot.user = user;
+    if let Err(error) = store_tokens(&stored).await {
+        tracing::warn!(error_code = %error.code, "failed to cache account user");
+    }
 }
 
 async fn store_tokens(account: &StoredAccount) -> Result<(), AppError> {

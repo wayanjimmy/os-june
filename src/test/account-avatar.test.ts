@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   accountAvatarStyle,
+  pendingAccountAvatarAppliesToStoredSeed,
   resolvedAccountAvatarSeed,
   supportedAccountAvatarSeed,
 } from "../components/account/AccountAvatar";
@@ -27,5 +28,15 @@ describe("Open Software Avatar v1 contract", () => {
       "--avatar-cloud-angle": "192deg",
       "--avatar-cloud-strength": "65%",
     });
+  });
+
+  it("keeps an explicit local choice made against a future Avatar version", () => {
+    expect(
+      pendingAccountAvatarAppliesToStoredSeed(
+        { seed: "v1:local", baseSeed: "v2:future" },
+        "v2:future",
+      ),
+    ).toBe(true);
+    expect(pendingAccountAvatarAppliesToStoredSeed({ seed: "v1:stale" }, "v2:future")).toBe(false);
   });
 });

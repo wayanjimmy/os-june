@@ -14,6 +14,11 @@ type AccountAvatarStyle = CSSProperties & {
   "--avatar-cloud-strength": string;
 };
 
+type PendingAccountAvatarSeed = {
+  seed: string;
+  baseSeed?: string | null;
+};
+
 export function AccountAvatar({
   account,
   className,
@@ -38,36 +43,45 @@ export function useAccountAvatar(account: AccountStatus) {
   const storedSeed = account.user?.avatarSeed;
   const remoteSeed = supportedAccountAvatarSeed(storedSeed);
   const hasUnsupportedStoredSeed = Boolean(storedSeed && !remoteSeed);
+  const readPendingSeed = useCallback(
+    () => readApplicablePendingAccountAvatarSeed(identity, storedSeed),
+    [identity, storedSeed],
+  );
   const pendingSeed = useSyncExternalStore(
     subscribeAccountAvatar,
-    () => readPendingAccountAvatarSeed(identity),
+    readPendingSeed,
     () => undefined,
   );
   const defaultSeed = resolvedAccountAvatarSeed(storedSeed, userId);
   const getSnapshot = useCallback(
     () =>
-      (hasUnsupportedStoredSeed ? undefined : readPendingAccountAvatarSeed(identity)) ??
+      readApplicablePendingAccountAvatarSeed(identity, storedSeed) ??
       (account.localDev ? readLocalAccountAvatarSeed(identity) : undefined) ??
       defaultSeed,
-    [account.localDev, defaultSeed, hasUnsupportedStoredSeed, identity],
+    [account.localDev, defaultSeed, identity, storedSeed],
   );
   const seed = useSyncExternalStore(subscribeAccountAvatar, getSnapshot, () => defaultSeed);
 
   useEffect(() => {
-    if (remoteSeed && readPendingAccountAvatarSeed(identity) === remoteSeed) {
+    const pending = readPendingAccountAvatar(identity);
+    if (remoteSeed && pending?.seed === remoteSeed) {
       clearPendingAccountAvatarSeed(identity);
-    } else if (hasUnsupportedStoredSeed && readPendingAccountAvatarSeed(identity)) {
+    } else if (
+      hasUnsupportedStoredSeed &&
+      pending &&
+      !pendingAccountAvatarAppliesToStoredSeed(pending, storedSeed)
+    ) {
       clearPendingAccountAvatarSeed(identity);
     }
-  }, [hasUnsupportedStoredSeed, identity, remoteSeed]);
+  }, [hasUnsupportedStoredSeed, identity, remoteSeed, storedSeed]);
 
   return {
     style: accountAvatarStyle(seed),
-    localOnly: Boolean(pendingSeed && !hasUnsupportedStoredSeed && pendingSeed !== remoteSeed),
+    localOnly: Boolean(pendingSeed && pendingSeed !== remoteSeed),
     refresh: async () => {
       const next = createAccountAvatarSeed();
       if (account.signedIn && !account.localDev) {
-        writePendingAccountAvatarSeed(identity, next);
+        writePendingAccountAvatarSeed(identity, next, storedSeed);
       }
       writeLocalAccountAvatarSeed(identity, next);
       if (typeof window !== "undefined") {
@@ -148,21 +162,53 @@ function writeLocalAccountAvatarSeed(identity: string, seed: string) {
   }
 }
 
-function readPendingAccountAvatarSeed(identity: string): string | undefined {
+function readPendingAccountAvatar(identity: string): PendingAccountAvatarSeed | undefined {
   if (typeof window === "undefined") return undefined;
   try {
-    return supportedAccountAvatarSeed(
-      window.localStorage.getItem(accountAvatarPendingStorageKey(identity)),
-    );
+    const stored = window.localStorage.getItem(accountAvatarPendingStorageKey(identity));
+    const legacySeed = supportedAccountAvatarSeed(stored);
+    if (legacySeed) return { seed: legacySeed };
+    if (!stored) return undefined;
+    const pending = JSON.parse(stored) as PendingAccountAvatarSeed;
+    const seed = supportedAccountAvatarSeed(pending.seed);
+    return seed ? { seed, baseSeed: pending.baseSeed } : undefined;
   } catch {
     return undefined;
   }
 }
 
-function writePendingAccountAvatarSeed(identity: string, seed: string) {
+function readApplicablePendingAccountAvatarSeed(
+  identity: string,
+  storedSeed: string | null | undefined,
+): string | undefined {
+  const pending = readPendingAccountAvatar(identity);
+  return pending && pendingAccountAvatarAppliesToStoredSeed(pending, storedSeed)
+    ? pending.seed
+    : undefined;
+}
+
+export function pendingAccountAvatarAppliesToStoredSeed(
+  pending: PendingAccountAvatarSeed,
+  storedSeed: string | null | undefined,
+): boolean {
+  return (
+    !storedSeed ||
+    Boolean(supportedAccountAvatarSeed(storedSeed)) ||
+    pending.baseSeed === storedSeed
+  );
+}
+
+function writePendingAccountAvatarSeed(
+  identity: string,
+  seed: string,
+  baseSeed: string | null | undefined,
+) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(accountAvatarPendingStorageKey(identity), seed);
+    window.localStorage.setItem(
+      accountAvatarPendingStorageKey(identity),
+      JSON.stringify({ seed, baseSeed: baseSeed ?? null } satisfies PendingAccountAvatarSeed),
+    );
   } catch {
     // A locked-down WebView can reject localStorage; the remote write can still succeed.
   }
