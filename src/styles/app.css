@@ -26307,6 +26307,21 @@ button.memory-project:hover {
   color: var(--foreground);
 }
 
+.connector-logo-obsidian {
+  background: var(--foreground);
+}
+
+.connector-provider-icon-obsidian {
+  display: block;
+  background: var(--on-solid);
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+}
+
 .connector-main {
   min-width: 0;
   display: grid;

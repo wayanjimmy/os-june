@@ -12,7 +12,18 @@ export function ConnectorProviderIcon({
   size?: number;
 }) {
   if (provider === "obsidian") {
-    return <img src={obsidianLogo} width={size} height={size} alt="" aria-hidden />;
+    return (
+      <span
+        className="connector-provider-icon-obsidian"
+        style={{
+          width: size,
+          height: size,
+          maskImage: `url(${obsidianLogo})`,
+          WebkitMaskImage: `url(${obsidianLogo})`,
+        }}
+        aria-hidden
+      />
+    );
   }
   return <IconGoogle size={size} aria-hidden />;
 }

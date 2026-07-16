@@ -516,7 +516,7 @@ export function ConnectorsSection() {
       <div className="settings-card connectors-card">
         <ul className="connectors-list">
           <li className="connector-row">
-            <span className="connector-logo" aria-hidden>
+            <span className="connector-logo connector-logo-obsidian" aria-hidden>
               <ConnectorProviderIcon provider="obsidian" />
             </span>
             <div className="connector-main">
