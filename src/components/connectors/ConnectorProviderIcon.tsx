@@ -13,14 +13,12 @@ export function ConnectorProviderIcon({
 }) {
   if (provider === "obsidian") {
     return (
-      <span
+      <img
         className="connector-provider-icon-obsidian"
-        style={{
-          width: size,
-          height: size,
-          maskImage: `url(${obsidianLogo})`,
-          WebkitMaskImage: `url(${obsidianLogo})`,
-        }}
+        src={obsidianLogo}
+        width={size}
+        height={size}
+        alt=""
         aria-hidden
       />
     );

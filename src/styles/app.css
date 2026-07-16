@@ -26313,13 +26313,7 @@ button.memory-project:hover {
 
 .connector-provider-icon-obsidian {
   display: block;
-  background: var(--on-solid);
-  mask-position: center;
-  mask-repeat: no-repeat;
-  mask-size: contain;
-  -webkit-mask-position: center;
-  -webkit-mask-repeat: no-repeat;
-  -webkit-mask-size: contain;
+  filter: brightness(0) invert(1);
 }
 
 .connector-main {
