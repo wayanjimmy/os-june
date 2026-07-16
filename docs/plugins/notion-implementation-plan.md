@@ -8,11 +8,12 @@
 
 ## Technical objective
 
-Ship a connect-only Notion hosted MCP connector preview. Clicking **Connect**
-opens Notion's hosted MCP OAuth flow in the default browser, stores the returned
-OAuth material in the OS Keychain, and lets the user disconnect locally. This
-slice intentionally does not test or enforce selected-resource scoping and does
-not expose Notion content or tools to Hermes.
+Ship a Notion hosted MCP connector preview. Clicking **Connect** opens Notion's
+hosted MCP OAuth flow in the default browser, stores the returned OAuth material
+in the OS Keychain, and lets the user disconnect locally. When connected, June
+registers a read-only `june_notion` MCP bridge with Hermes so the agent can
+discover the hosted MCP read tools. This slice intentionally does not test or
+enforce selected-resource scoping and does not expose write/action tools.
 
 The broader PRD still targets selected Notion content through read and action
 MCP servers, with the authorized page boundary proven at the provider or
@@ -182,12 +183,12 @@ graph.
 
 ## Delivery slices after Phase 0
 
-0. **Connect-only hosted MCP preview (current slice):** add a Notion row to
+0. **Hosted MCP connector preview (current slice):** add a Notion row to
    Connectors with privacy-accurate copy. The primary Connect action opens the
    hosted MCP OAuth flow, stores credentials only in the Notion Keychain
-   service, reports local connection state, and supports local disconnect. It
-   does not call hosted tools, fetch content, run scoping probes, or register
-   Notion with Hermes.
+   service, reports local connection state, supports local disconnect, and
+   registers a read-only `june_notion` MCP bridge with Hermes. It does not run
+   selected-resource scoping probes or expose write/action tools.
 1. **Connector page shell:** keep the Notion row visible and label the connected
    state as preview/unverified until selected-resource scoping is proven. The
    subtitle must not promise selected-page-only access.
@@ -222,7 +223,8 @@ implementation slice so users and reviewers can see the intended account path.
   copy may graduate from preview language to the proven privacy claim.
 - **Connecting:** show a waiting state while the browser flow is active.
 - **Connected preview:** show that Notion is connected locally for hosted MCP
-  auth, with unverified-access copy. Do not show workspace/account content or a
+  auth, with unverified-access copy. Apply the runtime so Hermes can discover
+  the read-only `june_notion` bridge. Do not show workspace/account content or a
   selected-resource privacy claim in this slice.
 - **Connected verified:** show workspace/account metadata and the exact
   selected-resource privacy claim proven by Phase 0B. Under the current content

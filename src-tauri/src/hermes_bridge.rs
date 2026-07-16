@@ -153,6 +153,9 @@ const JUNE_GCAL_MCP_SCRIPT: &str = include_str!("hermes/june_gcal_mcp.py");
 const JUNE_GCAL_ACTIONS_MCP_SERVER_NAME: &str = "june_gcal_actions";
 const JUNE_GCAL_ACTIONS_MCP_SCRIPT_NAME: &str = "june_gcal_actions_mcp.py";
 const JUNE_GCAL_ACTIONS_MCP_SCRIPT: &str = include_str!("hermes/june_gcal_actions_mcp.py");
+const JUNE_NOTION_MCP_SERVER_NAME: &str = "june_notion";
+const JUNE_NOTION_MCP_SCRIPT_NAME: &str = "june_notion_mcp.py";
+const JUNE_NOTION_MCP_SCRIPT: &str = include_str!("hermes/june_notion_mcp.py");
 /// Loopback proxy token env var shared by all four connector MCP servers; the
 /// connector routes each require this dedicated secret (never the general
 /// provider token). Kept out of argv so it does not appear in process listings.
@@ -1493,6 +1496,7 @@ struct ConnectorAutoMcpConfig {
 /// account is connected) plus one auto server per earned-autonomy grant.
 struct ConnectorMcpConfigs {
     base: Option<ConnectorBaseMcpConfigs>,
+    notion: Option<JuneConnectorMcpConfig>,
     autos: Vec<ConnectorAutoMcpConfig>,
 }
 
@@ -7137,7 +7141,10 @@ async fn sync_june_connector_mcps(
     let account_email = match crate::connectors::list_accounts(app).await {
         Ok(accounts) => accounts
             .into_iter()
-            .find(|account| account.status == crate::connectors::ConnectorAccountStatus::Connected)
+            .find(|account| {
+                account.provider == crate::connectors::ConnectorProvider::Google
+                    && account.status == crate::connectors::ConnectorAccountStatus::Connected
+            })
             .map(|account| account.email),
         Err(error) => {
             // A DB read failure must not wedge the whole bridge start; skip the
@@ -7158,8 +7165,14 @@ async fn sync_june_connector_mcps(
         }
     };
 
+    let notion_connected = crate::connectors::notion::status()
+        .await
+        .map(|status| status.connected)
+        .unwrap_or(false);
+
     // Nothing to register: no connected account and no usable grant.
     if account_email.is_none()
+        && !notion_connected
         && grants
             .iter()
             .all(|grant| grant.account_id.trim().is_empty())
@@ -7192,6 +7205,13 @@ async fn sync_june_connector_mcps(
         JUNE_GCAL_ACTIONS_MCP_SCRIPT_NAME,
         JUNE_GCAL_ACTIONS_MCP_SCRIPT,
     )?;
+    let notion_path = write_script(JUNE_NOTION_MCP_SCRIPT_NAME, JUNE_NOTION_MCP_SCRIPT)?;
+
+    let notion_config = notion_connected.then(|| JuneConnectorMcpConfig {
+        command: command.clone(),
+        script_path: notion_path.clone(),
+        account_email: crate::connectors::notion::notion_account_email().to_string(),
+    });
 
     let base = account_email.map(|email| {
         let base_config = |script_path: &PathBuf| JuneConnectorMcpConfig {
@@ -7228,7 +7248,11 @@ async fn sync_june_connector_mcps(
         })
         .collect();
 
-    Ok(Some(ConnectorMcpConfigs { base, autos }))
+    Ok(Some(ConnectorMcpConfigs {
+        base,
+        notion: notion_config,
+        autos,
+    }))
 }
 
 fn remove_legacy_image_source_secret(hermes_home: &Path) -> Result<(), AppError> {
@@ -7337,6 +7361,7 @@ fn sync_hermes_config_with_external_dirs(
         gmail_actions: connector_base.map(|base| &base.gmail_actions),
         gcal: connector_base.map(|base| &base.gcal),
         gcal_actions: connector_base.map(|base| &base.gcal_actions),
+        notion: june_connector_mcp.and_then(|configs| configs.notion.as_ref()),
         connector_autos: june_connector_mcp
             .map(|configs| configs.autos.as_slice())
             .unwrap_or(&[]),
@@ -7415,6 +7440,7 @@ fn prune_connector_mcp_servers(config: &mut serde_yaml::Value) {
 fn is_june_connector_server_name(name: &str) -> bool {
     name == JUNE_GMAIL_MCP_SERVER_NAME
         || name == JUNE_GCAL_MCP_SERVER_NAME
+        || name == JUNE_NOTION_MCP_SERVER_NAME
         || name.starts_with("june_gmail_")
         || name.starts_with("june_gcal_")
 }
@@ -7502,6 +7528,7 @@ struct BuiltinMcpConfigs<'a> {
     gmail_actions: Option<&'a JuneConnectorMcpConfig>,
     gcal: Option<&'a JuneConnectorMcpConfig>,
     gcal_actions: Option<&'a JuneConnectorMcpConfig>,
+    notion: Option<&'a JuneConnectorMcpConfig>,
     /// Per-job earned-autonomy servers (0..N). Never in the cron allowlist;
     /// reached only via a routine's explicit per-job `enabled_toolsets`.
     connector_autos: &'a [ConnectorAutoMcpConfig],
@@ -7539,6 +7566,9 @@ fn cron_platform_toolsets(configs: &BuiltinMcpConfigs<'_>) -> String {
     }
     if configs.gcal.is_some() {
         items.push(JUNE_GCAL_MCP_SERVER_NAME.to_string());
+    }
+    if configs.notion.is_some() {
+        items.push(JUNE_NOTION_MCP_SERVER_NAME.to_string());
     }
     items.join(", ")
 }
@@ -7770,6 +7800,15 @@ fn render_mcp_servers_config(
             base_url,
             connector_proxy_token,
             JUNE_CONNECTOR_ACTIONS_TOOL_TIMEOUT_SECS,
+        ));
+    }
+    if let Some(config) = configs.notion {
+        entries.push_str(&render_connector_mcp_entry(
+            JUNE_NOTION_MCP_SERVER_NAME,
+            config,
+            base_url,
+            connector_proxy_token,
+            60,
         ));
     }
     // Per-job earned-autonomy servers: same action script, but with a grant
@@ -8702,6 +8741,9 @@ async fn handle_june_provider_connection(
         {
             handle_connector_route(&mut stream, &state, path, &request.body).await?;
         }
+        ("POST", path) if path.starts_with("/v1/notion/") => {
+            handle_notion_connector_route(&mut stream, path, &request.body).await?;
+        }
         _ => {
             write_not_found_response(&mut stream).await?;
         }
@@ -8818,6 +8860,51 @@ async fn connector_error_response(
         }),
     )
     .await
+}
+
+async fn handle_notion_connector_route(
+    stream: &mut tokio::net::TcpStream,
+    path: &str,
+    request_body: &[u8],
+) -> io::Result<()> {
+    let body = serde_json::from_slice::<serde_json::Value>(request_body)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let result = match path {
+        "/v1/notion/tools" => crate::connectors::notion::mcp_tool_list()
+            .await
+            .and_then(connector_json),
+        "/v1/notion/call" => {
+            let tool_name = body
+                .get("toolName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let arguments = body
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            crate::connectors::notion::call_hosted_tool(
+                crate::connectors::notion::NotionHostedToolCallRequest {
+                    tool_name,
+                    arguments,
+                },
+            )
+            .await
+            .and_then(connector_json)
+        }
+        _ => Err(AppError::new("notion_route_not_found", "Notion route not found.")),
+    };
+    match result {
+        Ok(value) => {
+            write_json_response(
+                stream,
+                200,
+                serde_json::json!({ "success": true, "data": value }),
+            )
+            .await
+        }
+        Err(error) => connector_error_response(stream, &error.code, &error.message).await,
+    }
 }
 
 /// The tool name for a mutating connector path, or `None` for a read route.
@@ -9871,6 +9958,7 @@ fn provider_proxy_required_token<'a>(
         || path.starts_with("/v1/gmail-actions/")
         || path.starts_with("/v1/gcal/")
         || path.starts_with("/v1/gcal-actions/")
+        || path.starts_with("/v1/notion/")
     {
         connector_token
     } else {
@@ -12711,6 +12799,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -12800,6 +12889,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13068,6 +13158,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13110,6 +13201,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13194,6 +13286,7 @@ mcp_servers:
                 gmail_actions: Some(&gmail_actions),
                 gcal: Some(&gcal),
                 gcal_actions: Some(&gcal_actions),
+                notion: None,
                 connector_autos: &autos,
             },
         );
@@ -13294,6 +13387,7 @@ mcp_servers:
                 gmail_actions: Some(&gmail_actions),
                 gcal: Some(&gcal),
                 gcal_actions: Some(&gcal_actions),
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13327,6 +13421,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13360,6 +13455,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13393,6 +13489,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13417,6 +13514,7 @@ mcp_servers:
                 gmail_actions: None,
                 gcal: None,
                 gcal_actions: None,
+                notion: None,
                 connector_autos: &[],
             },
         );
@@ -13792,6 +13890,7 @@ mcp_servers:
                 gcal: test_june_connector_mcp_config("june_gcal_mcp.py"),
                 gcal_actions: test_june_connector_mcp_config("june_gcal_actions_mcp.py"),
             }),
+            notion: None,
             // A per-job auto server exists but must never enter the cron
             // allowlist: routines reach it only via explicit enabled_toolsets.
             autos: vec![ConnectorAutoMcpConfig {

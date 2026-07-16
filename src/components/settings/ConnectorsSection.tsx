@@ -167,6 +167,7 @@ export function ConnectorsSection() {
     setNotionConnecting(true);
     try {
       await notionConnectorConnect();
+      await connectorsApplyRuntime();
       await refresh();
       toast.success("Notion connected");
     } catch (err) {
@@ -194,6 +195,7 @@ export function ConnectorsSection() {
     setNotionDisconnecting(true);
     try {
       await notionConnectorDisconnect();
+      await connectorsApplyRuntime();
       await refresh();
       toast.success("Notion disconnected");
     } catch (err) {

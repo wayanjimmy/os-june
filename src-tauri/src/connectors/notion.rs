@@ -1,8 +1,8 @@
 //! Notion hosted MCP connector preview.
 //!
-//! This module owns only the connect/disconnect lifecycle for Notion's hosted
-//! MCP OAuth flow. It intentionally does not call hosted MCP tools, fetch
-//! Notion content, or register Notion with Hermes. See ADR 0025.
+//! This module owns Notion's hosted MCP OAuth flow plus a read-only hosted MCP
+//! bridge for the `june_notion` Hermes toolset. Write/action tools stay denied;
+//! selected-resource scoping is not verified in this preview. See ADR 0025.
 
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -35,6 +35,13 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_RESPONSE_MAX_BYTES: usize = 512 * 1024;
 const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
+const NOTION_READ_TOOL_ALLOWLIST: &[&str] = &[
+    "notion-search",
+    "notion-fetch",
+    "notion-query-data-sources",
+    "notion-query-database-view",
+    "notion-get-comments",
+];
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -108,6 +115,37 @@ pub struct NotionToolSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub write_class: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionMcpTool {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "inputSchema")]
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionMcpToolList {
+    pub tools: Vec<NotionMcpTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionHostedToolCallRequest {
+    pub tool_name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionHostedToolCallResult {
+    pub tool_name: String,
+    pub result: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -282,12 +320,7 @@ pub async fn disconnect() -> Result<(), AppError> {
 }
 
 pub async fn list_tools() -> Result<NotionToolInventory, AppError> {
-    let stored = store::load().await?.ok_or_else(|| {
-        AppError::new(
-            "notion_not_connected",
-            "Connect Notion before discovering tools.",
-        )
-    })?;
+    let stored = load_connected().await?;
     let client = McpHttpClient::new(stored.access_token.clone());
     client.initialize().await?;
     let (tools, bytes) = client.tools_list().await?;
@@ -298,6 +331,48 @@ pub async fn list_tools() -> Result<NotionToolInventory, AppError> {
         tools,
         session_established: client.session_id().is_some(),
         inventory_bytes: bytes,
+    })
+}
+
+pub async fn mcp_tool_list() -> Result<NotionMcpToolList, AppError> {
+    let stored = load_connected().await?;
+    let client = McpHttpClient::new(stored.access_token.clone());
+    client.initialize().await?;
+    let tools = client.hosted_tools_list().await?;
+    Ok(NotionMcpToolList {
+        tools: tools
+            .into_iter()
+            .filter(|tool| tool_allowed_for_hermes(&tool.name))
+            .collect(),
+    })
+}
+
+pub async fn call_hosted_tool(
+    request: NotionHostedToolCallRequest,
+) -> Result<NotionHostedToolCallResult, AppError> {
+    let tool_name = request.tool_name.trim();
+    if !tool_allowed_for_hermes(tool_name) {
+        return Err(AppError::new(
+            "notion_tool_not_allowed",
+            "That Notion hosted MCP tool is not enabled in June yet.",
+        ));
+    }
+    let stored = load_connected().await?;
+    let client = McpHttpClient::new(stored.access_token.clone());
+    client.initialize().await?;
+    let result = client.call_tool(tool_name, request.arguments).await?;
+    Ok(NotionHostedToolCallResult {
+        tool_name: tool_name.to_string(),
+        result,
+    })
+}
+
+async fn load_connected() -> Result<StoredNotionConnection, AppError> {
+    store::load().await?.ok_or_else(|| {
+        AppError::new(
+            "notion_not_connected",
+            "Connect Notion before using Notion tools.",
+        )
     })
 }
 
@@ -529,17 +604,23 @@ impl McpHttpClient {
     }
 
     async fn tools_list(&self) -> Result<(Vec<NotionToolSummary>, usize), AppError> {
-        let response = self
-            .post_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/list",
-                "params": {},
-            }))
+        let (tools, value, bytes) = self.hosted_tools_list_with_value().await?;
+        let summaries = tools.into_iter().map(|tool| summarize_tool(&tool)).collect();
+        let inventory_bytes = serde_json::to_vec(&value).map(|body| body.len()).unwrap_or(bytes);
+        Ok((summaries, inventory_bytes))
+    }
+
+    async fn hosted_tools_list(&self) -> Result<Vec<NotionMcpTool>, AppError> {
+        let (tools, _value, _bytes) = self.hosted_tools_list_with_value().await?;
+        Ok(tools)
+    }
+
+    async fn hosted_tools_list_with_value(
+        &self,
+    ) -> Result<(Vec<NotionMcpTool>, serde_json::Value, usize), AppError> {
+        let value = self
+            .jsonrpc_request(2, "tools/list", serde_json::json!({}))
             .await?;
-        self.capture_session_id(&response);
-        let bytes = response.content_length().unwrap_or(0) as usize;
-        let value = read_mcp_json(response).await?;
         ensure_jsonrpc_ok(&value, "notion_mcp_tools_list_failed")?;
         let tools = value
             .get("result")
@@ -552,10 +633,52 @@ impl McpHttpClient {
                 )
             })?
             .iter()
-            .filter_map(summarize_tool)
+            .filter_map(parse_hosted_tool)
             .collect();
-        let inventory_bytes = serde_json::to_vec(&value).map(|body| body.len()).unwrap_or(bytes);
-        Ok((tools, inventory_bytes))
+        let bytes = serde_json::to_vec(&value).map(|body| body.len()).unwrap_or(0);
+        Ok((tools, value, bytes))
+    }
+
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        let value = self
+            .jsonrpc_request(
+                3,
+                "tools/call",
+                serde_json::json!({
+                    "name": tool_name,
+                    "arguments": arguments,
+                }),
+            )
+            .await?;
+        ensure_jsonrpc_ok(&value, "notion_mcp_tool_call_failed")?;
+        value.get("result").cloned().ok_or_else(|| {
+            AppError::new(
+                "notion_mcp_tool_call_failed",
+                "Notion hosted MCP returned an incomplete tool result.",
+            )
+        })
+    }
+
+    async fn jsonrpc_request(
+        &self,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        let response = self
+            .post_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }))
+            .await?;
+        self.capture_session_id(&response);
+        read_mcp_json(response).await
     }
 
     async fn post_json(&self, body: serde_json::Value) -> Result<reqwest::Response, AppError> {
@@ -654,7 +777,7 @@ fn ensure_jsonrpc_ok(value: &serde_json::Value, code: &'static str) -> Result<()
     Ok(())
 }
 
-fn summarize_tool(value: &serde_json::Value) -> Option<NotionToolSummary> {
+fn parse_hosted_tool(value: &serde_json::Value) -> Option<NotionMcpTool> {
     let name = value.get("name")?.as_str()?.to_string();
     let description = value
         .get("description")
@@ -662,11 +785,23 @@ fn summarize_tool(value: &serde_json::Value) -> Option<NotionToolSummary> {
         .map(str::trim)
         .filter(|description| !description.is_empty())
         .map(truncate_description);
-    Some(NotionToolSummary {
-        write_class: classify_tool(&name).to_string(),
+    let input_schema = value
+        .get("inputSchema")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
+    Some(NotionMcpTool {
         name,
         description,
+        input_schema,
     })
+}
+
+fn summarize_tool(tool: &NotionMcpTool) -> NotionToolSummary {
+    NotionToolSummary {
+        write_class: classify_tool(&tool.name).to_string(),
+        name: tool.name.clone(),
+        description: tool.description.clone(),
+    }
 }
 
 fn truncate_description(description: &str) -> String {
@@ -676,6 +811,12 @@ fn truncate_description(description: &str) -> String {
         truncated.push_str("...");
     }
     truncated
+}
+
+fn tool_allowed_for_hermes(name: &str) -> bool {
+    NOTION_READ_TOOL_ALLOWLIST
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(name))
 }
 
 fn classify_tool(name: &str) -> &'static str {
