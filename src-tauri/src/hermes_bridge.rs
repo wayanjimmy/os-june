@@ -9538,7 +9538,7 @@ async fn handle_june_provider_connection(
             write_json_response(&mut stream, 200, recorder_status_body()).await?;
         }
         ("GET", "/v1/browser/status") => {
-            handle_browser_status(&mut stream, &state).await?;
+            handle_browser_status(&mut stream, &state, browser_context).await?;
         }
         ("POST", "/v1/browser/execute") => {
             handle_browser_execute(&mut stream, &state, browser_context, &request.body).await?;
@@ -10409,17 +10409,31 @@ fn recorder_status_body() -> serde_json::Value {
     }
 }
 
-/// `GET /v1/browser/status`. The dedicated token upstream prevents MCP
-/// subprocess cross-talk; the Browser access grant checked here is the
-/// authorization gate. With the grant off the broker refuses even the correct
-/// browser token (403), so `june_browser` never serves browser surface without
-/// the stored grant. With it on, it returns a small status describing the
-/// enabled state and active session count.
+/// `GET /v1/browser/status`. The dedicated credential upstream prevents MCP
+/// subprocess cross-talk and selects the caller context. Status re-checks the
+/// matching attended grant or per-routine opt-in plus the remote transport
+/// policy, and reports only sessions owned by that context.
 async fn handle_browser_status(
     stream: &mut tokio::net::TcpStream,
     state: &ProviderProxyState,
+    authenticated_context: Option<BrowserCallerContext>,
 ) -> io::Result<()> {
-    if !state.browser_broker.is_enabled() {
+    let Some(authenticated_context) = authenticated_context else {
+        return write_json_response(
+            stream,
+            403,
+            serde_json::json!({
+                "success": false,
+                "message": "Browser use is unavailable because the caller context could not be verified.",
+                "errorCode": "browser_context_unknown",
+            }),
+        )
+        .await;
+    };
+    let broker_context = authenticated_context.broker_context();
+    if matches!(&authenticated_context, BrowserCallerContext::Attended)
+        && !state.browser_broker.is_enabled_for(&broker_context)
+    {
         return write_json_response(
             stream,
             403,
@@ -10431,15 +10445,47 @@ async fn handle_browser_status(
         )
         .await;
     }
-    write_json_response(stream, 200, browser_status_body(state)).await
+    if !state
+        .browser_broker
+        .is_transport_enabled_for(&broker_context)
+    {
+        return write_json_response(
+            stream,
+            503,
+            serde_json::json!({
+                "success": false,
+                "message": "This browser capability is temporarily disabled.",
+                "errorCode": "browser_transport_disabled_remotely",
+            }),
+        )
+        .await;
+    }
+    if matches!(&authenticated_context, BrowserCallerContext::Routine(_))
+        && !state.browser_broker.is_enabled_for(&broker_context)
+    {
+        return write_json_response(
+            stream,
+            403,
+            serde_json::json!({
+                "success": false,
+                "message": "This routine has not been granted Browser use.",
+                "errorCode": "browser_routine_not_opted_in",
+            }),
+        )
+        .await;
+    }
+    write_json_response(stream, 200, browser_status_body(state, &broker_context)).await
 }
 
-fn browser_status_body(state: &ProviderProxyState) -> serde_json::Value {
+fn browser_status_body(
+    state: &ProviderProxyState,
+    context: &BrowserBrokerContext,
+) -> serde_json::Value {
     serde_json::json!({
         "success": true,
         "data": {
             "enabled": true,
-            "activeSessions": state.browser_broker.active_session_count(),
+            "activeSessions": state.browser_broker.active_session_count_for(context),
         }
     })
 }
@@ -10580,9 +10626,10 @@ async fn handle_browser_execute(
                 | "browser_action_declined"
                 | "browser_action_not_executed"
                 | "browser_approval_expired" => 400,
-                "extension_not_paired" | "browser_transport_unavailable" | "browser_not_found" => {
-                    503
-                }
+                "extension_not_paired"
+                | "browser_transport_unavailable"
+                | "browser_transport_disabled_remotely"
+                | "browser_not_found" => 503,
                 _ => 502,
             };
             write_json_response(
@@ -12111,6 +12158,7 @@ fn http_status_reason(status: u16) -> &'static str {
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
+        503 => "Service Unavailable",
         _ => "OK",
     }
 }
@@ -13169,14 +13217,21 @@ mod tests {
         response
     }
 
-    async fn browser_status_response_with_broker(broker: Arc<BrowserBroker>) -> String {
-        // Always send the CORRECT browser token: the grant, not the token, is
-        // what the route gates on here.
+    async fn browser_status_response_with_broker_and_token(
+        broker: Arc<BrowserBroker>,
+        token: &str,
+    ) -> String {
         browser_proxy_response_with_broker(
             broker,
-            "GET /v1/browser/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer browser-token\r\nContent-Length: 0\r\n\r\n",
+            &format!(
+                "GET /v1/browser/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+            ),
         )
         .await
+    }
+
+    async fn browser_status_response_with_broker(broker: Arc<BrowserBroker>) -> String {
+        browser_status_response_with_broker_and_token(broker, "attended-browser-token").await
     }
 
     async fn browser_status_response(grant_enabled: bool) -> String {
@@ -13207,6 +13262,116 @@ mod tests {
         );
         assert!(response.contains("\"enabled\":true"));
         assert!(response.contains("\"activeSessions\":0"));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_status_uses_its_own_opt_in_without_attended_access() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        let broker = broker_for_access_flag_with_routine(&access_flag, true);
+
+        let response = browser_status_response_with_broker_and_token(broker, "browser-token").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "an opted-in routine must not depend on attended Browser access: {response}"
+        );
+        assert!(response.contains("\"enabled\":true"));
+        assert!(response.contains("\"activeSessions\":0"));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_status_refuses_a_disabled_routine_even_with_attended_access() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag_with_routine(&access_flag, false);
+
+        let response = browser_status_response_with_broker_and_token(broker, "browser-token").await;
+
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+        assert!(response.contains("browser_routine_not_opted_in"));
+    }
+
+    #[tokio::test]
+    async fn attended_browser_status_respects_the_remote_transport_policy() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: false,
+                managed_enabled: true,
+            })
+            .await;
+
+        let response = browser_status_response_with_broker(broker).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{response}"
+        );
+        assert!(response.contains("browser_transport_disabled_remotely"));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_status_respects_the_remote_transport_policy() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        let broker = broker_for_access_flag_with_routine(&access_flag, true);
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: true,
+                managed_enabled: false,
+            })
+            .await;
+
+        let response = browser_status_response_with_broker_and_token(broker, "browser-token").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{response}"
+        );
+        assert!(response.contains("browser_transport_disabled_remotely"));
+    }
+
+    #[tokio::test]
+    async fn browser_status_counts_only_sessions_owned_by_its_context() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-2".to_string(),
+            server_name: "june_browser_routine_2".to_string(),
+            token: "browser-token-2".to_string(),
+            enabled: true,
+        });
+        broker.insert_test_session_for("attended-1", BrowserBrokerContext::Attended);
+        broker.insert_test_session_for(
+            "routine-1-a",
+            BrowserBrokerContext::Routine("routine-1".to_string()),
+        );
+        broker.insert_test_session_for(
+            "routine-1-b",
+            BrowserBrokerContext::Routine("routine-1".to_string()),
+        );
+        broker.insert_test_session_for(
+            "routine-2-a",
+            BrowserBrokerContext::Routine("routine-2".to_string()),
+        );
+
+        let attended = browser_status_response_with_broker(Arc::clone(&broker)).await;
+        let routine_1 =
+            browser_status_response_with_broker_and_token(Arc::clone(&broker), "browser-token")
+                .await;
+        let routine_2 =
+            browser_status_response_with_broker_and_token(broker, "browser-token-2").await;
+
+        assert!(attended.contains("\"activeSessions\":1"), "{attended}");
+        assert!(routine_1.contains("\"activeSessions\":2"), "{routine_1}");
+        assert!(routine_2.contains("\"activeSessions\":1"), "{routine_2}");
     }
 
     #[tokio::test]

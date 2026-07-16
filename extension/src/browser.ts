@@ -304,17 +304,37 @@ async function mainFrameId(tabId: number): Promise<string | null> {
 
 function actionNavigationWaiter(tabId: number, frameId: string) {
   let settled = false;
+  let navigationStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let resolvePromise: (navigated: boolean) => void = () => undefined;
-  const promise = new Promise<boolean>((resolve) => {
+  let rejectPromise: (error: unknown) => void = () => undefined;
+  const promise = new Promise<boolean>((resolve, reject) => {
     resolvePromise = resolve;
+    rejectPromise = reject;
   });
+  const cleanup = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    debuggerApi().onEvent.removeListener(listener);
+  };
   const finish = (navigated: boolean) => {
     if (settled) return;
     settled = true;
-    if (timer !== undefined) clearTimeout(timer);
-    debuggerApi().onEvent.removeListener(listener);
+    cleanup();
     resolvePromise(navigated);
+  };
+  const fail = (error: unknown) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    rejectPromise(error);
+  };
+  const waitForCommit = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(
+      () =>
+        fail(toolError("navigation_timeout", "The page did not commit its navigation in time.")),
+      15_000,
+    );
   };
   const listener = (
     source: { tabId?: number },
@@ -328,12 +348,11 @@ function actionNavigationWaiter(tabId: number, frameId: string) {
         : typeof (params?.frame as { id?: unknown } | undefined)?.id === "string"
           ? ((params?.frame as { id: string }).id ?? null)
           : null;
-    if (
-      eventFrameId === frameId &&
-      ["Page.frameStartedLoading", "Page.frameNavigated", "Page.navigatedWithinDocument"].includes(
-        method,
-      )
-    ) {
+    if (eventFrameId !== frameId) return;
+    if (method === "Page.frameStartedLoading") {
+      navigationStarted = true;
+      if (timer !== undefined) waitForCommit();
+    } else if (method === "Page.frameNavigated" || method === "Page.navigatedWithinDocument") {
       finish(true);
     }
   };
@@ -341,7 +360,13 @@ function actionNavigationWaiter(tabId: number, frameId: string) {
   return {
     cancel: () => finish(false),
     wait: () => {
-      if (!settled && timer === undefined) timer = setTimeout(() => finish(false), 500);
+      if (!settled && timer === undefined) {
+        if (navigationStarted) {
+          waitForCommit();
+        } else {
+          timer = setTimeout(() => finish(false), 500);
+        }
+      }
       return promise;
     },
   };

@@ -368,6 +368,8 @@ describe("attended reference actions", () => {
 
   it("waits for action-triggered navigation before taking the next snapshot", async () => {
     const { controller, emitDebuggerEvent, sendCommand } = interactionController();
+    let committed = false;
+    let earlyReadyChecks = 0;
     let readyChecks = 0;
     sendCommand.mockImplementation(
       async (_target: unknown, method: string, params?: Record<string, unknown>) => {
@@ -378,15 +380,25 @@ describe("attended reference actions", () => {
         if (method === "Runtime.callFunctionOn") {
           if (String(params?.functionDeclaration ?? "").includes("operation, value, expected")) {
             emitDebuggerEvent(10, "Page.frameStartedLoading", { frameId: "frame-10" });
+            setTimeout(() => {
+              committed = true;
+              emitDebuggerEvent(10, "Page.frameNavigated", {
+                frame: { id: "frame-10", url: "https://example.com/next" },
+              });
+            }, 0);
             return { result: { value: { status: "ok" } } };
           }
           return { result: { value: { element, url: "https://example.com/checkout" } } };
         }
         if (method === "Runtime.evaluate") {
+          if (!committed) earlyReadyChecks += 1;
           readyChecks += 1;
           return { result: { value: "complete" } };
         }
-        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        if (method === "Accessibility.getFullAXTree") {
+          expect(committed).toBe(true);
+          return { nodes: [] };
+        }
         return {};
       },
     );
@@ -400,7 +412,9 @@ describe("attended reference actions", () => {
           expected: element,
         }),
       ),
-    ).resolves.toMatchObject({ response: { success: true, data: { epoch: 1 } } });
+    ).resolves.toMatchObject({ response: { success: true } });
+    expect(committed).toBe(true);
+    expect(earlyReadyChecks).toBe(0);
     expect(readyChecks).toBeGreaterThan(0);
   });
 

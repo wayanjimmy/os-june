@@ -667,8 +667,40 @@ impl BrowserBroker {
                 .is_some_and(|path| path.exists())
     }
 
+    pub(crate) fn is_enabled_for(&self, context: &BrowserBrokerContext) -> bool {
+        let state = self.lock();
+        let routine_id = match context {
+            BrowserBrokerContext::Attended => None,
+            BrowserBrokerContext::Routine(job_id) => Some(job_id.as_str()),
+        };
+        context_access_enabled(&state, context.transport_kind(), routine_id)
+    }
+
+    pub(crate) fn is_transport_enabled_for(&self, context: &BrowserBrokerContext) -> bool {
+        self.lock()
+            .transport_policy
+            .enabled(context.transport_kind())
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_session_count(&self) -> usize {
         self.lock().sessions.len()
+    }
+
+    pub(crate) fn active_session_count_for(&self, context: &BrowserBrokerContext) -> usize {
+        let state = self.lock();
+        let routine_id = match context {
+            BrowserBrokerContext::Attended => None,
+            BrowserBrokerContext::Routine(job_id) => Some(job_id.as_str()),
+        };
+        let kind = context.transport_kind();
+        state
+            .sessions
+            .values()
+            .filter(|session| {
+                session.transport_kind == kind && session.routine_id.as_deref() == routine_id
+            })
+            .count()
     }
 
     pub(crate) async fn release_tab(&self, tab_id: i64) -> Result<bool, AppError> {
@@ -1740,9 +1772,23 @@ impl BrowserBroker {
 
     #[cfg(test)]
     pub(crate) fn insert_test_session(&self, id: &str) {
-        self.lock()
-            .sessions
-            .insert(id.to_string(), BrowserSession::default());
+        self.insert_test_session_for(id, BrowserBrokerContext::Attended);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_session_for(&self, id: &str, context: BrowserBrokerContext) {
+        let routine_id = match &context {
+            BrowserBrokerContext::Attended => None,
+            BrowserBrokerContext::Routine(job_id) => Some(job_id.clone()),
+        };
+        self.lock().sessions.insert(
+            id.to_string(),
+            BrowserSession {
+                transport_kind: context.transport_kind(),
+                routine_id,
+                ..BrowserSession::default()
+            },
+        );
     }
 }
 
