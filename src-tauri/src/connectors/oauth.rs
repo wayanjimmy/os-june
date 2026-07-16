@@ -17,6 +17,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
         OnceLock,
@@ -211,6 +212,35 @@ pub(crate) async fn loopback_authorize(
     port: LoopbackPort,
     build_auth_url: impl FnOnce(&str, &str, &str) -> String,
 ) -> Result<LoopbackAuthorization, AppError> {
+    loopback_authorize_async(
+        flow,
+        provider_label,
+        port,
+        |redirect_uri, challenge, csrf| {
+            std::future::ready(Ok(build_auth_url(
+                redirect_uri.as_str(),
+                challenge.as_str(),
+                csrf.as_str(),
+            )))
+        },
+    )
+    .await
+}
+
+/// Variant of [`loopback_authorize`] for providers whose dynamic client
+/// registration must happen after June knows the exact loopback port it bound.
+/// The callback receives the selected redirect URI and returns the consent URL
+/// after any provider-specific preparation succeeds.
+pub(crate) async fn loopback_authorize_async<F, Fut>(
+    flow: &ConnectFlow,
+    provider_label: &str,
+    port: LoopbackPort,
+    build_auth_url: F,
+) -> Result<LoopbackAuthorization, AppError>
+where
+    F: FnOnce(String, String, String) -> Fut,
+    Fut: Future<Output = Result<String, AppError>>,
+{
     let flow_id = CONNECT_FLOW_ID.fetch_add(1, Ordering::Relaxed);
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
     {
@@ -242,7 +272,7 @@ pub(crate) async fn loopback_authorize(
         .map_err(|error| AppError::new("connector_loopback_bind_failed", error.to_string()))?
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let auth_url = build_auth_url(&redirect_uri, &challenge, &csrf);
+    let auth_url = build_auth_url(redirect_uri.clone(), challenge, csrf.clone()).await?;
 
     if cancel_rx.try_recv().is_ok() {
         return Err(AppError::new(

@@ -144,37 +144,34 @@ impl StoredDiscovery {
             && self.token_endpoint == discovery.token_endpoint
             && self.registration_endpoint == discovery.registration_endpoint
     }
-
-    fn loopback_redirect_uris(&self) -> Vec<String> {
-        loopback_redirect_uris()
-    }
 }
 
 impl StoredClientRegistration {
-    fn is_reusable_for(&self, discovery: &NotionMcpOAuthDiscoverySummary) -> bool {
+    fn is_reusable_for(
+        &self,
+        discovery: &NotionMcpOAuthDiscoverySummary,
+        redirect_uri: &str,
+    ) -> bool {
         self.discovery.matches(discovery)
             && !self.client_id.is_empty()
-            && self.redirect_uris == loopback_redirect_uris()
-            && self
-                .redirect_uris
-                .iter()
-                .all(|uri| loopback_port_from_redirect_uri(uri).is_some())
+            && self.registered_redirect_uris() == [redirect_uri]
+            && loopback_port_from_redirect_uri(redirect_uri).is_some()
+    }
+
+    fn registered_redirect_uris(&self) -> Vec<&str> {
+        if !self.redirect_uri.is_empty() {
+            return vec![self.redirect_uri.as_str()];
+        }
+        self.redirect_uris.iter().map(String::as_str).collect()
     }
 }
 
-impl ClientRegistration {
-    fn loopback_ports(&self) -> Vec<u16> {
-        self.redirect_uris
-            .iter()
-            .filter_map(|uri| loopback_port_from_redirect_uri(uri))
-            .collect()
-    }
+fn loopback_ports() -> Vec<u16> {
+    (LOOPBACK_PORT_RANGE_START..=LOOPBACK_PORT_RANGE_END).collect()
 }
 
-fn loopback_redirect_uris() -> Vec<String> {
-    (LOOPBACK_PORT_RANGE_START..=LOOPBACK_PORT_RANGE_END)
-        .map(|port| format!("http://127.0.0.1:{port}/callback"))
-        .collect()
+fn loopback_redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/callback")
 }
 
 fn loopback_port_from_redirect_uri(uri: &str) -> Option<u16> {
@@ -193,6 +190,9 @@ struct StoredClientRegistration {
     client_secret: Option<String>,
     #[serde(default)]
     #[zeroize(skip)]
+    redirect_uri: String,
+    #[serde(default)]
+    #[zeroize(skip)]
     redirect_uris: Vec<String>,
     #[zeroize(skip)]
     discovery: StoredDiscovery,
@@ -205,7 +205,7 @@ struct ClientRegistration {
     #[serde(default)]
     client_secret: Option<String>,
     #[zeroize(skip)]
-    redirect_uris: Vec<String>,
+    redirect_uri: String,
     #[serde(default)]
     token_endpoint_auth_method: Option<String>,
 }
@@ -318,53 +318,83 @@ pub struct NotionMcpPhase0Report {
 pub async fn connect(flow: &ConnectFlow) -> Result<NotionMcpOAuthConnection, AppError> {
     let discovery = discover().await?;
     let existing_registration = load_registration().await?;
-    let (registration, registration_reused) = match existing_registration
-        .as_ref()
-        .filter(|stored| stored.is_reusable_for(&discovery))
-    {
-        Some(stored) if !stored.client_id.is_empty() => (
-            ClientRegistration {
-                client_id: stored.client_id.clone(),
-                client_secret: stored.client_secret.clone(),
-                redirect_uris: stored.redirect_uris.clone(),
-                token_endpoint_auth_method: None,
-            },
-            true,
-        ),
-        _ => {
-            let registration = register_client(&discovery).await?;
-            store_registration(&StoredClientRegistration {
-                client_id: registration.client_id.clone(),
-                client_secret: registration.client_secret.clone(),
-                redirect_uris: registration.redirect_uris.clone(),
-                discovery: StoredDiscovery {
-                    issuer: discovery.issuer.clone(),
-                    authorization_endpoint: discovery.authorization_endpoint.clone(),
-                    token_endpoint: discovery.token_endpoint.clone(),
-                    registration_endpoint: discovery.registration_endpoint.clone(),
-                    revocation_endpoint: discovery.revocation_endpoint.clone(),
-                },
-            })
-            .await?;
-            (registration, false)
-        }
-    };
-    let client_id_for_url = registration.client_id.clone();
-    let authorization = oauth::loopback_authorize(
+    let selected_registration = Arc::new(std::sync::Mutex::new(None::<(ClientRegistration, bool)>));
+    let registration_slot = Arc::clone(&selected_registration);
+    let discovery_for_auth = discovery.clone();
+    let authorization = oauth::loopback_authorize_async(
         flow,
         "Notion",
-        LoopbackPort::Candidates(registration.loopback_ports()),
-        |redirect_uri, code_challenge, state| {
-            build_authorize_url(
-                &discovery.authorization_endpoint,
-                &client_id_for_url,
-                redirect_uri,
-                code_challenge,
-                state,
-            )
+        LoopbackPort::Candidates(loopback_ports()),
+        move |redirect_uri, code_challenge, state| {
+            let existing_registration = existing_registration.clone();
+            let discovery = discovery_for_auth.clone();
+            let registration_slot = Arc::clone(&registration_slot);
+            async move {
+                let (registration, registration_reused) = match existing_registration
+                    .as_ref()
+                    .filter(|stored| stored.is_reusable_for(&discovery, &redirect_uri))
+                {
+                    Some(stored) => (
+                        ClientRegistration {
+                            client_id: stored.client_id.clone(),
+                            client_secret: stored.client_secret.clone(),
+                            redirect_uri: redirect_uri.clone(),
+                            token_endpoint_auth_method: None,
+                        },
+                        true,
+                    ),
+                    _ => {
+                        let registration = register_client(&discovery, &redirect_uri).await?;
+                        store_registration(&StoredClientRegistration {
+                            client_id: registration.client_id.clone(),
+                            client_secret: registration.client_secret.clone(),
+                            redirect_uri: registration.redirect_uri.clone(),
+                            redirect_uris: Vec::new(),
+                            discovery: StoredDiscovery {
+                                issuer: discovery.issuer.clone(),
+                                authorization_endpoint: discovery.authorization_endpoint.clone(),
+                                token_endpoint: discovery.token_endpoint.clone(),
+                                registration_endpoint: discovery.registration_endpoint.clone(),
+                                revocation_endpoint: discovery.revocation_endpoint.clone(),
+                            },
+                        })
+                        .await?;
+                        (registration, false)
+                    }
+                };
+                let auth_url = build_authorize_url(
+                    &discovery.authorization_endpoint,
+                    &registration.client_id,
+                    &redirect_uri,
+                    &code_challenge,
+                    &state,
+                );
+                *registration_slot.lock().map_err(|_| {
+                    AppError::new(
+                        "notion_mcp_oauth_registration_state_unavailable",
+                        "The Notion hosted MCP registration state is unavailable.",
+                    )
+                })? = Some((registration, registration_reused));
+                Ok(auth_url)
+            }
         },
     )
     .await?;
+    let (registration, registration_reused) = selected_registration
+        .lock()
+        .map_err(|_| {
+            AppError::new(
+                "notion_mcp_oauth_registration_state_unavailable",
+                "The Notion hosted MCP registration state is unavailable.",
+            )
+        })?
+        .clone()
+        .ok_or_else(|| {
+            AppError::new(
+                "notion_mcp_oauth_registration_state_unavailable",
+                "The Notion hosted MCP registration was not prepared.",
+            )
+        })?;
 
     let tokens = exchange_code(
         &discovery,
@@ -717,6 +747,7 @@ async fn discover() -> Result<NotionMcpOAuthDiscoverySummary, AppError> {
 
 async fn register_client(
     discovery: &NotionMcpOAuthDiscoverySummary,
+    redirect_uri: &str,
 ) -> Result<ClientRegistration, AppError> {
     let endpoint = discovery.registration_endpoint.as_deref().ok_or_else(|| {
         AppError::new(
@@ -724,12 +755,11 @@ async fn register_client(
             "Notion hosted MCP OAuth did not advertise dynamic client registration.",
         )
     })?;
-    let redirect_uris = loopback_redirect_uris();
     let response = notion_http_client()
         .post(endpoint)
         .json(&json!({
             "client_name": "June Notion hosted MCP Phase 0",
-            "redirect_uris": redirect_uris,
+            "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none"
@@ -772,7 +802,7 @@ async fn register_client(
     Ok(ClientRegistration {
         client_id: registration.client_id.clone(),
         client_secret: registration.client_secret.clone(),
-        redirect_uris,
+        redirect_uri: redirect_uri.to_string(),
         token_endpoint_auth_method: registration.token_endpoint_auth_method.clone(),
     })
 }
@@ -900,7 +930,7 @@ async fn refresh_stored_token(
     let registration = ClientRegistration {
         client_id: stored.client_id.clone(),
         client_secret: stored.client_secret.clone(),
-        redirect_uris: stored.discovery.loopback_redirect_uris(),
+        redirect_uri: String::new(),
         token_endpoint_auth_method: None,
     };
     let mut refreshed =
@@ -1043,7 +1073,8 @@ async fn load_registration() -> Result<Option<StoredClientRegistration>, AppErro
     Ok(Some(StoredClientRegistration {
         client_id: legacy.client_id.clone(),
         client_secret: legacy.client_secret.clone(),
-        redirect_uris: legacy.discovery.loopback_redirect_uris(),
+        redirect_uri: String::new(),
+        redirect_uris: Vec::new(),
         discovery: legacy.discovery.clone(),
     }))
 }
@@ -1302,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_registration_reuse_requires_current_redirect_set() {
+    fn stored_registration_reuse_requires_exact_selected_redirect_uri() {
         let discovery = NotionMcpOAuthDiscoverySummary {
             protected_resource: MCP_SERVER_URL.to_string(),
             issuer: NOTION_ORIGIN.to_string(),
@@ -1319,17 +1350,21 @@ mod tests {
             registration_endpoint: discovery.registration_endpoint.clone(),
             revocation_endpoint: discovery.revocation_endpoint.clone(),
         };
+        let selected_redirect_uri = "http://127.0.0.1:44751/callback";
         let reusable = StoredClientRegistration {
             client_id: "client".to_string(),
             client_secret: None,
-            redirect_uris: loopback_redirect_uris(),
+            redirect_uri: selected_redirect_uri.to_string(),
+            redirect_uris: Vec::new(),
             discovery: stored_discovery.clone(),
         };
-        assert!(reusable.is_reusable_for(&discovery));
+        assert!(reusable.is_reusable_for(&discovery, selected_redirect_uri));
+        assert!(!reusable.is_reusable_for(&discovery, "http://127.0.0.1:44752/callback"));
 
         let old_three_port_registration = StoredClientRegistration {
             client_id: "client".to_string(),
             client_secret: None,
+            redirect_uri: String::new(),
             redirect_uris: vec![
                 "http://127.0.0.1:44751/callback".to_string(),
                 "http://127.0.0.1:44752/callback".to_string(),
@@ -1337,15 +1372,16 @@ mod tests {
             ],
             discovery: stored_discovery.clone(),
         };
-        assert!(!old_three_port_registration.is_reusable_for(&discovery));
+        assert!(!old_three_port_registration.is_reusable_for(&discovery, selected_redirect_uri));
 
         let malformed_registration = StoredClientRegistration {
             client_id: "client".to_string(),
             client_secret: None,
-            redirect_uris: vec!["http://127.0.0.1:44851/callback".to_string()],
+            redirect_uri: "http://127.0.0.1:44851/callback".to_string(),
+            redirect_uris: Vec::new(),
             discovery: stored_discovery,
         };
-        assert!(!malformed_registration.is_reusable_for(&discovery));
+        assert!(!malformed_registration.is_reusable_for(&discovery, selected_redirect_uri));
     }
 
     #[test]
@@ -1362,6 +1398,34 @@ mod tests {
             }
         });
         let registration: StoredClientRegistration = serde_json::from_value(raw).unwrap();
+        assert!(registration.redirect_uri.is_empty());
         assert!(registration.redirect_uris.is_empty());
+    }
+
+    #[test]
+    fn legacy_combined_registration_migration_is_not_reusable() {
+        let discovery = NotionMcpOAuthDiscoverySummary {
+            protected_resource: MCP_SERVER_URL.to_string(),
+            issuer: NOTION_ORIGIN.to_string(),
+            authorization_endpoint: format!("{NOTION_ORIGIN}/authorize"),
+            token_endpoint: format!("{NOTION_ORIGIN}/token"),
+            registration_endpoint: Some(format!("{NOTION_ORIGIN}/register")),
+            revocation_endpoint: None,
+            supports_s256: true,
+        };
+        let stored = StoredClientRegistration {
+            client_id: "legacy-client".to_string(),
+            client_secret: None,
+            redirect_uri: String::new(),
+            redirect_uris: Vec::new(),
+            discovery: StoredDiscovery {
+                issuer: discovery.issuer.clone(),
+                authorization_endpoint: discovery.authorization_endpoint.clone(),
+                token_endpoint: discovery.token_endpoint.clone(),
+                registration_endpoint: discovery.registration_endpoint.clone(),
+                revocation_endpoint: discovery.revocation_endpoint.clone(),
+            },
+        };
+        assert!(!stored.is_reusable_for(&discovery, "http://127.0.0.1:44751/callback"));
     }
 }
