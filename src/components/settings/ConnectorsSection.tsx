@@ -45,10 +45,10 @@ const PROVIDER_BLURBS = {
 } as const;
 
 const NOTION_CONNECTOR_BLURB =
-  "Connect Notion through its hosted MCP preview. June stores the credential in your Keychain but will not read pages or expose Notion tools to the agent yet.";
+  "Hosted read-only preview. Notion may allow access beyond selected pages.";
 
 const NOTION_CONNECTED_BLURB =
-  "Connected for hosted MCP auth preview. Selected-page access is not verified, and June is not reading Notion content yet.";
+  "Read-only preview connected. Notion may allow access beyond selected pages.";
 
 function featureSummary(account: ConnectorAccount): string {
   const features = grantedFeatureLabels(account.scopes);

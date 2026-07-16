@@ -2,7 +2,7 @@
 
 - **Mode:** CTO
 - **Date:** 2026-07-13
-- **Status:** Proposed; connect-only hosted MCP preview in implementation, selected-resource scoping intentionally out of scope for this pass
+- **Status:** Proposed; hosted MCP connector preview in implementation, selected-resource scoping intentionally out of scope for this pass
 - **PRD:** [notion-prd.md](notion-prd.md)
 - **Issue:** JUN-283
 

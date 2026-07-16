@@ -75,13 +75,13 @@ describe("ConnectorsSection", () => {
     expect(screen.getByText(/mail and calendar for briefings/i)).toBeInTheDocument();
   });
 
-  it("lists Notion as a connectable hosted MCP preview", async () => {
+  it("lists Notion as a connectable read-only preview", async () => {
     render(<ConnectorsSection />);
 
     const connect = await findEnabledConnect("Connect Notion");
     expect(screen.getByText("Notion")).toBeInTheDocument();
     expect(screen.getByText("Preview")).toBeInTheDocument();
-    expect(screen.getByText(/hosted MCP preview/i)).toBeInTheDocument();
+    expect(screen.getByText(/Notion may allow access beyond selected pages/i)).toBeInTheDocument();
 
     await userEvent.click(connect);
 
@@ -102,7 +102,7 @@ describe("ConnectorsSection", () => {
     render(<ConnectorsSection />);
 
     expect(await screen.findByText("Preview connected")).toBeInTheDocument();
-    expect(screen.getByText(/selected-page access is not verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/Read-only preview connected/i)).toBeInTheDocument();
 
     mocks.connectorsList.mockResolvedValue([]);
     await userEvent.click(screen.getByRole("button", { name: "Disconnect Notion" }));
