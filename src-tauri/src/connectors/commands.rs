@@ -133,6 +133,13 @@ pub async fn notion_mcp_oauth_list_tools(
     notion_mcp_oauth::list_tools().await
 }
 
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn notion_mcp_oauth_phase0_report(
+) -> Result<notion_mcp_oauth::NotionMcpPhase0Report, AppError> {
+    notion_mcp_oauth::phase0_report().await
+}
+
 // --- Notion ADR 0024 prototype ----------------------------------------------
 
 #[derive(Debug, Deserialize)]

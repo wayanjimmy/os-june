@@ -1,16 +1,27 @@
-//! Dev-only Notion hosted MCP OAuth spike for validating ADR 0025.
+//! Dev-only Notion hosted MCP Phase 0 prototype for validating ADR 0025.
 //!
-//! This is not the production Notion connector. It proves the narrow Phase 0
-//! questions: dynamic client registration, localhost PKCE OAuth, Keychain-only
-//! custody, and a Rust-owned hosted MCP `tools/list` call. Hermes is not wired
-//! to `https://mcp.notion.com/mcp` by this module.
+//! This is not the production Notion connector. It deliberately exposes a small
+//! debug command surface that lets a human verify the hard architecture
+//! questions: OAuth/PKCE, dynamic-client registration reuse, Keychain-only
+//! custody, an `rmcp` Streamable HTTP client owned by Rust, live inventory
+//! capture, fail-closed policy classification, and the current selected-resource
+//! scoping risk. Hermes is not wired to `https://mcp.notion.com/mcp` here.
 
 use crate::domain::types::AppError;
 use reqwest::StatusCode;
+use rmcp::{
+    model::ClientInfo,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
-    sync::OnceLock,
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -19,7 +30,9 @@ use super::oauth::{self, ConnectFlow, LoopbackPort};
 
 const KEYCHAIN_SERVICE: &str = "co.opensoftware.june.notion";
 const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.notion";
-const ACCOUNT_ID: &str = "notion-mcp-oauth-spike";
+const TOKEN_ACCOUNT_ID: &str = "notion-mcp-oauth-phase0-token";
+const REGISTRATION_ACCOUNT_ID: &str = "notion-mcp-oauth-phase0-registration";
+const LEGACY_ACCOUNT_ID: &str = "notion-mcp-oauth-spike";
 const MCP_SERVER_URL: &str = "https://mcp.notion.com/mcp";
 const PROTECTED_RESOURCE_METADATA_URL: &str =
     "https://mcp.notion.com/.well-known/oauth-protected-resource";
@@ -28,8 +41,12 @@ const AUTH_SERVER_METADATA_URL: &str =
 const NOTION_ORIGIN: &str = "https://mcp.notion.com";
 const LOOPBACK_PORTS: &[u16] = &[44751, 44752, 44753];
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const ACCESS_TOKEN_EXPIRY_BUFFER_SECS: i64 = 60;
+const INVENTORY_RESPONSE_CAP_BYTES: usize = 512 * 1024;
+const ACCEPTED_SCHEMA_FINGERPRINTS: &[(&str, &str)] = &[];
 
 static NOTION_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn notion_http_client() -> &'static reqwest::Client {
     NOTION_HTTP_CLIENT.get_or_init(|| {
@@ -39,10 +56,26 @@ fn notion_http_client() -> &'static reqwest::Client {
             .timeout(HTTP_TIMEOUT)
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent("os-june/0.1 notion-mcp-oauth-spike")
+            .user_agent("os-june/0.1 notion-mcp-phase0")
             .build()
             .expect("build hardened Notion MCP HTTP client")
     })
+}
+
+fn refresh_lock() -> &'static tokio::sync::Mutex<()> {
+    REFRESH_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn rmcp_http_client() -> reqwest13::Client {
+    reqwest13::Client::builder()
+        .no_proxy()
+        .redirect(reqwest13::redirect::Policy::none())
+        .timeout(HTTP_TIMEOUT)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .user_agent("os-june/0.1 notion-mcp-phase0-rmcp")
+        .build()
+        .expect("build hardened rmcp Notion MCP HTTP client")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,6 +136,35 @@ struct StoredDiscovery {
     revocation_endpoint: Option<String>,
 }
 
+impl StoredDiscovery {
+    fn matches(&self, discovery: &NotionMcpOAuthDiscoverySummary) -> bool {
+        self.issuer == discovery.issuer
+            && self.authorization_endpoint == discovery.authorization_endpoint
+            && self.token_endpoint == discovery.token_endpoint
+            && self.registration_endpoint == discovery.registration_endpoint
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase")]
+struct StoredClientRegistration {
+    client_id: String,
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[zeroize(skip)]
+    discovery: StoredDiscovery,
+}
+
+#[derive(Debug, Clone, Serialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase")]
+struct ClientRegistration {
+    client_id: String,
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[serde(default)]
+    token_endpoint_auth_method: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct ClientRegistrationResponse {
     client_id: String,
@@ -137,6 +199,7 @@ pub struct NotionMcpOAuthConnection {
     pub client_id_present: bool,
     pub access_token_present: bool,
     pub refresh_token_present: bool,
+    pub registration_reused: bool,
     pub expires_at_epoch_seconds: Option<i64>,
     pub discovery: NotionMcpOAuthDiscoverySummary,
 }
@@ -150,26 +213,95 @@ pub struct NotionMcpOAuthStatus {
     pub access_token_present: bool,
     pub refresh_token_present: bool,
     pub expires_at_epoch_seconds: Option<i64>,
+    pub keychain_only: bool,
+    pub transport: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotionMcpPolicyClassification {
+    AllowedReadExactPageCandidate,
+    RejectedUnconstrainedRead,
+    RejectedWrite,
+    RejectedUnknown,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotionMcpToolSummary {
-    pub name: String,
+    pub hosted_name: String,
+    pub june_tool_name: Option<String>,
     pub description_present: bool,
     pub input_schema_present: bool,
+    pub output_schema_present: bool,
+    pub annotations_present: bool,
+    pub schema_fingerprint: String,
+    pub classification: NotionMcpPolicyClassification,
+    pub enabled: bool,
+    pub selected_resource_pre_call_constraint: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotionMcpToolListResult {
     pub tool_count: usize,
+    pub transport: &'static str,
+    pub endpoint: &'static str,
+    pub inventory_bytes: usize,
+    pub over_cap_rejected: bool,
     pub tools: Vec<NotionMcpToolSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionMcpPhase0Report {
+    pub connected: bool,
+    pub endpoint: &'static str,
+    pub transport: &'static str,
+    pub keychain_service: &'static str,
+    pub credential_custody: &'static str,
+    pub oauth_lifecycle: BTreeMap<&'static str, &'static str>,
+    pub standards_client: BTreeMap<&'static str, &'static str>,
+    pub inventory_contract: BTreeMap<&'static str, &'static str>,
+    pub selected_resource_matrix: BTreeMap<&'static str, &'static str>,
+    pub approval_proof: BTreeMap<&'static str, &'static str>,
+    pub output_observability: BTreeMap<&'static str, &'static str>,
+    pub provider_behavior: BTreeMap<&'static str, &'static str>,
+    pub current_recommendation: &'static str,
 }
 
 pub async fn connect(flow: &ConnectFlow) -> Result<NotionMcpOAuthConnection, AppError> {
     let discovery = discover().await?;
-    let registration = register_client(&discovery).await?;
+    let existing_registration = load_registration().await?;
+    let (registration, registration_reused) = match existing_registration
+        .as_ref()
+        .filter(|stored| stored.discovery.matches(&discovery))
+    {
+        Some(stored) if !stored.client_id.is_empty() => (
+            ClientRegistration {
+                client_id: stored.client_id.clone(),
+                client_secret: stored.client_secret.clone(),
+                token_endpoint_auth_method: None,
+            },
+            true,
+        ),
+        _ => {
+            let registration = register_client(&discovery).await?;
+            store_registration(&StoredClientRegistration {
+                client_id: registration.client_id.clone(),
+                client_secret: registration.client_secret.clone(),
+                discovery: StoredDiscovery {
+                    issuer: discovery.issuer.clone(),
+                    authorization_endpoint: discovery.authorization_endpoint.clone(),
+                    token_endpoint: discovery.token_endpoint.clone(),
+                    registration_endpoint: discovery.registration_endpoint.clone(),
+                    revocation_endpoint: discovery.revocation_endpoint.clone(),
+                },
+            })
+            .await?;
+            (registration, false)
+        }
+    };
     let client_id_for_url = registration.client_id.clone();
     let authorization = oauth::loopback_authorize(
         flow,
@@ -195,24 +327,7 @@ pub async fn connect(flow: &ConnectFlow) -> Result<NotionMcpOAuthConnection, App
         &authorization.redirect_uri,
     )
     .await?;
-    let expires_at_epoch_seconds = tokens
-        .expires_in
-        .map(|seconds| now_epoch_seconds() + seconds);
-    let stored = StoredNotionMcpOAuth {
-        client_id: registration.client_id.clone(),
-        client_secret: registration.client_secret.clone(),
-        access_token: tokens.access_token.clone(),
-        refresh_token: tokens.refresh_token.clone(),
-        expires_at_epoch_seconds,
-        token_type: tokens.token_type.clone(),
-        discovery: StoredDiscovery {
-            issuer: discovery.issuer.clone(),
-            authorization_endpoint: discovery.authorization_endpoint.clone(),
-            token_endpoint: discovery.token_endpoint.clone(),
-            registration_endpoint: discovery.registration_endpoint.clone(),
-            revocation_endpoint: discovery.revocation_endpoint.clone(),
-        },
-    };
+    let stored = stored_from_token_response(&discovery, &registration, tokens);
     store_token(&stored).await?;
 
     Ok(NotionMcpOAuthConnection {
@@ -221,6 +336,7 @@ pub async fn connect(flow: &ConnectFlow) -> Result<NotionMcpOAuthConnection, App
         client_id_present: true,
         access_token_present: true,
         refresh_token_present: stored.refresh_token.is_some(),
+        registration_reused,
         expires_at_epoch_seconds: stored.expires_at_epoch_seconds,
         discovery,
     })
@@ -241,6 +357,8 @@ pub async fn status() -> Result<NotionMcpOAuthStatus, AppError> {
             .as_ref()
             .is_some_and(|stored| stored.refresh_token.is_some()),
         expires_at_epoch_seconds: stored.and_then(|stored| stored.expires_at_epoch_seconds),
+        keychain_only: cfg!(any(target_os = "macos", target_os = "windows")),
+        transport: "rmcp_streamable_http_with_hardened_reqwest_client",
     })
 }
 
@@ -249,86 +367,208 @@ pub async fn disconnect() -> Result<(), AppError> {
 }
 
 pub async fn list_tools() -> Result<NotionMcpToolListResult, AppError> {
-    let stored = load_token().await?.ok_or_else(not_connected_error)?;
-    let requested_protocol_version = "2025-06-18";
-    let initialized = mcp_post(
-        &stored.access_token,
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": requested_protocol_version,
-                "capabilities": {},
-                "clientInfo": { "name": "june-notion-mcp-oauth-spike", "version": "0.0.0" }
-            }
-        }),
-    )
-    .await?;
-    reject_json_rpc_error(&initialized.body)?;
-    let protocol_version = initialized
-        .body
-        .get("result")
-        .and_then(|result| result.get("protocolVersion"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            AppError::new(
-                "notion_mcp_oauth_invalid_response",
-                "Notion hosted MCP did not return a protocol version.",
-            )
-        })?;
-    if protocol_version != requested_protocol_version {
-        return Err(AppError::new(
-            "notion_mcp_oauth_protocol_mismatch",
-            "Notion hosted MCP returned an unsupported protocol version.",
-        ));
+    let tools = list_all_tools_with_refresh().await?;
+    summarize_tools(tools)
+}
+
+pub async fn phase0_report() -> Result<NotionMcpPhase0Report, AppError> {
+    let connected = load_token().await?.is_some();
+    Ok(NotionMcpPhase0Report {
+        connected,
+        endpoint: MCP_SERVER_URL,
+        transport: "rmcp_streamable_http_with_hardened_reqwest_client",
+        keychain_service: keychain_service(),
+        credential_custody: if cfg!(any(target_os = "macos", target_os = "windows")) {
+            "token and dynamic-client material are stored in the OS Keychain only, in separate token and registration items"
+        } else {
+            "blocked: this platform has no approved Keychain-backed storage"
+        },
+        oauth_lifecycle: BTreeMap::from([
+            ("pkce_loopback", "implemented with system-browser loopback ports"),
+            ("dynamic_registration_reuse", "implemented when a stored registration matches discovery metadata"),
+            ("refresh", "implemented with one coalesced serialized refresh before stale reads and one retry after read failure"),
+            ("invalid_grant", "refresh deletes the token grant while preserving dynamic registration"),
+            ("provider_revocation", "manual live verification still required"),
+        ]),
+        standards_client: BTreeMap::from([
+            ("sdk", "rmcp 2.2 StreamableHttpClientTransport"),
+            ("endpoint", MCP_SERVER_URL),
+            ("paginated_inventory", "uses rmcp list_all_tools"),
+            ("session_reconnect", "rmcp reinit_on_expired_session remains enabled"),
+            ("byte_caps", "not proven: prototype rejects oversized serialized inventory only after rmcp receives it"),
+        ]),
+        inventory_contract: BTreeMap::from([
+            ("fingerprints", "computed from each hosted input schema"),
+            ("drift", "fail-closed: tools are disabled unless hosted name and schema fingerprint match an accepted pair"),
+            ("write_classification", "June policy classifies create/update/append/delete/comment tools as writes regardless of annotations"),
+        ]),
+        selected_resource_matrix: BTreeMap::from([
+            ("notion-fetch", "narrow go candidate only for exact selected page IDs; arbitrary URL or ID remains rejected until a selected-root validator is wired"),
+            ("notion-search", "rejected for v1 unless Notion exposes a pre-call root constraint"),
+            ("data_source_query", "unknown until live inventory proves exact data-source constraint"),
+        ]),
+        approval_proof: BTreeMap::from([
+            ("v1", "writes are not exposed"),
+            ("v2", "not implemented in this prototype; local policy endpoint still required before writes"),
+        ]),
+        output_observability: BTreeMap::from([
+            ("diagnostics", "errors include operation class/status only, never response bodies or tokens"),
+            ("inventory_cap", "serialized inventory over 512 KiB is rejected from the command result"),
+            ("sentinel_audit", "manual grep of app logs/Hermes home/SQLite still required after live run"),
+        ]),
+        provider_behavior: BTreeMap::from([
+            ("401", "read path attempts one coalesced forced refresh after an rmcp read failure; exact 401 classification is still SDK-limited"),
+            ("429_retry_after", "not yet proven through rmcp surface; manual live/fake-server test required"),
+            ("connected_source_search", "notion-search remains rejected unless scoped pre-call"),
+        ]),
+        current_recommendation: "narrow go only if live inventory confirms exact-page reads can be validated before tools/call; search/traversal remain excluded",
+    })
+}
+
+async fn list_all_tools_with_refresh() -> Result<Vec<rmcp::model::Tool>, AppError> {
+    let stored = fresh_stored_token().await?;
+    match list_all_tools_once(&stored.access_token).await {
+        Ok(tools) => Ok(tools),
+        Err(first_error) if stored.refresh_token.is_some() => {
+            tracing::warn!(error_code = %first_error.code, "notion hosted mcp tools/list failed; attempting one forced refresh for read retry");
+            let refreshed = refresh_stored_token(true, Some(&stored.access_token)).await?;
+            list_all_tools_once(&refreshed.access_token).await
+        }
+        Err(error) => Err(error),
     }
-    let session_id = initialized.session_id;
-    mcp_send_notification(
-        &stored.access_token,
-        session_id.as_deref(),
-        protocol_version,
-        json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        }),
-    )
-    .await?;
-    let listed = mcp_post_with_session(
-        &stored.access_token,
-        session_id.as_deref(),
-        Some(protocol_version),
-        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
-    )
-    .await?;
-    reject_json_rpc_error(&listed.body)?;
-    let tools_value = listed
-        .body
-        .get("result")
-        .and_then(|result| result.get("tools"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
+}
+
+async fn list_all_tools_once(access_token: &str) -> Result<Vec<rmcp::model::Tool>, AppError> {
+    let config = StreamableHttpClientTransportConfig::with_uri(MCP_SERVER_URL)
+        .auth_header(access_token)
+        .reinit_on_expired_session(true);
+    let transport = StreamableHttpClientTransport::with_client(rmcp_http_client(), config);
+    let client = ClientInfo::default()
+        .serve(transport)
+        .await
+        .map_err(|_error| {
+            tracing::warn!(
+                outcome = "initialize_failed",
+                "notion hosted mcp rmcp initialize failed"
+            );
             AppError::new(
-                "notion_mcp_oauth_invalid_response",
-                "Notion hosted MCP returned an unexpected tools/list response.",
+                "notion_mcp_oauth_mcp_failed",
+                "Could not initialize Notion hosted MCP with rmcp.",
             )
         })?;
-    let tools = tools_value
-        .iter()
-        .filter_map(|tool| {
-            let name = tool.get("name")?.as_str()?.to_string();
-            Some(NotionMcpToolSummary {
-                name,
-                description_present: tool.get("description").and_then(Value::as_str).is_some(),
-                input_schema_present: tool.get("inputSchema").is_some(),
-            })
+    let result = client.peer().list_all_tools().await.map_err(|_error| {
+        tracing::warn!(
+            outcome = "tools_list_failed",
+            "notion hosted mcp rmcp tools/list failed"
+        );
+        AppError::new(
+            "notion_mcp_oauth_mcp_failed",
+            "Could not list Notion hosted MCP tools with rmcp.",
+        )
+    });
+    let _ = client.cancel().await;
+    result
+}
+
+fn summarize_tools(tools: Vec<rmcp::model::Tool>) -> Result<NotionMcpToolListResult, AppError> {
+    let raw = serde_json::to_vec(&tools).map_err(|_| {
+        AppError::new(
+            "notion_mcp_oauth_invalid_response",
+            "Could not encode Notion hosted MCP inventory.",
+        )
+    })?;
+    let inventory_bytes = raw.len();
+    if inventory_bytes > INVENTORY_RESPONSE_CAP_BYTES {
+        return Ok(NotionMcpToolListResult {
+            tool_count: tools.len(),
+            transport: "rmcp_streamable_http_with_hardened_reqwest_client",
+            endpoint: MCP_SERVER_URL,
+            inventory_bytes,
+            over_cap_rejected: true,
+            tools: Vec::new(),
+        });
+    }
+    let summaries = tools
+        .into_iter()
+        .map(|tool| {
+            let hosted_name = tool.name.to_string();
+            let schema_fingerprint = schema_fingerprint(&tool.input_schema);
+            let classification = classify_hosted_tool(&hosted_name);
+            let enabled = matches!(
+                classification,
+                NotionMcpPolicyClassification::AllowedReadExactPageCandidate
+            ) && schema_fingerprint_is_accepted(&hosted_name, &schema_fingerprint);
+            let june_tool_name = enabled.then(|| june_tool_name(&hosted_name));
+            let selected_resource_pre_call_constraint =
+                selected_resource_constraint(&hosted_name).to_string();
+            NotionMcpToolSummary {
+                hosted_name,
+                june_tool_name,
+                description_present: tool.description.is_some(),
+                input_schema_present: true,
+                output_schema_present: tool.output_schema.is_some(),
+                annotations_present: tool.annotations.is_some(),
+                schema_fingerprint,
+                classification,
+                enabled,
+                selected_resource_pre_call_constraint,
+            }
         })
         .collect::<Vec<_>>();
     Ok(NotionMcpToolListResult {
-        tool_count: tools.len(),
-        tools,
+        tool_count: summaries.len(),
+        transport: "rmcp_streamable_http_with_hardened_reqwest_client",
+        endpoint: MCP_SERVER_URL,
+        inventory_bytes,
+        over_cap_rejected: false,
+        tools: summaries,
     })
+}
+
+fn classify_hosted_tool(hosted_name: &str) -> NotionMcpPolicyClassification {
+    let lower = hosted_name.to_ascii_lowercase();
+    if lower.contains("create")
+        || lower.contains("update")
+        || lower.contains("append")
+        || lower.contains("delete")
+        || lower.contains("comment")
+    {
+        return NotionMcpPolicyClassification::RejectedWrite;
+    }
+    if hosted_name == "notion-fetch" {
+        return NotionMcpPolicyClassification::AllowedReadExactPageCandidate;
+    }
+    if hosted_name == "notion-search" || lower.contains("search") || lower.contains("query") {
+        return NotionMcpPolicyClassification::RejectedUnconstrainedRead;
+    }
+    NotionMcpPolicyClassification::RejectedUnknown
+}
+
+fn june_tool_name(hosted_name: &str) -> String {
+    match hosted_name {
+        "notion-fetch" => "june_notion_get_selected_page".to_string(),
+        other => format!("june_notion_{}", other.replace('-', "_")),
+    }
+}
+
+fn selected_resource_constraint(hosted_name: &str) -> &'static str {
+    match hosted_name {
+        "notion-fetch" => "candidate: validate exact page ID/URL against June-selected roots before tools/call; broad IDs rejected",
+        "notion-search" => "rejected: no proven pre-call selected-root constraint",
+        _ => "rejected until Phase 0 proves a pre-call selected-resource constraint",
+    }
+}
+
+fn schema_fingerprint(input_schema: &Arc<rmcp::model::JsonObject>) -> String {
+    let canonical = serde_json::to_vec(input_schema.as_ref()).unwrap_or_default();
+    let digest = Sha256::digest(canonical);
+    format!("sha256:{digest:x}")
+}
+
+fn schema_fingerprint_is_accepted(hosted_name: &str, fingerprint: &str) -> bool {
+    ACCEPTED_SCHEMA_FINGERPRINTS
+        .iter()
+        .any(|(name, accepted)| *name == hosted_name && *accepted == fingerprint)
 }
 
 async fn discover() -> Result<NotionMcpOAuthDiscoverySummary, AppError> {
@@ -430,7 +670,7 @@ async fn discover() -> Result<NotionMcpOAuthDiscoverySummary, AppError> {
 
 async fn register_client(
     discovery: &NotionMcpOAuthDiscoverySummary,
-) -> Result<ClientRegistrationResponse, AppError> {
+) -> Result<ClientRegistration, AppError> {
     let endpoint = discovery.registration_endpoint.as_deref().ok_or_else(|| {
         AppError::new(
             "notion_mcp_oauth_registration_unavailable",
@@ -444,7 +684,7 @@ async fn register_client(
     let response = notion_http_client()
         .post(endpoint)
         .json(&json!({
-            "client_name": "June Notion hosted MCP OAuth spike",
+            "client_name": "June Notion hosted MCP Phase 0",
             "redirect_uris": redirect_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -485,7 +725,11 @@ async fn register_client(
             "Notion hosted MCP registration did not return a client id.",
         ));
     }
-    Ok(registration)
+    Ok(ClientRegistration {
+        client_id: registration.client_id.clone(),
+        client_secret: registration.client_secret.clone(),
+        token_endpoint_auth_method: registration.token_endpoint_auth_method.clone(),
+    })
 }
 
 fn build_authorize_url(
@@ -507,7 +751,7 @@ fn build_authorize_url(
 
 async fn exchange_code(
     discovery: &NotionMcpOAuthDiscoverySummary,
-    registration: &ClientRegistrationResponse,
+    registration: &ClientRegistration,
     code: &str,
     verifier: &str,
     redirect_uri: &str,
@@ -540,7 +784,127 @@ async fn exchange_code(
             "Could not complete the Notion hosted MCP OAuth exchange.",
         ));
     }
-    let tokens = serde_json::from_str::<TokenResponse>(&body).map_err(|_| {
+    parse_token_response(&body)
+}
+
+async fn fresh_stored_token() -> Result<StoredNotionMcpOAuth, AppError> {
+    let stored = load_token().await?.ok_or_else(not_connected_error)?;
+    if stored
+        .expires_at_epoch_seconds
+        .is_some_and(|expires| expires <= now_epoch_seconds() + ACCESS_TOKEN_EXPIRY_BUFFER_SECS)
+        && stored.refresh_token.is_some()
+    {
+        return refresh_stored_token(false, None).await;
+    }
+    Ok(stored)
+}
+
+async fn refresh_stored_token(
+    force: bool,
+    observed_access_token: Option<&str>,
+) -> Result<StoredNotionMcpOAuth, AppError> {
+    let _guard = refresh_lock().lock().await;
+    let stored = load_token().await?.ok_or_else(not_connected_error)?;
+    if should_reuse_stored_token_after_lock(&stored, force, observed_access_token) {
+        return Ok(stored);
+    }
+    let Some(refresh_token) = stored.refresh_token.as_deref() else {
+        return Err(reconnect_required_error());
+    };
+    let mut form = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", stored.client_id.as_str()),
+    ];
+    if let Some(client_secret) = stored.client_secret.as_deref() {
+        form.push(("client_secret", client_secret));
+    }
+    let response = notion_http_client()
+        .post(&stored.discovery.token_endpoint)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|_| network_error("Could not refresh the Notion hosted MCP OAuth token."))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| network_error("Could not read the Notion hosted MCP refresh response."))?;
+    if !status.is_success() {
+        let oauth_error = parse_oauth_error(&body);
+        if oauth_error.as_deref() == Some("invalid_grant") {
+            delete_token().await?;
+            return Err(reconnect_required_error());
+        }
+        return Err(upstream_error(
+            "notion_mcp_oauth_refresh_failed",
+            status,
+            &body,
+            "Could not refresh the Notion hosted MCP OAuth token.",
+        ));
+    }
+    let discovery = NotionMcpOAuthDiscoverySummary {
+        protected_resource: MCP_SERVER_URL.to_string(),
+        issuer: stored.discovery.issuer.clone(),
+        authorization_endpoint: stored.discovery.authorization_endpoint.clone(),
+        token_endpoint: stored.discovery.token_endpoint.clone(),
+        registration_endpoint: stored.discovery.registration_endpoint.clone(),
+        revocation_endpoint: stored.discovery.revocation_endpoint.clone(),
+        supports_s256: true,
+    };
+    let registration = ClientRegistration {
+        client_id: stored.client_id.clone(),
+        client_secret: stored.client_secret.clone(),
+        token_endpoint_auth_method: None,
+    };
+    let mut refreshed =
+        stored_from_token_response(&discovery, &registration, parse_token_response(&body)?);
+    if refreshed.refresh_token.is_none() {
+        refreshed.refresh_token = stored.refresh_token.clone();
+    }
+    store_token(&refreshed).await?;
+    Ok(refreshed)
+}
+
+fn stored_from_token_response(
+    discovery: &NotionMcpOAuthDiscoverySummary,
+    registration: &ClientRegistration,
+    tokens: TokenResponse,
+) -> StoredNotionMcpOAuth {
+    StoredNotionMcpOAuth {
+        client_id: registration.client_id.clone(),
+        client_secret: registration.client_secret.clone(),
+        access_token: tokens.access_token.clone(),
+        refresh_token: tokens.refresh_token.clone(),
+        expires_at_epoch_seconds: tokens
+            .expires_in
+            .map(|seconds| now_epoch_seconds() + seconds),
+        token_type: tokens.token_type.clone(),
+        discovery: StoredDiscovery {
+            issuer: discovery.issuer.clone(),
+            authorization_endpoint: discovery.authorization_endpoint.clone(),
+            token_endpoint: discovery.token_endpoint.clone(),
+            registration_endpoint: discovery.registration_endpoint.clone(),
+            revocation_endpoint: discovery.revocation_endpoint.clone(),
+        },
+    }
+}
+
+fn should_reuse_stored_token_after_lock(
+    stored: &StoredNotionMcpOAuth,
+    force: bool,
+    observed_access_token: Option<&str>,
+) -> bool {
+    if force {
+        return observed_access_token.is_some_and(|observed| stored.access_token != observed);
+    }
+    stored
+        .expires_at_epoch_seconds
+        .is_some_and(|expires| expires > now_epoch_seconds() + ACCESS_TOKEN_EXPIRY_BUFFER_SECS)
+}
+
+fn parse_token_response(body: &str) -> Result<TokenResponse, AppError> {
+    let tokens = serde_json::from_str::<TokenResponse>(body).map_err(|_| {
         AppError::new(
             "notion_mcp_oauth_invalid_response",
             "Notion hosted MCP OAuth returned an unexpected token response.",
@@ -552,147 +916,15 @@ async fn exchange_code(
             "Notion hosted MCP OAuth did not return an access token.",
         ));
     }
-    Ok(tokens)
-}
-
-struct McpResponse {
-    body: Value,
-    session_id: Option<String>,
-}
-
-async fn mcp_post(access_token: &str, body: Value) -> Result<McpResponse, AppError> {
-    mcp_post_with_session(access_token, None, None, body).await
-}
-
-async fn mcp_post_with_session(
-    access_token: &str,
-    session_id: Option<&str>,
-    protocol_version: Option<&str>,
-    body: Value,
-) -> Result<McpResponse, AppError> {
-    let mut request = notion_http_client()
-        .post(MCP_SERVER_URL)
-        .bearer_auth(access_token)
-        .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
-        .json(&body);
-    if let Some(session_id) = session_id {
-        request = request.header("mcp-session-id", session_id);
-    }
-    if let Some(protocol_version) = protocol_version {
-        request = request.header("mcp-protocol-version", protocol_version);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|_| network_error("Could not call Notion hosted MCP."))?;
-    let status = response.status();
-    let session_id = response
-        .headers()
-        .get("mcp-session-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let text = response
-        .text()
-        .await
-        .map_err(|_| network_error("Could not read Notion hosted MCP response."))?;
-    if !status.is_success() {
-        return Err(upstream_error(
-            "notion_mcp_oauth_mcp_failed",
-            status,
-            &text,
-            "Notion hosted MCP request failed.",
-        ));
-    }
-    let body = parse_mcp_response_body(&content_type, &text)?;
-    Ok(McpResponse { body, session_id })
-}
-
-async fn mcp_send_notification(
-    access_token: &str,
-    session_id: Option<&str>,
-    protocol_version: &str,
-    body: Value,
-) -> Result<(), AppError> {
-    let mut request = notion_http_client()
-        .post(MCP_SERVER_URL)
-        .bearer_auth(access_token)
-        .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
-        .header("mcp-protocol-version", protocol_version)
-        .json(&body);
-    if let Some(session_id) = session_id {
-        request = request.header("mcp-session-id", session_id);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|_| network_error("Could not notify Notion hosted MCP initialization."))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|_| network_error("Could not read Notion hosted MCP notification response."))?;
-    if status.is_success() {
-        return Ok(());
-    }
-    Err(upstream_error(
-        "notion_mcp_oauth_mcp_failed",
-        status,
-        &text,
-        "Notion hosted MCP notification failed.",
-    ))
-}
-
-fn reject_json_rpc_error(body: &Value) -> Result<(), AppError> {
-    let Some(error) = body.get("error") else {
-        return Ok(());
-    };
-    let code = error
-        .get("code")
-        .and_then(Value::as_i64)
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    Err(AppError::new(
-        "notion_mcp_oauth_json_rpc_error",
-        format!("Notion hosted MCP returned a JSON-RPC error ({code})."),
-    ))
-}
-
-fn parse_mcp_response_body(content_type: &str, text: &str) -> Result<Value, AppError> {
-    if content_type.contains("text/event-stream") {
-        for line in text.lines() {
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-            return serde_json::from_str::<Value>(data).map_err(|_| {
-                AppError::new(
-                    "notion_mcp_oauth_invalid_response",
-                    "Notion hosted MCP returned an invalid event-stream payload.",
-                )
-            });
+    if let Some(token_type) = tokens.token_type.as_deref() {
+        if !token_type.eq_ignore_ascii_case("bearer") {
+            return Err(AppError::new(
+                "notion_mcp_oauth_unsupported_token_type",
+                "Notion hosted MCP OAuth returned an unsupported token type.",
+            ));
         }
-        return Err(AppError::new(
-            "notion_mcp_oauth_invalid_response",
-            "Notion hosted MCP returned an empty event-stream response.",
-        ));
     }
-    serde_json::from_str::<Value>(text).map_err(|_| {
-        AppError::new(
-            "notion_mcp_oauth_invalid_response",
-            "Notion hosted MCP returned an invalid JSON response.",
-        )
-    })
+    Ok(tokens)
 }
 
 fn validate_notion_url(value: &str, label: &str) -> Result<(), AppError> {
@@ -712,22 +944,68 @@ async fn store_token(tokens: &StoredNotionMcpOAuth) -> Result<(), AppError> {
             "Could not encode Notion hosted MCP OAuth material.",
         )
     })?;
-    store_platform_token(json).await
+    store_keychain_json(TOKEN_ACCOUNT_ID, json).await
 }
 
 async fn load_token() -> Result<Option<StoredNotionMcpOAuth>, AppError> {
-    load_platform_token().await
+    load_keychain_json(TOKEN_ACCOUNT_ID)
+        .await?
+        .map(|raw| serde_json::from_str::<StoredNotionMcpOAuth>(&raw))
+        .transpose()
+        .map_err(|_| {
+            AppError::new(
+                "notion_mcp_oauth_keychain_read_failed",
+                "Stored Notion hosted MCP OAuth material could not be parsed.",
+            )
+        })
 }
 
 async fn delete_token() -> Result<(), AppError> {
-    delete_platform_token().await
+    delete_keychain_entries(&[TOKEN_ACCOUNT_ID, LEGACY_ACCOUNT_ID]).await
+}
+
+async fn store_registration(registration: &StoredClientRegistration) -> Result<(), AppError> {
+    let json = serde_json::to_string(registration).map_err(|_| {
+        AppError::new(
+            "notion_mcp_oauth_token_store_failed",
+            "Could not encode Notion hosted MCP registration material.",
+        )
+    })?;
+    store_keychain_json(REGISTRATION_ACCOUNT_ID, json).await
+}
+
+async fn load_registration() -> Result<Option<StoredClientRegistration>, AppError> {
+    if let Some(raw) = load_keychain_json(REGISTRATION_ACCOUNT_ID).await? {
+        return serde_json::from_str::<StoredClientRegistration>(&raw)
+            .map(Some)
+            .map_err(|_| {
+                AppError::new(
+                    "notion_mcp_oauth_keychain_read_failed",
+                    "Stored Notion hosted MCP registration material could not be parsed.",
+                )
+            });
+    }
+    let Some(legacy) = load_keychain_json(LEGACY_ACCOUNT_ID).await? else {
+        return Ok(None);
+    };
+    let legacy = serde_json::from_str::<StoredNotionMcpOAuth>(&legacy).map_err(|_| {
+        AppError::new(
+            "notion_mcp_oauth_keychain_read_failed",
+            "Stored Notion hosted MCP OAuth material could not be parsed.",
+        )
+    })?;
+    Ok(Some(StoredClientRegistration {
+        client_id: legacy.client_id.clone(),
+        client_secret: legacy.client_secret.clone(),
+        discovery: legacy.discovery.clone(),
+    }))
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-async fn store_platform_token(json: String) -> Result<(), AppError> {
+async fn store_keychain_json(account_id: &'static str, json: String) -> Result<(), AppError> {
     let service = keychain_service().to_string();
     tokio::task::spawn_blocking(move || {
-        keyring::Entry::new(&service, ACCOUNT_ID).and_then(|entry| entry.set_password(&json))
+        keyring::Entry::new(&service, account_id).and_then(|entry| entry.set_password(&json))
     })
     .await
     .map_err(|_| {
@@ -745,22 +1023,24 @@ async fn store_platform_token(json: String) -> Result<(), AppError> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-async fn store_platform_token(_json: String) -> Result<(), AppError> {
+async fn store_keychain_json(_account_id: &'static str, _json: String) -> Result<(), AppError> {
     Err(secure_storage_unavailable())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-async fn load_platform_token() -> Result<Option<StoredNotionMcpOAuth>, AppError> {
+async fn load_keychain_json(account_id: &'static str) -> Result<Option<String>, AppError> {
     let service = keychain_service().to_string();
-    let raw = tokio::task::spawn_blocking(move || {
-        match keyring::Entry::new(&service, ACCOUNT_ID).and_then(|entry| entry.get_password()) {
-            Ok(raw) => Ok(Some(raw)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(AppError::new(
-                "notion_mcp_oauth_keychain_read_failed",
-                "Could not read Notion hosted MCP OAuth material from Keychain.",
-            )),
-        }
+    tokio::task::spawn_blocking(move || {
+        keyring::Entry::new(&service, account_id)
+            .and_then(|entry| entry.get_password())
+            .map(Some)
+            .or_else(|error| match error {
+                keyring::Error::NoEntry => Ok(None),
+                _ => Err(AppError::new(
+                    "notion_mcp_oauth_keychain_read_failed",
+                    "Could not read Notion hosted MCP OAuth material from Keychain.",
+                )),
+            })
     })
     .await
     .map_err(|_| {
@@ -768,37 +1048,33 @@ async fn load_platform_token() -> Result<Option<StoredNotionMcpOAuth>, AppError>
             "notion_mcp_oauth_keychain_read_failed",
             "Keychain read task failed.",
         )
-    })??;
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    serde_json::from_str::<StoredNotionMcpOAuth>(&raw)
-        .map(Some)
-        .map_err(|_| {
-            AppError::new(
-                "notion_mcp_oauth_keychain_read_failed",
-                "Stored Notion hosted MCP OAuth material could not be parsed.",
-            )
-        })
+    })?
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-async fn load_platform_token() -> Result<Option<StoredNotionMcpOAuth>, AppError> {
+async fn load_keychain_json(_account_id: &'static str) -> Result<Option<String>, AppError> {
     Err(secure_storage_unavailable())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-async fn delete_platform_token() -> Result<(), AppError> {
+async fn delete_keychain_entries(account_ids: &[&'static str]) -> Result<(), AppError> {
     let service = keychain_service().to_string();
+    let account_ids = account_ids.to_vec();
     tokio::task::spawn_blocking(move || {
-        match keyring::Entry::new(&service, ACCOUNT_ID).and_then(|entry| entry.delete_credential())
-        {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(AppError::new(
-                "notion_mcp_oauth_keychain_delete_failed",
-                "Could not delete Notion hosted MCP OAuth material from Keychain.",
-            )),
+        for account_id in account_ids {
+            match keyring::Entry::new(&service, account_id)
+                .and_then(|entry| entry.delete_credential())
+            {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(_) => {
+                    return Err(AppError::new(
+                        "notion_mcp_oauth_keychain_delete_failed",
+                        "Could not delete Notion hosted MCP OAuth material from Keychain.",
+                    ));
+                }
+            }
         }
+        Ok(())
     })
     .await
     .map_err(|_| {
@@ -810,7 +1086,7 @@ async fn delete_platform_token() -> Result<(), AppError> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-async fn delete_platform_token() -> Result<(), AppError> {
+async fn delete_keychain_entries(_account_ids: &[&'static str]) -> Result<(), AppError> {
     Err(secure_storage_unavailable())
 }
 
@@ -818,7 +1094,7 @@ async fn delete_platform_token() -> Result<(), AppError> {
 fn secure_storage_unavailable() -> AppError {
     AppError::new(
         "notion_mcp_oauth_keychain_unavailable",
-        "The Notion hosted MCP OAuth spike requires Keychain-backed storage.",
+        "The Notion hosted MCP OAuth prototype requires Keychain-backed storage.",
     )
 }
 
@@ -833,7 +1109,14 @@ fn keychain_service() -> &'static str {
 fn not_connected_error() -> AppError {
     AppError::new(
         "notion_mcp_oauth_not_connected",
-        "Connect the Notion hosted MCP OAuth spike before listing tools.",
+        "Connect the Notion hosted MCP OAuth prototype before listing tools.",
+    )
+}
+
+fn reconnect_required_error() -> AppError {
+    AppError::new(
+        "notion_mcp_oauth_reconnect_required",
+        "Notion access expired. Reconnect Notion in settings.",
     )
 }
 
@@ -842,15 +1125,31 @@ fn network_error(message: &str) -> AppError {
 }
 
 fn upstream_error(code: &'static str, status: StatusCode, body: &str, message: &str) -> AppError {
-    let error_code = serde_json::from_str::<OAuthErrorBody>(body)
-        .ok()
-        .and_then(|body| body.error);
-    tracing::warn!(status = status.as_u16(), error_code = ?error_code, "notion hosted mcp oauth upstream request failed");
+    let error_code = parse_oauth_error(body).and_then(|value| safe_oauth_error_code(&value));
+    tracing::warn!(
+        status = status.as_u16(),
+        error_code = error_code.as_deref().unwrap_or("unclassified"),
+        "notion hosted mcp oauth upstream request failed"
+    );
     let suffix = error_code
-        .filter(|value| !value.is_empty())
         .map(|value| format!(" ({value})"))
         .unwrap_or_default();
     AppError::new(code, format!("{message}{suffix}"))
+}
+
+fn parse_oauth_error(body: &str) -> Option<String> {
+    serde_json::from_str::<OAuthErrorBody>(body)
+        .ok()
+        .and_then(|body| body.error)
+}
+
+fn safe_oauth_error_code(value: &str) -> Option<String> {
+    let is_safe = !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    is_safe.then(|| value.to_string())
 }
 
 fn now_epoch_seconds() -> i64 {
@@ -858,4 +1157,72 @@ fn now_epoch_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_rejects_writes_and_unconstrained_search() {
+        assert!(matches!(
+            classify_hosted_tool("notion-create-pages"),
+            NotionMcpPolicyClassification::RejectedWrite
+        ));
+        assert!(matches!(
+            classify_hosted_tool("notion-search"),
+            NotionMcpPolicyClassification::RejectedUnconstrainedRead
+        ));
+        assert!(matches!(
+            classify_hosted_tool("notion-fetch"),
+            NotionMcpPolicyClassification::AllowedReadExactPageCandidate
+        ));
+    }
+
+    #[test]
+    fn schema_drift_disables_fetch_without_reviewed_fingerprint() {
+        assert!(!schema_fingerprint_is_accepted(
+            "notion-fetch",
+            "sha256:unreviewed"
+        ));
+    }
+
+    #[test]
+    fn forced_refresh_reuses_newer_stored_grant() {
+        let stored = StoredNotionMcpOAuth {
+            client_id: "client".to_string(),
+            client_secret: None,
+            access_token: "token-b".to_string(),
+            refresh_token: Some("refresh-b".to_string()),
+            expires_at_epoch_seconds: Some(now_epoch_seconds() + 3600),
+            token_type: Some("Bearer".to_string()),
+            discovery: StoredDiscovery {
+                issuer: NOTION_ORIGIN.to_string(),
+                authorization_endpoint: format!("{NOTION_ORIGIN}/authorize"),
+                token_endpoint: format!("{NOTION_ORIGIN}/token"),
+                registration_endpoint: None,
+                revocation_endpoint: None,
+            },
+        };
+        assert!(should_reuse_stored_token_after_lock(
+            &stored,
+            true,
+            Some("token-a")
+        ));
+        assert!(!should_reuse_stored_token_after_lock(
+            &stored,
+            true,
+            Some("token-b")
+        ));
+    }
+
+    #[test]
+    fn oauth_error_codes_are_safe_identifiers_only() {
+        assert_eq!(
+            safe_oauth_error_code("invalid_grant").as_deref(),
+            Some("invalid_grant")
+        );
+        assert!(safe_oauth_error_code("invalid grant with spaces").is_none());
+        assert!(safe_oauth_error_code("tok_秘密").is_none());
+    }
 }

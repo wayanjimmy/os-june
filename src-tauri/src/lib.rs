@@ -309,6 +309,8 @@ pub fn run() {
             connectors::commands::notion_mcp_oauth_disconnect,
             #[cfg(debug_assertions)]
             connectors::commands::notion_mcp_oauth_list_tools,
+            #[cfg(debug_assertions)]
+            connectors::commands::notion_mcp_oauth_phase0_report,
             connectors::commands::notion_prototype_connect,
             connectors::commands::notion_prototype_status,
             connectors::commands::notion_prototype_disconnect,
