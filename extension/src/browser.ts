@@ -454,14 +454,35 @@ function axValue(value: unknown): string {
 
 function snapshotFromAx(raw: unknown, epoch: number) {
   const nodes = ((raw as { nodes?: unknown[] })?.nodes ?? []) as Array<Record<string, unknown>>;
+  const valueRoles = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+  const nodesById = new Map<string, Record<string, unknown>>();
+  const valueControlIds = new Set<string>();
+  for (const node of nodes) {
+    if (typeof node.nodeId !== "string") continue;
+    nodesById.set(node.nodeId, node);
+    if (valueRoles.has(axValue(node.role))) valueControlIds.add(node.nodeId);
+  }
+  const isValueControlDescendant = (node: Record<string, unknown>) => {
+    let parentId = typeof node.parentId === "string" ? node.parentId : undefined;
+    const seen = new Set<string>();
+    while (parentId !== undefined && !seen.has(parentId)) {
+      if (valueControlIds.has(parentId)) return true;
+      seen.add(parentId);
+      const parent = nodesById.get(parentId);
+      parentId = typeof parent?.parentId === "string" ? parent.parentId : undefined;
+    }
+    return false;
+  };
   const refs: string[] = [];
   const lines: string[] = [];
   for (const node of nodes) {
-    if (node.ignored === true) continue;
+    if (node.ignored === true || isValueControlDescendant(node)) continue;
     const role = axValue(node.role);
     const name = axValue(node.name).trim();
-    const value = axValue(node.value).trim();
-    if (!name && !value) continue;
+    const rawValue = axValue(node.value).trim();
+    if (!name && !rawValue) continue;
+    const isValueControl = valueRoles.has(role);
+    const value = isValueControl ? `(value hidden, ${rawValue ? "filled" : "empty"})` : rawValue;
     let ref: string | undefined;
     if (interactiveRole(role)) {
       const stableId = node.backendDOMNodeId;
@@ -471,7 +492,7 @@ function snapshotFromAx(raw: unknown, epoch: number) {
       }
     }
     lines.push(
-      `${ref ? `[${ref}] ` : ""}${role || "text"}: ${name}${value && value !== name ? ` = ${value}` : ""}`,
+      `${ref ? `[${ref}] ` : ""}${role || "text"}: ${name}${value && (isValueControl || value !== name) ? ` = ${value}` : ""}`,
     );
   }
   return { epoch, text: lines.join("\n"), refs };
@@ -537,6 +558,15 @@ const ACT_ON_REFERENCE_FUNCTION = `function(operation, value, expected) {
   const inspected = (${ELEMENT_FACTS_FUNCTION}).call(this);
   if (Object.keys(inspected.element).some((key) => inspected.element[key] !== expected[key])) {
     return {status: "changed"};
+  }
+  const activates = operation === "click" ||
+    (operation === "press" && ["Enter", " ", "Space", "Spacebar"].includes(value));
+  if (activates) {
+    const targetOwner = this.closest("a, area, form");
+    const target = (
+      this.getAttribute("formtarget") || targetOwner?.getAttribute("target") || ""
+    ).toLowerCase();
+    if (target === "_blank") return {status: "new_window"};
   }
   if (operation === "click") {
     this.scrollIntoView({block: "center", inline: "center"});
@@ -660,6 +690,7 @@ function artifactMessages(
 export class BrowserController {
   readonly registry = new TaskTabRegistry();
   readonly shares = new PendingShareRegistry();
+  private readonly actionOpeners = new Set<number>();
 
   constructor(private readonly onSharedTabReleased?: (tabId: number) => void) {
     debuggerApi().onEvent.addListener((source, method, params) => {
@@ -695,6 +726,19 @@ export class BrowserController {
         this.registry.removeTab(owner.sessionId, tabId);
         if (owner.tab.ownership === "shared") this.onSharedTabReleased?.(tabId);
       }
+    });
+    chrome.tabs.onCreated.addListener((tab) => {
+      if (
+        tab.id === undefined ||
+        tab.openerTabId === undefined ||
+        !this.actionOpeners.has(tab.openerTabId)
+      )
+        return;
+      // The Rust broker has no ownership record for opener-created tabs. Close
+      // them immediately instead of leaving an ungrouped tab outside task
+      // cleanup. Declarative target=_blank controls are refused before input;
+      // this catches JavaScript window.open calls from the trusted input event.
+      void closeTabs([tab.id]);
     });
     chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       if (changeInfo.groupId === undefined) return;
@@ -852,6 +896,7 @@ export class BrowserController {
       (operation === "press" && ["Enter", " ", "Space", "Spacebar"].includes(value));
     const frameId = activates ? await mainFrameId(tabId) : null;
     const navigation = frameId === null ? null : actionNavigationWaiter(tabId, frameId);
+    let blockingActionPopups = false;
     let result: { status?: unknown; point?: { x?: unknown; y?: unknown } };
     try {
       result = await callOnReference<{
@@ -861,11 +906,21 @@ export class BrowserController {
       if (result.status === "changed") {
         throw toolError("browser_stale_reference", "The browser element changed.");
       }
+      if (result.status === "new_window") {
+        throw toolError(
+          "browser_new_window_blocked",
+          "Browser use does not open new windows from page actions.",
+        );
+      }
       if (result.status !== "ok") {
         throw toolError("browser_action_unsupported", "The browser action is unsupported.");
       }
       if (!this.registry.acceptsRef(sessionId, tabId, reference)) {
         throw toolError("browser_stale_reference", "The browser reference is stale.");
+      }
+      if (activates) {
+        this.actionOpeners.add(tabId);
+        blockingActionPopups = true;
       }
       if (operation === "click") {
         const x = result.point?.x;
@@ -916,17 +971,19 @@ export class BrowserController {
           });
         }
       }
+      this.registry.invalidate(sessionId, tabId);
+      if (navigation === null) {
+        await waitUntilReady(tabId);
+      } else if (await navigation.wait()) {
+        await waitUntilReady(tabId);
+      }
+      return await this.snapshot(sessionId, tabId, this.registry.tab(sessionId, tabId));
     } catch (error) {
       navigation?.cancel();
       throw error;
+    } finally {
+      if (blockingActionPopups) this.actionOpeners.delete(tabId);
     }
-    this.registry.invalidate(sessionId, tabId);
-    if (navigation === null) {
-      await waitUntilReady(tabId);
-    } else if (await navigation.wait()) {
-      await waitUntilReady(tabId);
-    }
-    return this.snapshot(sessionId, tabId, this.registry.tab(sessionId, tabId));
   }
 
   private async executeTool(

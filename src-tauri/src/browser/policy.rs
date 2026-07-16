@@ -149,17 +149,8 @@ fn contains_consequential_term(element: &InteractiveElement) -> bool {
     contains_term(
         element,
         &[
-            "submit",
-            "send",
-            "publish",
-            "purchase",
-            "buy",
-            "checkout",
-            "place order",
-            "delete",
-            "remove",
-            "confirm",
-            "save",
+            "submit", "send", "publish", "purchase", "buy", "checkout", "pay", "payment", "order",
+            "delete", "remove", "confirm", "save",
         ],
     )
 }
@@ -1052,6 +1043,9 @@ mod tests {
             "Send message",
             "Publish post",
             "Purchase now",
+            "Pay",
+            "Pay now",
+            "Complete order",
             "Delete account",
             "Save",
         ] {

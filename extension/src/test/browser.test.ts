@@ -28,8 +28,12 @@ function chromeHarness() {
   const debuggerEventListeners: Array<
     (source: { tabId?: number }, method: string, params?: Record<string, unknown>) => void
   > = [];
+  const tabCreatedListeners: Array<(tab: { id?: number; openerTabId?: number }) => void> = [];
   const emitDebuggerEvent = (tabId: number, method: string, params?: Record<string, unknown>) => {
     for (const listener of [...debuggerEventListeners]) listener({ tabId }, method, params);
+  };
+  const emitTabCreated = (tab: { id?: number; openerTabId?: number }) => {
+    for (const listener of [...tabCreatedListeners]) listener(tab);
   };
   vi.stubGlobal("chrome", {
     debugger: {
@@ -53,11 +57,12 @@ function chromeHarness() {
       }),
       remove,
       onRemoved: { addListener: vi.fn() },
+      onCreated: { addListener: vi.fn((listener) => tabCreatedListeners.push(listener)) },
       onUpdated: { addListener: vi.fn() },
     },
     tabGroups: { onUpdated: { addListener: vi.fn() } },
   });
-  return { attach, detach, remove, sendCommand, emitDebuggerEvent };
+  return { attach, detach, remove, sendCommand, emitDebuggerEvent, emitTabCreated };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -338,6 +343,54 @@ describe("accessibility snapshots", () => {
     expect(controller.registry.acceptsRef("task", 10, "e0:n20")).toBe(true);
     expect(controller.registry.acceptsRef("task", 10, "e0:nax-21")).toBe(false);
   });
+
+  it("redacts value controls and their AX descendants", async () => {
+    const { sendCommand } = chromeHarness();
+    const controller = new BrowserController();
+    controller.registry.start("task");
+    controller.registry.addShared("task", 10);
+    sendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method === "Accessibility.getFullAXTree") {
+        return {
+          nodes: [
+            {
+              role: { value: "textbox" },
+              name: { value: "Verification code" },
+              value: { value: "123456" },
+              nodeId: "ax-secret",
+              backendDOMNodeId: 30,
+            },
+            {
+              role: { value: "StaticText" },
+              name: { value: "123456" },
+              nodeId: "ax-secret-text",
+              parentId: "ax-secret",
+            },
+            {
+              role: { value: "button" },
+              name: { value: "Continue" },
+              nodeId: "ax-button",
+              backendDOMNodeId: 31,
+            },
+          ],
+        };
+      }
+      return {};
+    });
+
+    const result = await controller.execute(
+      browserRequest(20, "snapshot", { session_id: "task", tab_id: 10 }),
+    );
+
+    expect(result.response).toMatchObject({
+      success: true,
+      data: {
+        refs: ["e0:n30", "e0:n31"],
+        text: "[e0:n30] textbox: Verification code = (value hidden, filled)\n[e0:n31] button: Continue",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("123456");
+  });
 });
 
 describe("attended reference actions", () => {
@@ -558,6 +611,70 @@ describe("attended reference actions", () => {
     )?.[2]?.functionDeclaration;
     expect(declaration).toContain("document.elementFromPoint");
     expect(declaration).not.toContain("this.click()");
+  });
+
+  it("refuses declarative new-window actions before dispatching trusted input", async () => {
+    const { controller, sendCommand } = interactionController();
+    sendCommand.mockImplementation(
+      async (_target: unknown, method: string, params?: Record<string, unknown>) => {
+        if (method === "DOM.resolveNode") return { object: { objectId: "node-20" } };
+        if (method === "Runtime.callFunctionOn") {
+          expect(String(params?.functionDeclaration)).toContain('target === "_blank"');
+          return { result: { value: { status: "new_window" } } };
+        }
+        return {};
+      },
+    );
+
+    await expect(
+      controller.execute(
+        browserRequest(32, "click", {
+          session_id: "task",
+          tab_id: 10,
+          ref: "e0:n20",
+          expected: element,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      response: { success: false, errorCode: "browser_new_window_blocked" },
+    });
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Input.dispatchMouseEvent")).toBe(
+      false,
+    );
+  });
+
+  it("closes JavaScript opener tabs created by a trusted action", async () => {
+    const { controller, emitTabCreated, remove, sendCommand } = interactionController();
+    sendCommand.mockImplementation(
+      async (_target: unknown, method: string, params?: Record<string, unknown>) => {
+        if (method === "DOM.resolveNode") return { object: { objectId: "node-20" } };
+        if (method === "Runtime.callFunctionOn") {
+          return { result: { value: { status: "ok", point: { x: 24, y: 48 } } } };
+        }
+        if (
+          method === "Input.dispatchMouseEvent" &&
+          (params as { type?: unknown } | undefined)?.type === "mousePressed"
+        ) {
+          emitTabCreated({ id: 12, openerTabId: 10 });
+        }
+        if (method === "Runtime.evaluate") return { result: { value: "complete" } };
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        return {};
+      },
+    );
+
+    await expect(
+      controller.execute(
+        browserRequest(33, "click", {
+          session_id: "task",
+          tab_id: 10,
+          ref: "e0:n20",
+          expected: element,
+        }),
+      ),
+    ).resolves.toMatchObject({ response: { success: true } });
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith([12]));
+    expect(controller.registry.find(12)).toBeNull();
   });
 
   it("dispatches click, fill, and press only with broker-supplied expected facts", async () => {

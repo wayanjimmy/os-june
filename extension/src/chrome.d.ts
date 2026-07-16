@@ -78,6 +78,7 @@ declare namespace chrome {
       title?: string;
       url?: string;
       groupId?: number;
+      openerTabId?: number;
     }
     function create(details: { url: string; active?: boolean }): Promise<Tab>;
     function get(tabId: number): Promise<Tab>;
@@ -87,6 +88,7 @@ declare namespace chrome {
     function group(details: { tabIds: number[]; groupId?: number }): Promise<number>;
     function ungroup(tabIds: number[]): Promise<void>;
     const onRemoved: { addListener(callback: (tabId: number) => void): void };
+    const onCreated: { addListener(callback: (tab: Tab) => void): void };
     const onUpdated: {
       addListener(
         callback: (tabId: number, changeInfo: { groupId?: number }, tab: Tab) => void,
