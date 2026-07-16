@@ -464,8 +464,8 @@ function snapshotFromAx(raw: unknown, epoch: number) {
     if (!name && !value) continue;
     let ref: string | undefined;
     if (interactiveRole(role)) {
-      const stableId = node.backendDOMNodeId ?? node.nodeId;
-      if (stableId !== undefined) {
+      const stableId = node.backendDOMNodeId;
+      if (typeof stableId === "number" && Number.isSafeInteger(stableId) && stableId > 0) {
         ref = `e${epoch}:n${String(stableId)}`;
         refs.push(ref);
       }
@@ -539,7 +539,29 @@ const ACT_ON_REFERENCE_FUNCTION = `function(operation, value, expected) {
     return {status: "changed"};
   }
   if (operation === "click") {
-    this.click();
+    this.scrollIntoView({block: "center", inline: "center"});
+    const rect = this.getBoundingClientRect();
+    const left = Math.max(0, rect.left);
+    const right = Math.min(innerWidth, rect.right);
+    const top = Math.max(0, rect.top);
+    const bottom = Math.min(innerHeight, rect.bottom);
+    if (right <= left || bottom <= top) return {status: "occluded"};
+    const candidates = [
+      [0.5, 0.5],
+      [0.25, 0.5],
+      [0.75, 0.5],
+      [0.5, 0.25],
+      [0.5, 0.75],
+    ];
+    for (const [xRatio, yRatio] of candidates) {
+      const x = left + (right - left) * xRatio;
+      const y = top + (bottom - top) * yRatio;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === this || (hit && this.contains(hit))) {
+        return {status: "ok", point: {x, y}};
+      }
+    }
+    return {status: "occluded"};
   } else if (operation === "fill") {
     if (!("value" in this) && !this.isContentEditable) return {status: "unsupported"};
     this.focus();
@@ -830,21 +852,48 @@ export class BrowserController {
       (operation === "press" && ["Enter", " ", "Space", "Spacebar"].includes(value));
     const frameId = activates ? await mainFrameId(tabId) : null;
     const navigation = frameId === null ? null : actionNavigationWaiter(tabId, frameId);
-    let result: { status?: unknown };
+    let result: { status?: unknown; point?: { x?: unknown; y?: unknown } };
     try {
-      result = await callOnReference<{ status?: unknown }>(
-        tabId,
-        reference,
-        ACT_ON_REFERENCE_FUNCTION,
-        [operation, value, expected],
-      );
+      result = await callOnReference<{
+        status?: unknown;
+        point?: { x?: unknown; y?: unknown };
+      }>(tabId, reference, ACT_ON_REFERENCE_FUNCTION, [operation, value, expected]);
       if (result.status === "changed") {
         throw toolError("browser_stale_reference", "The browser element changed.");
       }
       if (result.status !== "ok") {
         throw toolError("browser_action_unsupported", "The browser action is unsupported.");
       }
-      if (operation === "press") {
+      if (!this.registry.acceptsRef(sessionId, tabId, reference)) {
+        throw toolError("browser_stale_reference", "The browser reference is stale.");
+      }
+      if (operation === "click") {
+        const x = result.point?.x;
+        const y = result.point?.y;
+        if (
+          typeof x !== "number" ||
+          !Number.isFinite(x) ||
+          typeof y !== "number" ||
+          !Number.isFinite(y)
+        ) {
+          throw toolError("browser_action_unsupported", "The browser action is unsupported.");
+        }
+        await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+        await cdp(tabId, "Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+        await cdp(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+      } else if (operation === "press") {
         const text = [...value].length === 1 ? value : "";
         for (const type of ["keyDown", "keyUp"]) {
           await cdp(tabId, "Input.dispatchKeyEvent", { type, key: value, text });

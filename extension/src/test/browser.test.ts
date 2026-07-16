@@ -297,6 +297,49 @@ describe("navigation", () => {
   });
 });
 
+describe("accessibility snapshots", () => {
+  it("mints references only from backend DOM node ids", async () => {
+    const { sendCommand } = chromeHarness();
+    const controller = new BrowserController();
+    controller.registry.start("task");
+    controller.registry.addShared("task", 10);
+    sendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method === "Accessibility.getFullAXTree") {
+        return {
+          nodes: [
+            {
+              role: { value: "button" },
+              name: { value: "Checkout" },
+              nodeId: "ax-20",
+              backendDOMNodeId: 20,
+            },
+            {
+              role: { value: "button" },
+              name: { value: "AX only" },
+              nodeId: "ax-21",
+            },
+          ],
+        };
+      }
+      return {};
+    });
+
+    const result = await controller.execute(
+      browserRequest(19, "snapshot", { session_id: "task", tab_id: 10 }),
+    );
+
+    expect(result.response).toMatchObject({
+      success: true,
+      data: {
+        refs: ["e0:n20"],
+        text: "[e0:n20] button: Checkout\nbutton: AX only",
+      },
+    });
+    expect(controller.registry.acceptsRef("task", 10, "e0:n20")).toBe(true);
+    expect(controller.registry.acceptsRef("task", 10, "e0:nax-21")).toBe(false);
+  });
+});
+
 describe("attended reference actions", () => {
   const element = {
     tag: "button",
@@ -327,7 +370,7 @@ describe("attended reference actions", () => {
         if (method === "Runtime.callFunctionOn") {
           const declaration = String(params?.functionDeclaration ?? "");
           return declaration.includes("operation, value, expected")
-            ? { result: { value: { status: "ok" } } }
+            ? { result: { value: { status: "ok", point: { x: 24, y: 48 } } } }
             : { result: { value: { element, url: "https://example.com/checkout" } } };
         }
         if (method === "Accessibility.getFullAXTree") return { nodes: [] };
@@ -364,6 +407,13 @@ describe("attended reference actions", () => {
           String(call[2]?.functionDeclaration).includes("expected"),
       ),
     ).toBe(true);
+    expect(sendCommand).toHaveBeenCalledWith({ tabId: 10 }, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: 24,
+      y: 48,
+      button: "left",
+      clickCount: 1,
+    });
   });
 
   it("waits for action-triggered navigation before taking the next snapshot", async () => {
@@ -386,7 +436,7 @@ describe("attended reference actions", () => {
                 frame: { id: "frame-10", url: "https://example.com/next" },
               });
             }, 0);
-            return { result: { value: { status: "ok" } } };
+            return { result: { value: { status: "ok", point: { x: 24, y: 48 } } } };
           }
           return { result: { value: { element, url: "https://example.com/checkout" } } };
         }
@@ -424,7 +474,7 @@ describe("attended reference actions", () => {
       async (_target: unknown, method: string, _params?: Record<string, unknown>) => {
         if (method === "DOM.resolveNode") return { object: { objectId: "node-20" } };
         if (method === "Runtime.callFunctionOn") {
-          return { result: { value: { status: "ok" } } };
+          return { result: { value: { status: "ok", point: { x: 24, y: 48 } } } };
         }
         if (method === "Accessibility.getFullAXTree") return { nodes: [] };
         if (method === "Runtime.evaluate") return { result: { value: "complete" } };
@@ -478,6 +528,38 @@ describe("attended reference actions", () => {
     expect(controller.registry.acceptsRef("task", 10, "e0:n20")).toBe(true);
   });
 
+  it("refuses an occluded click without dispatching mouse input", async () => {
+    const { controller, sendCommand } = interactionController();
+    sendCommand.mockImplementation(async (_target: unknown, method: string) => {
+      if (method === "DOM.resolveNode") return { object: { objectId: "node-20" } };
+      if (method === "Runtime.callFunctionOn") {
+        return { result: { value: { status: "occluded" } } };
+      }
+      return {};
+    });
+
+    await expect(
+      controller.execute(
+        browserRequest(31, "click", {
+          session_id: "task",
+          tab_id: 10,
+          ref: "e0:n20",
+          expected: element,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      response: { success: false, errorCode: "browser_action_unsupported" },
+    });
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Input.dispatchMouseEvent")).toBe(
+      false,
+    );
+    const declaration = sendCommand.mock.calls.find(
+      (call) => call[1] === "Runtime.callFunctionOn",
+    )?.[2]?.functionDeclaration;
+    expect(declaration).toContain("document.elementFromPoint");
+    expect(declaration).not.toContain("this.click()");
+  });
+
   it("dispatches click, fill, and press only with broker-supplied expected facts", async () => {
     for (const [tool, extra] of [
       ["click", {}],
@@ -487,7 +569,9 @@ describe("attended reference actions", () => {
       const { controller, sendCommand } = interactionController();
       sendCommand.mockImplementation(async (_target: unknown, method: string) => {
         if (method === "DOM.resolveNode") return { object: { objectId: "node-20" } };
-        if (method === "Runtime.callFunctionOn") return { result: { value: { status: "ok" } } };
+        if (method === "Runtime.callFunctionOn") {
+          return { result: { value: { status: "ok", point: { x: 24, y: 48 } } } };
+        }
         if (method === "Accessibility.getFullAXTree") return { nodes: [] };
         if (method === "Runtime.evaluate") return { result: { value: "complete" } };
         return {};

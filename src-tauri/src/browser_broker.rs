@@ -1321,6 +1321,32 @@ impl BrowserBroker {
                 .await;
         }
 
+        let _revocation_guard = if matches!(
+            tool,
+            "navigate" | "close_tab" | "snapshot" | "screenshot" | "list_tabs"
+        ) {
+            Some(self.action_lock.lock().await)
+        } else {
+            None
+        };
+        if _revocation_guard.is_some() {
+            let active = {
+                let state = self.lock();
+                state.transport_policy.enabled(kind)
+                    && context_access_enabled(&state, kind, routine_id)
+                    && state.sessions.get(&session_id).is_some_and(|session| {
+                        session.transport_kind == kind
+                            && session.routine_id.as_deref() == routine_id
+                    })
+            };
+            if !active {
+                return Err(AppError::new(
+                    "browser_access_disabled",
+                    "Browser use is not enabled.",
+                ));
+            }
+        }
+
         let declaration = self.declare_outcome(kind, tool, &session_id).await?;
         if tool == "navigate" {
             if let Err(error) = required_string(&arguments, "url").and_then(validate_attended_url) {
@@ -1351,11 +1377,6 @@ impl BrowserBroker {
             }
         }
 
-        let _action = if matches!(tool, "navigate" | "close_tab") {
-            Some(self.action_lock.lock().await)
-        } else {
-            None
-        };
         let response = async {
             let mut response = transport.execute(tool, arguments.clone()).await?;
         if tool == "list_tabs" {
@@ -1428,8 +1449,25 @@ impl BrowserBroker {
         arguments: Value,
     ) -> Result<Value, AppError> {
         let _action = self.action_lock.lock().await;
-        self.prune_expired_approvals().await?;
         let key = browser_action_key(tool, &arguments)?;
+        let active = {
+            let state = self.lock();
+            state
+                .transport_policy
+                .enabled(BrowserTransportKind::Attended)
+                && context_access_enabled(&state, BrowserTransportKind::Attended, None)
+                && state.sessions.get(&key.session_id).is_some_and(|session| {
+                    session.transport_kind == BrowserTransportKind::Attended
+                        && session.routine_id.is_none()
+                })
+        };
+        if !active {
+            return Err(AppError::new(
+                "browser_access_disabled",
+                "Browser use is not enabled.",
+            ));
+        }
+        self.prune_expired_approvals().await?;
         if let Some(outcome) = self.lock().resolved_actions.get(&key).cloned() {
             return resolved_action_result(outcome);
         }
@@ -2135,6 +2173,29 @@ mod tests {
             self.terminated
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             self.release.notify_waiters();
+        }
+    }
+
+    struct BlockingAttendedReadTransport {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl BrowserTransport for BlockingAttendedReadTransport {
+        fn execute<'a>(&'a self, tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                if tool == "snapshot" {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                Ok(TransportResponse::data(match tool {
+                    "open_tab" => json!({ "tabId": 7 }),
+                    "snapshot" => json!({ "snapshot": "attended page text" }),
+                    _ => json!({}),
+                }))
+            })
         }
     }
 
@@ -3753,6 +3814,70 @@ mod tests {
             .expect_err("changed facts must abort");
         assert_eq!(refusal.code, "browser_stale_reference");
         assert_eq!(transport.action_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn attended_reads_finish_before_access_revocation_completes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flag = temp.path().join("browser-access");
+        std::fs::write(&flag, b"1").expect("grant");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let broker = Arc::new(BrowserBroker::default());
+        broker.set_access_flag_path(flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(BlockingAttendedReadTransport {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            temp.path().join("images"),
+            temp.path().join("artifacts"),
+        );
+        let started = broker
+            .execute(BrowserTransportKind::Attended, "start_session", json!({}))
+            .await
+            .expect("start");
+        let session_id = started["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        broker
+            .execute(
+                BrowserTransportKind::Attended,
+                "open_tab",
+                json!({ "session_id": &session_id }),
+            )
+            .await
+            .expect("open tab");
+
+        let read_broker = Arc::clone(&broker);
+        let read_session = session_id.clone();
+        let read = tokio::spawn(async move {
+            read_broker
+                .execute(
+                    BrowserTransportKind::Attended,
+                    "snapshot",
+                    json!({ "session_id": read_session, "tab_id": 7 }),
+                )
+                .await
+        });
+        entered.notified().await;
+        let revoke_broker = Arc::clone(&broker);
+        let mut revoke = tokio::spawn(async move { revoke_broker.set_enabled(false).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut revoke)
+                .await
+                .is_err(),
+            "revocation returned while attended page data was still in flight"
+        );
+
+        release.notify_waiters();
+        let response = read.await.expect("read task").expect("read result");
+        assert_eq!(response["snapshot"], "attended page text");
+        revoke.await.expect("revoke task").expect("revoke result");
+        assert!(!broker.is_enabled());
+        assert_eq!(broker.active_session_count(), 0);
     }
 
     #[tokio::test]

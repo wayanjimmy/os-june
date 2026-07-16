@@ -55,6 +55,17 @@ const APP_BUNDLE_IDENTIFIER: &str = "co.opensoftware.june";
 const DESCRIPTOR_FILE_NAME: &str = "extension-host.json";
 const DESCRIPTOR_POINTER_FILE_NAME: &str = "extension-host-path";
 
+fn create_private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 pub(crate) fn descriptor_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join(DESCRIPTOR_FILE_NAME)
 }
@@ -93,17 +104,9 @@ fn write_descriptor_pointer(
         random_token()
     ));
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let mut file = create_private_file(&temporary)?;
         file.write_all(selected_descriptor.to_string_lossy().as_bytes())?;
         file.sync_all()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
         std::fs::rename(&temporary, pointer_path)
     })();
     if result.is_err() {
@@ -271,12 +274,17 @@ fn write_descriptor(
     std::fs::create_dir_all(data_dir)?;
     let path = descriptor_path(data_dir);
     let body = serde_json::to_vec_pretty(descriptor)?;
-    std::fs::write(&path, body)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    let temporary = data_dir.join(format!(".{DESCRIPTOR_FILE_NAME}.{}.tmp", random_token()));
+    let result = (|| {
+        let mut file = create_private_file(&temporary)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
+    result?;
     Ok(path)
 }
 
@@ -1367,6 +1375,14 @@ mod tests {
     #[test]
     fn descriptor_roundtrips_and_is_owner_only() {
         let temp = tempfile::tempdir().expect("tempdir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let previous = descriptor_path(temp.path());
+            std::fs::write(&previous, br#"{"token":"stale"}"#).expect("old descriptor");
+            std::fs::set_permissions(&previous, std::fs::Permissions::from_mode(0o644))
+                .expect("make old descriptor permissive");
+        }
         let descriptor = HostDescriptor {
             v: PROTOCOL_VERSION,
             port: 4321,
