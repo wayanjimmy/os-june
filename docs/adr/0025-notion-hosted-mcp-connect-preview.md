@@ -130,3 +130,41 @@ Settings copy must also change when this capability ships. It must no longer say
 that selected-resource scoping is not verified and that Notion may allow access
 beyond selected pages, while making clear that page creation requires explicit
 approval.
+
+## Addendum: approved page-update action in the preview
+
+Direct hosted MCP clients expose Notion's page-update tool, and a page-update
+flow is the common follow-up to June's existing search, fetch, and page-create
+workflows. June may therefore extend the hosted MCP preview with one additional
+mutating tool: `notion-update-page` through `june_notion_actions`.
+
+This addendum does not promote the Notion connector out of preview and does not
+satisfy the selected-resource exit criteria above. Selected-resource scoping is
+still unverified, and June must not claim that Notion results or update targets
+are limited to pages the user selected. This addendum also does not approve
+move, duplicate, comment, attachment, database, data-source, or view action
+tools.
+
+Every page-update call must use the same Rust-controlled action path as page
+creation:
+
+- Hermes and React never receive raw Notion tokens or dynamic-registration
+  secrets.
+- Rust resolves Notion credentials from Keychain and proxies the hosted MCP call.
+- The requested hosted MCP tool must match an exact canonical Notion action
+  allowlist.
+- The user must approve the update before June calls Notion. The approval should
+  show the operation, target page identifier or URL, title when available,
+  whether properties or content appear to change, and a bounded preview of the
+  change.
+- Rust should preflight the request before approval: verify Notion is connected,
+  reject malformed, empty, oversized, or ambiguous updates, and attempt to
+  identify a single target page.
+- Approval must bind to the exact request that executes. June should canonicalize
+  the tool name and arguments before preview, then execute that same immutable
+  request after approval.
+- June must not automatically retry a timed-out mutation. If the hosted MCP call
+  may have committed before the timeout, surface the ambiguity rather than
+  sending the update again.
+- Logs must not include tokens, dynamic client material, raw private page
+  bodies, or full hosted MCP payloads.

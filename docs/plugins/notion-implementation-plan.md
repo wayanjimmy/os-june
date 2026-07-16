@@ -14,9 +14,10 @@ in the OS Keychain, and lets the user disconnect locally. When connected, June
 registers a read-only `june_notion` MCP bridge with Hermes so the agent can
 discover the hosted MCP read tools. This slice also registers a narrow
 `june_notion_actions` bridge for approved page creation through Notion's hosted
-MCP `notion-create-pages` tool. This slice intentionally does not test or
-enforce selected-resource scoping and does not expose update, delete, move,
-duplicate, comment, or attachment action tools.
+MCP `notion-create-pages` tool and approved page updates through
+`notion-update-page`. This slice intentionally does not test or enforce
+selected-resource scoping and does not expose move, duplicate, comment,
+attachment, database, data-source, or view action tools.
 
 The broader PRD still targets selected Notion content through read and action
 MCP servers, with the authorized page boundary proven at the provider or
@@ -80,8 +81,8 @@ allowlist:
 Deny all write/action hosted tools in the scoping probe command, including
 create, update, move, duplicate, comment, and attachment tools. Keep the command
 out of production UX. The production preview may separately expose approved page
-creation through `june_notion_actions`; that action path is not evidence for the
-selected-resource read boundary.
+creation and page updates through `june_notion_actions`; that action path is not
+evidence for the selected-resource read boundary.
 
 Test with a non-sensitive Notion workspace matrix that uses unique canary
 titles and body snippets for selected and unselected resources. Record returned
@@ -142,7 +143,7 @@ selected-resource proof, and an honest privacy claim.
 | Server | Tools |
 | --- | --- |
 | `june_notion` | `search_pages`, `get_page`, `list_data_source`, `query_data_source`, `list_comments` |
-| `june_notion_actions` | `notion-create-pages` initially; later `update_page_properties`, `append_blocks`, `update_block` only after separate approval |
+| `june_notion_actions` | `notion-create-pages`, `notion-update-page`; later comments, move, duplicate, attachment, database/data-source, and view actions only after separate approval |
 
 Tool results preserve page/block/data-source ids, parent ids, canonical URLs,
 last-edited time, property schema, pagination cursor, and a compact content
@@ -194,9 +195,9 @@ graph.
    hosted MCP OAuth flow, stores credentials only in the Notion Keychain
    service, reports local connection state, supports local disconnect, registers
    a read-only `june_notion` MCP bridge with Hermes, and registers
-   `june_notion_actions` for approved page creation. It does not run
-   selected-resource scoping probes or expose update, delete, move, duplicate,
-   comment, or attachment action tools.
+   `june_notion_actions` for approved page creation and approved page updates.
+   It does not run selected-resource scoping probes or expose move, duplicate,
+   comment, attachment, database, data-source, or view action tools.
 1. **Connector page shell:** keep the Notion row visible and label the connected
    state as preview/unverified until selected-resource scoping is proven. The
    subtitle must not promise selected-page-only access.

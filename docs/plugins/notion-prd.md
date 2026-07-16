@@ -86,6 +86,12 @@ permissions form a hard boundary only after the provider or a Rust-enforced
 authorized-root graph proves that boundary for every read path. All creates and
 updates require approval in v1, with exact destination and diff visible.
 
+Preview note, 2026-07-16: the hosted MCP preview may expose approved page
+creation and narrowly targeted page updates before selected-resource scoping is
+proven. This does not change the product promise above: shipped UI must keep the
+preview caveat visible, and the connector must not claim selected-page-only
+access until the boundary is proven or enforced in Rust.
+
 ## Business model
 
 Local reads and approved publishing are Hobby if the auth design preserves the
