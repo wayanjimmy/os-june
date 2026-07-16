@@ -37,6 +37,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_RESPONSE_MAX_BYTES: usize = 512 * 1024;
+const MCP_TOOL_SCHEMA_MAX_BYTES: usize = 64 * 1024;
+const MCP_DESCRIPTION_MAX_CHARS: usize = 240;
 const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
 const NOTION_READ_TOOL_ALLOWLIST: &[&str] = &[
     "notion-search",
@@ -44,8 +46,12 @@ const NOTION_READ_TOOL_ALLOWLIST: &[&str] = &[
     "notion-query-data-sources",
     "notion-query-database-view",
     "notion-get-comments",
+    "notion-get-teams",
+    "notion-get-users",
+    "notion-get-enhanced-markdown-specification",
+    "notion-get-view-configuration-dsl",
 ];
-const NOTION_ACTION_TOOL_ALLOWLIST: &[&str] = &["notion-create-pages"];
+const NOTION_ACTION_TOOL_ALLOWLIST: &[&str] = &["notion-create-pages", "notion-update-page"];
 const NOTION_ACTIONS_SERVER_NAME: &str = "june_notion_actions";
 
 static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
@@ -374,28 +380,34 @@ pub async fn list_tools() -> Result<NotionToolInventory, AppError> {
 }
 
 pub async fn mcp_tool_list() -> Result<NotionMcpToolList, AppError> {
+    filtered_mcp_tool_list(tool_allowed_for_hermes).await
+}
+
+pub async fn mcp_action_tool_list() -> Result<NotionMcpToolList, AppError> {
+    filtered_mcp_tool_list(action_tool_allowed_for_hermes).await
+}
+
+async fn filtered_mcp_tool_list(
+    allowed: fn(&str) -> Option<&'static str>,
+) -> Result<NotionMcpToolList, AppError> {
     let stored = load_connected().await?;
     let client = McpHttpClient::new(stored.access_token.clone());
     client.initialize().await?;
     let tools = client.hosted_tools_list().await?;
     Ok(NotionMcpToolList {
-        tools: tools
-            .into_iter()
-            .filter(|tool| tool_allowed_for_hermes(&tool.name))
-            .collect(),
+        tools: filter_allowed_tools(tools, allowed),
     })
 }
 
 pub async fn call_hosted_tool(
     request: NotionHostedToolCallRequest,
 ) -> Result<NotionHostedToolCallResult, AppError> {
-    let tool_name = request.tool_name.trim();
-    if !tool_allowed_for_hermes(tool_name) {
+    let Some(tool_name) = tool_allowed_for_hermes(&request.tool_name) else {
         return Err(AppError::new(
             "notion_tool_not_allowed",
             "That Notion hosted MCP tool is not enabled in June yet.",
         ));
-    }
+    };
     call_hosted_tool_unchecked(tool_name, request.arguments).await
 }
 
@@ -403,16 +415,15 @@ pub async fn call_hosted_action_tool(
     app: &AppHandle,
     request: NotionHostedToolCallRequest,
 ) -> Result<NotionHostedToolCallResult, AppError> {
-    let tool_name = request.tool_name.trim();
-    if !action_tool_allowed_for_hermes(tool_name) {
+    let Some(tool_name) = action_tool_allowed_for_hermes(&request.tool_name) else {
         return Err(AppError::new(
             "notion_tool_not_allowed",
             "That Notion hosted MCP action is not enabled in June yet.",
         ));
-    }
-    preflight_create_pages_arguments(&request.arguments)?;
-    let summary = summarize_create_pages_action(&request.arguments);
-    let args_preview = preview_create_pages_action(&request.arguments);
+    };
+    preflight_action_arguments(tool_name, &request.arguments)?;
+    let summary = summarize_action(tool_name, &request.arguments);
+    let args_preview = preview_action(tool_name, &request.arguments);
     let approval = crate::connectors::approvals::ActionRequest {
         grant_token: None,
         account_id: notion_account_email(),
@@ -461,7 +472,8 @@ fn connection() -> NotionConnection {
     }
 }
 
-async fn discover_and_validate() -> Result<(ResourceMetadata, AuthorizationServerMetadata), AppError> {
+async fn discover_and_validate() -> Result<(ResourceMetadata, AuthorizationServerMetadata), AppError>
+{
     let resource = get_json::<ResourceMetadata>(RESOURCE_METADATA_ENDPOINT).await?;
     if resource.resource != EXPECTED_RESOURCE
         || !resource
@@ -476,10 +488,8 @@ async fn discover_and_validate() -> Result<(ResourceMetadata, AuthorizationServe
         return Err(metadata_error());
     }
 
-    let auth_server = get_json::<AuthorizationServerMetadata>(
-        AUTHORIZATION_SERVER_METADATA_ENDPOINT,
-    )
-    .await?;
+    let auth_server =
+        get_json::<AuthorizationServerMetadata>(AUTHORIZATION_SERVER_METADATA_ENDPOINT).await?;
     if auth_server.issuer != EXPECTED_ISSUER
         || auth_server.authorization_endpoint != EXPECTED_AUTHORIZATION_ENDPOINT
         || auth_server.token_endpoint != EXPECTED_TOKEN_ENDPOINT
@@ -549,8 +559,8 @@ async fn register_client(
         .map_err(|_| registration_failed())?;
     let status = response.status().as_u16();
     let body = response.text().await.map_err(|_| registration_failed())?;
-    let registration = serde_json::from_str::<RegistrationResponse>(&body)
-        .map_err(|_| registration_failed())?;
+    let registration =
+        serde_json::from_str::<RegistrationResponse>(&body).map_err(|_| registration_failed())?;
     if registration.client_id.is_empty() {
         tracing::warn!(status, "notion dynamic registration returned no client id");
         return Err(registration_failed());
@@ -612,7 +622,10 @@ async fn exchange_code(
         .await
         .map_err(|_| token_exchange_failed(None))?;
     let status = response.status().as_u16();
-    let body = response.text().await.map_err(|_| token_exchange_failed(None))?;
+    let body = response
+        .text()
+        .await
+        .map_err(|_| token_exchange_failed(None))?;
     if let Ok(tokens) = serde_json::from_str::<TokenResponse>(&body) {
         if !tokens.access_token.is_empty() {
             return Ok(tokens);
@@ -647,10 +660,7 @@ impl McpHttpClient {
     }
 
     fn session_id(&self) -> Option<String> {
-        self.session_id
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.session_id.lock().ok().and_then(|guard| guard.clone())
     }
 
     async fn initialize(&self) -> Result<(), AppError> {
@@ -672,20 +682,24 @@ impl McpHttpClient {
         self.capture_session_id(&response);
         let value = read_mcp_json(response).await?;
         ensure_jsonrpc_ok(&value, "notion_mcp_initialize_failed")?;
-        self
-            .post_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {},
-            }))
-            .await?;
+        self.post_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }))
+        .await?;
         Ok(())
     }
 
     async fn tools_list(&self) -> Result<(Vec<NotionToolSummary>, usize), AppError> {
         let (tools, value, bytes) = self.hosted_tools_list_with_value().await?;
-        let summaries = tools.into_iter().map(|tool| summarize_tool(&tool)).collect();
-        let inventory_bytes = serde_json::to_vec(&value).map(|body| body.len()).unwrap_or(bytes);
+        let summaries = tools
+            .into_iter()
+            .map(|tool| summarize_tool(&tool))
+            .collect();
+        let inventory_bytes = serde_json::to_vec(&value)
+            .map(|body| body.len())
+            .unwrap_or(bytes);
         Ok((summaries, inventory_bytes))
     }
 
@@ -714,7 +728,9 @@ impl McpHttpClient {
             .iter()
             .filter_map(parse_hosted_tool)
             .collect();
-        let bytes = serde_json::to_vec(&value).map(|body| body.len()).unwrap_or(0);
+        let bytes = serde_json::to_vec(&value)
+            .map(|body| body.len())
+            .unwrap_or(0);
         Ok((tools, value, bytes))
     }
 
@@ -778,7 +794,10 @@ impl McpHttpClient {
             )
         })?;
         if !response.status().is_success() {
-            tracing::warn!(status = response.status().as_u16(), "notion MCP request failed");
+            tracing::warn!(
+                status = response.status().as_u16(),
+                "notion MCP request failed"
+            );
             return Err(AppError::new(
                 "notion_mcp_request_failed",
                 "Notion hosted MCP did not accept the request.",
@@ -868,6 +887,12 @@ fn parse_hosted_tool(value: &serde_json::Value) -> Option<NotionMcpTool> {
         .get("inputSchema")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
+    if serde_json::to_vec(&input_schema)
+        .map(|schema| schema.len() > MCP_TOOL_SCHEMA_MAX_BYTES)
+        .unwrap_or(true)
+    {
+        return None;
+    }
     Some(NotionMcpTool {
         name,
         description,
@@ -884,24 +909,77 @@ fn summarize_tool(tool: &NotionMcpTool) -> NotionToolSummary {
 }
 
 fn truncate_description(description: &str) -> String {
-    const MAX_DESCRIPTION_CHARS: usize = 240;
-    let mut truncated: String = description.chars().take(MAX_DESCRIPTION_CHARS).collect();
-    if description.chars().count() > MAX_DESCRIPTION_CHARS {
+    let mut truncated: String = description
+        .chars()
+        .take(MCP_DESCRIPTION_MAX_CHARS)
+        .collect();
+    if description.chars().count() > MCP_DESCRIPTION_MAX_CHARS {
         truncated.push_str("...");
     }
     truncated
 }
 
-fn tool_allowed_for_hermes(name: &str) -> bool {
-    NOTION_READ_TOOL_ALLOWLIST
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(name))
+fn filter_allowed_tools(
+    tools: Vec<NotionMcpTool>,
+    allowed: fn(&str) -> Option<&'static str>,
+) -> Vec<NotionMcpTool> {
+    let mut filtered = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for mut tool in tools {
+        let Some(canonical_name) = allowed(&tool.name) else {
+            continue;
+        };
+        if !seen.insert(canonical_name) {
+            continue;
+        }
+        tool.name = canonical_name.to_string();
+        filtered.push(tool);
+    }
+    filtered
 }
 
-fn action_tool_allowed_for_hermes(name: &str) -> bool {
-    NOTION_ACTION_TOOL_ALLOWLIST
+fn canonical_allowed_tool_name(name: &str, allowlist: &[&'static str]) -> Option<&'static str> {
+    let trimmed = name.trim();
+    allowlist
         .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(name))
+        .copied()
+        .find(|allowed| *allowed == trimmed)
+}
+
+fn tool_allowed_for_hermes(name: &str) -> Option<&'static str> {
+    canonical_allowed_tool_name(name, NOTION_READ_TOOL_ALLOWLIST)
+}
+
+fn action_tool_allowed_for_hermes(name: &str) -> Option<&'static str> {
+    canonical_allowed_tool_name(name, NOTION_ACTION_TOOL_ALLOWLIST)
+}
+
+fn preflight_action_arguments(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> Result<(), AppError> {
+    match tool_name {
+        "notion-create-pages" => preflight_create_pages_arguments(arguments),
+        "notion-update-page" => preflight_update_page_arguments(arguments),
+        _ => Err(AppError::new(
+            "notion_tool_not_allowed",
+            "That Notion hosted MCP action is not enabled in June yet.",
+        )),
+    }
+}
+
+fn summarize_action(tool_name: &str, arguments: &serde_json::Value) -> String {
+    match tool_name {
+        "notion-update-page" => summarize_update_page_action(arguments),
+        _ => summarize_create_pages_action(arguments),
+    }
+}
+
+fn preview_action(tool_name: &str, arguments: &serde_json::Value) -> String {
+    match tool_name {
+        "notion-update-page" => preview_update_page_action(arguments),
+        _ => preview_create_pages_action(arguments),
+    }
 }
 
 fn preflight_create_pages_arguments(arguments: &serde_json::Value) -> Result<(), AppError> {
@@ -909,6 +987,34 @@ fn preflight_create_pages_arguments(arguments: &serde_json::Value) -> Result<(),
         return Err(AppError::new(
             "notion_create_pages_invalid_args",
             "Notion page creation requires object arguments.",
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_update_page_arguments(arguments: &serde_json::Value) -> Result<(), AppError> {
+    let Some(object) = arguments.as_object() else {
+        return Err(AppError::new(
+            "notion_update_page_invalid_args",
+            "Notion page updates require object arguments.",
+        ));
+    };
+    if find_update_page_target(arguments).is_none() {
+        return Err(AppError::new(
+            "notion_update_page_missing_target",
+            "Notion page updates require a target page id or URL.",
+        ));
+    }
+    let has_change = object.iter().any(|(key, value)| {
+        !matches!(
+            key.as_str(),
+            "page_id" | "pageId" | "page" | "id" | "url" | "page_url" | "pageUrl"
+        ) && !value.is_null()
+    });
+    if !has_change {
+        return Err(AppError::new(
+            "notion_update_page_empty",
+            "Notion page updates require a change payload.",
         ));
     }
     Ok(())
@@ -936,6 +1042,54 @@ fn preview_create_pages_action(arguments: &serde_json::Value) -> String {
     )
 }
 
+fn summarize_update_page_action(_arguments: &serde_json::Value) -> String {
+    "Update a Notion page".to_string()
+}
+
+fn preview_update_page_action(arguments: &serde_json::Value) -> String {
+    let target = find_update_page_target(arguments).unwrap_or_else(|| "Unknown".to_string());
+    let title = find_first_string_by_key(arguments, &["title", "name"])
+        .unwrap_or_else(|| "Not specified".to_string());
+    let changes = summarize_update_change_keys(arguments);
+    format!(
+        "Operation: update Notion page | Target: {} | Title: {} | Changes: {}",
+        truncate_approval_value(&target),
+        truncate_approval_value(&title),
+        truncate_approval_value(&changes)
+    )
+}
+
+fn summarize_update_change_keys(arguments: &serde_json::Value) -> String {
+    let Some(object) = arguments.as_object() else {
+        return "Unknown".to_string();
+    };
+    let keys: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| {
+            !matches!(
+                *key,
+                "page_id" | "pageId" | "page" | "id" | "url" | "page_url" | "pageUrl"
+            )
+        })
+        .take(6)
+        .collect();
+    if keys.is_empty() {
+        "None".to_string()
+    } else {
+        keys.join(", ")
+    }
+}
+
+fn find_update_page_target(arguments: &serde_json::Value) -> Option<String> {
+    find_first_string_by_key(
+        arguments,
+        &[
+            "page_id", "pageId", "page", "id", "url", "page_url", "pageUrl",
+        ],
+    )
+}
+
 fn create_pages_count(arguments: &serde_json::Value) -> Option<usize> {
     arguments
         .get("pages")
@@ -947,7 +1101,10 @@ fn find_first_string_by_key(value: &serde_json::Value, keys: &[&str]) -> Option<
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
-                if keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate)) {
+                if keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                {
                     if let Some(text) = child.as_str().filter(|text| !text.trim().is_empty()) {
                         return Some(text.trim().to_string());
                     }
@@ -1223,7 +1380,10 @@ mod store {
                 .and_then(|entry| entry.delete_credential())
             {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(e) => Err(AppError::new("notion_keychain_delete_failed", e.to_string())),
+                Err(e) => Err(AppError::new(
+                    "notion_keychain_delete_failed",
+                    e.to_string(),
+                )),
             }
         })
         .await
@@ -1323,5 +1483,63 @@ mod tests {
         assert_eq!(connection.account_id, "notion-hosted-mcp");
         assert!(connection.preview);
         assert!(!connection.selected_resource_scoping_verified);
+    }
+
+    #[test]
+    fn notion_allowlists_are_exact_and_canonical() {
+        assert_eq!(
+            tool_allowed_for_hermes("notion-search"),
+            Some("notion-search")
+        );
+        assert_eq!(
+            action_tool_allowed_for_hermes("notion-create-pages"),
+            Some("notion-create-pages")
+        );
+        assert_eq!(
+            action_tool_allowed_for_hermes("notion-update-page"),
+            Some("notion-update-page")
+        );
+        assert_eq!(action_tool_allowed_for_hermes("Notion-update-page"), None);
+        assert_eq!(action_tool_allowed_for_hermes("notion-move-pages"), None);
+        assert_eq!(tool_allowed_for_hermes("notion-update-page"), None);
+    }
+
+    #[test]
+    fn filters_provider_tools_through_canonical_allowlist() {
+        let tools = vec![
+            NotionMcpTool {
+                name: "notion-update-page".to_string(),
+                description: Some("Update".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            NotionMcpTool {
+                name: "notion-update-page".to_string(),
+                description: Some("Duplicate".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            NotionMcpTool {
+                name: "notion-move-pages".to_string(),
+                description: Some("Move".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+        ];
+
+        let filtered = filter_allowed_tools(tools, action_tool_allowed_for_hermes);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "notion-update-page");
+    }
+
+    #[test]
+    fn oversized_provider_schema_is_rejected() {
+        let oversized = "x".repeat(MCP_TOOL_SCHEMA_MAX_BYTES + 1);
+        let tool = serde_json::json!({
+            "name": "notion-update-page",
+            "description": "Update a page",
+            "inputSchema": {
+                "type": "object",
+                "description": oversized,
+            },
+        });
+        assert!(parse_hosted_tool(&tool).is_none());
     }
 }
