@@ -1,4 +1,4 @@
-# ADR 0024: June-owned project memory store
+# ADR 0025: June-owned project memory store
 
 Date: 2026-07-14
 Status: accepted
