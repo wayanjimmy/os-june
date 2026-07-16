@@ -20,6 +20,13 @@ interface ChromeDebuggerApi {
         params?: Record<string, unknown>,
       ) => void,
     ): void;
+    removeListener(
+      callback: (
+        source: { tabId?: number },
+        method: string,
+        params?: Record<string, unknown>,
+      ) => void,
+    ): void;
   };
   onDetach: {
     addListener(callback: (source: { tabId?: number }, reason: string) => void): void;

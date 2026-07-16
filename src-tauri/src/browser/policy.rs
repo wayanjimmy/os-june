@@ -123,6 +123,15 @@ pub fn is_sensitive_field(element: &InteractiveElement) -> bool {
             "security code",
             "card number",
             "credit card",
+            "expiration",
+            "expiry",
+            "exp date",
+            "exp month",
+            "exp year",
+            "mm/yy",
+            "mm / yy",
+            "valid thru",
+            "valid through",
             "cvv",
             "cvc",
         ],
@@ -1068,6 +1077,21 @@ mod tests {
             InteractiveElement {
                 tag: "input".into(),
                 autocomplete: "cc-number".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                label: "Expiration date (MM/YY)".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                name: "card_expiry".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                label: "Valid thru".into(),
                 ..InteractiveElement::default()
             },
         ] {

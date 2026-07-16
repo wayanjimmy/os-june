@@ -444,10 +444,20 @@ impl BrowserBroker {
             state.pending_by_action.clear();
             state.resolved_actions.clear();
             let transports = state.transports.clone();
-            let sessions = state
+            let attended_session_ids = state
                 .sessions
-                .drain()
-                .map(|(id, session)| (id.clone(), session.transport_kind))
+                .iter()
+                .filter(|(_, session)| session.routine_id.is_none())
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            let sessions = attended_session_ids
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .sessions
+                        .remove(&id)
+                        .map(|session| (id, session.transport_kind))
+                })
                 .collect::<Vec<_>>();
             (transports, sessions, cancelled)
         };
@@ -921,7 +931,9 @@ impl BrowserBroker {
         tool: &str,
         arguments: Value,
     ) -> Result<Value, AppError> {
-        self.require_enabled()?;
+        if matches!(context, BrowserBrokerContext::Attended) {
+            self.require_enabled()?;
+        }
         let kind = context.transport_kind();
         self.require_transport_enabled(
             kind,
@@ -961,7 +973,6 @@ impl BrowserBroker {
         tool: &str,
         mut arguments: Value,
     ) -> Result<Value, AppError> {
-        self.require_enabled()?;
         self.require_transport_enabled(kind, tool, &arguments, routine_id)?;
         if !matches!(
             tool,
@@ -1031,12 +1042,8 @@ impl BrowserBroker {
                     return Err(error);
                 }
                 let mut state = self.lock();
-                let enabled = !state.transition_blocked
-                    && state.transport_policy.enabled(kind)
-                    && state
-                        .access_flag_path
-                        .as_ref()
-                        .is_some_and(|path| path.exists());
+                let enabled = state.transport_policy.enabled(kind)
+                    && context_access_enabled(&state, kind, routine_id);
                 if enabled {
                     state.sessions.insert(
                         session_id.clone(),
@@ -1086,8 +1093,8 @@ impl BrowserBroker {
             }
             let still_owned = {
                 let state = self.lock();
-                !state.transition_blocked
-                    && state.transport_policy.enabled(kind)
+                state.transport_policy.enabled(kind)
+                    && context_access_enabled(&state, kind, routine_id)
                     && state.sessions.get(&session_id).is_some_and(|session| {
                         session.transport_kind == kind
                             && session.routine_id.as_deref() == routine_id
@@ -1688,6 +1695,25 @@ impl BrowserBroker {
             .sessions
             .insert(id.to_string(), BrowserSession::default());
     }
+}
+
+fn context_access_enabled(
+    state: &BrowserBrokerState,
+    kind: BrowserTransportKind,
+    routine_id: Option<&str>,
+) -> bool {
+    if let Some(routine_id) = routine_id {
+        return kind == BrowserTransportKind::Managed
+            && state
+                .routine_grants
+                .iter()
+                .any(|grant| grant.job_id == routine_id && grant.enabled);
+    }
+    !state.transition_blocked
+        && state
+            .access_flag_path
+            .as_ref()
+            .is_some_and(|path| path.exists())
 }
 
 fn browser_action_key(tool: &str, arguments: &Value) -> Result<BrowserActionKey, AppError> {
@@ -2434,6 +2460,46 @@ mod tests {
             .expect("session id")
             .to_string();
         (temp, broker, transport, repositories, session_id)
+    }
+
+    #[tokio::test]
+    async fn routine_opt_in_is_independent_of_attended_browser_access() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker = BrowserBroker::default();
+        broker.set_access_flag_path(temp.path().join("missing-attended-grant"));
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            Arc::new(FakeTransport),
+            temp.path().join("images"),
+            temp.path().join("artifacts"),
+        );
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-independent".into(),
+            server_name: "june_browser_routine_independent".into(),
+            token: "routine-token".into(),
+            enabled: true,
+        });
+
+        let started = broker
+            .execute_for(
+                BrowserBrokerContext::Routine("routine-independent".into()),
+                "start_session",
+                json!({}),
+            )
+            .await
+            .expect("the routine's own grant is sufficient");
+        broker
+            .set_enabled(false)
+            .await
+            .expect("attended revoke stays independent");
+        broker
+            .execute_for(
+                BrowserBrokerContext::Routine("routine-independent".into()),
+                "close_session",
+                json!({ "session_id": started["sessionId"] }),
+            )
+            .await
+            .expect("attended revoke does not tear down the opted-in routine");
     }
 
     #[tokio::test]

@@ -83,7 +83,9 @@ export class TaskTabRegistry {
   removeTab(sessionId: string, tabId: number): void {
     const session = this.session(sessionId);
     session.tabs.delete(tabId);
-    if (session.tabs.size === 0) session.groupId = undefined;
+    if (![...session.tabs.values()].some((tab) => tab.ownership === "created")) {
+      session.groupId = undefined;
+    }
     if (session.activeTabId === tabId) session.activeTabId = session.tabs.keys().next().value;
   }
 
@@ -287,6 +289,62 @@ async function waitUntilReady(tabId: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw toolError("navigation_timeout", "The page did not become ready in time.");
+}
+
+async function mainFrameId(tabId: number): Promise<string | null> {
+  try {
+    const result = (await cdp(tabId, "Page.getFrameTree")) as {
+      frameTree?: { frame?: { id?: unknown } };
+    };
+    return typeof result.frameTree?.frame?.id === "string" ? result.frameTree.frame.id : null;
+  } catch {
+    return null;
+  }
+}
+
+function actionNavigationWaiter(tabId: number, frameId: string) {
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let resolvePromise: (navigated: boolean) => void = () => undefined;
+  const promise = new Promise<boolean>((resolve) => {
+    resolvePromise = resolve;
+  });
+  const finish = (navigated: boolean) => {
+    if (settled) return;
+    settled = true;
+    if (timer !== undefined) clearTimeout(timer);
+    debuggerApi().onEvent.removeListener(listener);
+    resolvePromise(navigated);
+  };
+  const listener = (
+    source: { tabId?: number },
+    method: string,
+    params?: Record<string, unknown>,
+  ) => {
+    if (source.tabId !== tabId) return;
+    const eventFrameId =
+      typeof params?.frameId === "string"
+        ? params.frameId
+        : typeof (params?.frame as { id?: unknown } | undefined)?.id === "string"
+          ? ((params?.frame as { id: string }).id ?? null)
+          : null;
+    if (
+      eventFrameId === frameId &&
+      ["Page.frameStartedLoading", "Page.frameNavigated", "Page.navigatedWithinDocument"].includes(
+        method,
+      )
+    ) {
+      finish(true);
+    }
+  };
+  debuggerApi().onEvent.addListener(listener);
+  return {
+    cancel: () => finish(false),
+    wait: () => {
+      if (!settled && timer === undefined) timer = setTimeout(() => finish(false), 500);
+      return promise;
+    },
+  };
 }
 
 type PageNavigation = { frameId?: unknown; loaderId?: unknown; errorText?: unknown };
@@ -734,26 +792,41 @@ export class BrowserController {
         : operation === "press"
           ? stringArg(args, "key")
           : "";
-    const result = await callOnReference<{ status?: unknown }>(
-      tabId,
-      reference,
-      ACT_ON_REFERENCE_FUNCTION,
-      [operation, value, expected],
-    );
-    if (result.status === "changed") {
-      throw toolError("browser_stale_reference", "The browser element changed.");
-    }
-    if (result.status !== "ok") {
-      throw toolError("browser_action_unsupported", "The browser action is unsupported.");
-    }
-    if (operation === "press") {
-      const text = [...value].length === 1 ? value : "";
-      for (const type of ["keyDown", "keyUp"]) {
-        await cdp(tabId, "Input.dispatchKeyEvent", { type, key: value, text });
+    const activates =
+      operation === "click" ||
+      (operation === "press" && ["Enter", " ", "Space", "Spacebar"].includes(value));
+    const frameId = activates ? await mainFrameId(tabId) : null;
+    const navigation = frameId === null ? null : actionNavigationWaiter(tabId, frameId);
+    let result: { status?: unknown };
+    try {
+      result = await callOnReference<{ status?: unknown }>(
+        tabId,
+        reference,
+        ACT_ON_REFERENCE_FUNCTION,
+        [operation, value, expected],
+      );
+      if (result.status === "changed") {
+        throw toolError("browser_stale_reference", "The browser element changed.");
       }
+      if (result.status !== "ok") {
+        throw toolError("browser_action_unsupported", "The browser action is unsupported.");
+      }
+      if (operation === "press") {
+        const text = [...value].length === 1 ? value : "";
+        for (const type of ["keyDown", "keyUp"]) {
+          await cdp(tabId, "Input.dispatchKeyEvent", { type, key: value, text });
+        }
+      }
+    } catch (error) {
+      navigation?.cancel();
+      throw error;
     }
     this.registry.invalidate(sessionId, tabId);
-    await waitUntilReady(tabId);
+    if (navigation === null) {
+      await waitUntilReady(tabId);
+    } else if (await navigation.wait()) {
+      await waitUntilReady(tabId);
+    }
     return this.snapshot(sessionId, tabId, this.registry.tab(sessionId, tabId));
   }
 

@@ -4,8 +4,9 @@
 //! (`june-nm-shim`, see `shim` below); the shim relays every frame to the
 //! authenticated loopback listener this module runs. Chrome spawns the shim,
 //! so credentials cannot ride in its environment: the listener writes a
-//! connection descriptor (port + per-run token) to a fixed file in the app
-//! data dir, and the shim authenticates with it on its first frame.
+//! connection descriptor (port + per-run token) to the selected app data dir.
+//! Native-host registration persists that selection in an owner-only pointer
+//! because Chrome does not inherit June's debug/prod environment choice.
 //!
 //! Wire format on both legs is Chrome's native messaging framing: a 4-byte
 //! little-endian length prefix followed by UTF-8 JSON. Every message carries
@@ -51,9 +52,72 @@ pub const NATIVE_HOST_NAME: &str = "co.opensoftware.june.extension";
 const APP_BUNDLE_IDENTIFIER: &str = "co.opensoftware.june";
 
 const DESCRIPTOR_FILE_NAME: &str = "extension-host.json";
+const DESCRIPTOR_POINTER_FILE_NAME: &str = "extension-host-path";
 
 pub(crate) fn descriptor_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join(DESCRIPTOR_FILE_NAME)
+}
+
+fn app_support_dir(home: &std::path::Path) -> PathBuf {
+    home.join("Library").join("Application Support")
+}
+
+fn bundle_data_dir(home: &std::path::Path) -> PathBuf {
+    app_support_dir(home).join(APP_BUNDLE_IDENTIFIER)
+}
+
+fn descriptor_pointer_path(home: &std::path::Path) -> PathBuf {
+    bundle_data_dir(home).join(DESCRIPTOR_POINTER_FILE_NAME)
+}
+
+fn allowed_descriptor_paths(home: &std::path::Path) -> [PathBuf; 2] {
+    let production = bundle_data_dir(home);
+    let development = crate::app_paths::app_data_dir_for_build(production.clone(), true, false);
+    [descriptor_path(&production), descriptor_path(&development)]
+}
+
+fn write_descriptor_pointer(
+    pointer_path: &std::path::Path,
+    selected_descriptor: &std::path::Path,
+) -> std::io::Result<()> {
+    let parent = pointer_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "descriptor pointer has no parent directory",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".{DESCRIPTOR_POINTER_FILE_NAME}.{}.tmp",
+        random_token()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(selected_descriptor.to_string_lossy().as_bytes())?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&temporary, pointer_path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn read_descriptor_pointer(pointer_path: &std::path::Path, allowed: &[PathBuf]) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(pointer_path).ok()?;
+    let selected = PathBuf::from(raw.trim());
+    allowed
+        .iter()
+        .any(|path| path == &selected)
+        .then_some(selected)
 }
 
 /// Chrome caps extension -> host messages at 1 MiB; the contract keeps every
@@ -200,10 +264,8 @@ fn write_descriptor(
     Ok(path)
 }
 
-/// The app data dir as the shim resolves it: Chrome spawns the shim, so no
-/// AppHandle and no inherited June env. Mirrors `app_paths::app_data_dir` -
-/// a debug shim reads the `-dev` dir a debug app writes, a release shim the
-/// production dir.
+/// The build-default app data dir used only as a compatibility fallback when
+/// an older native-host registration has no durable descriptor pointer.
 pub fn shim_data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -217,6 +279,23 @@ pub fn shim_data_dir() -> Option<PathBuf> {
             cfg!(debug_assertions),
             std::env::var_os("OS_JUNE_USE_PROD_DATA_DIR").is_some(),
         ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Resolve the descriptor selected when the native host was registered.
+/// Chrome does not inherit June's environment, so the shim must not recompute
+/// an `OS_JUNE_USE_PROD_DATA_DIR` choice from its own process environment.
+pub fn shim_descriptor_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        let allowed = allowed_descriptor_paths(&home);
+        read_descriptor_pointer(&descriptor_pointer_path(&home), &allowed)
+            .or_else(|| shim_data_dir().map(|dir| descriptor_path(&dir)))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -715,18 +794,24 @@ fn shim_candidates(app: &AppHandle) -> Vec<PathBuf> {
     )
 }
 
-fn chrome_native_messaging_hosts_dir() -> Option<PathBuf> {
+fn chromium_native_messaging_hosts_dirs_for_home(home: &std::path::Path) -> Vec<PathBuf> {
+    let support = app_support_dir(home);
+    [
+        support.join("Google").join("Chrome"),
+        support.join("Microsoft Edge"),
+        support.join("BraveSoftware").join("Brave-Browser"),
+        support.join("Chromium"),
+    ]
+    .into_iter()
+    .map(|root| root.join("NativeMessagingHosts"))
+    .collect()
+}
+
+fn chromium_native_messaging_hosts_dirs() -> Option<Vec<PathBuf>> {
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME")?;
-        Some(
-            PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("Google")
-                .join("Chrome")
-                .join("NativeMessagingHosts"),
-        )
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        Some(chromium_native_messaging_hosts_dirs_for_home(&home))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -748,7 +833,8 @@ pub fn extension_pairing_status(state: tauri::State<'_, ExtensionHost>) -> Pairi
     state.status()
 }
 
-/// Writes (or rewrites) the Chrome host manifest so Chrome can spawn the shim.
+/// Writes (or rewrites) the supported Chromium-family host manifests so the
+/// browser can spawn the shim.
 /// Resolved at registration time, never hardcoded: dev registration points at
 /// the dev shim, a bundled app at its own Resources copy.
 #[tauri::command]
@@ -777,20 +863,45 @@ pub fn register_browser_extension_host(
     let shim_path = shim_path
         .canonicalize()
         .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
-    let hosts_dir = chrome_native_messaging_hosts_dir().ok_or_else(|| {
+    let hosts_dirs = chromium_native_messaging_hosts_dirs().ok_or_else(|| {
         AppError::new(
             "extension_host_unsupported",
             "Browser extension pairing is only supported on macOS for now.",
         )
     })?;
-    std::fs::create_dir_all(&hosts_dir)
-        .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
-    let manifest_path = hosts_dir.join(format!("{NATIVE_HOST_NAME}.json"));
     let manifest = host_manifest_json(&shim_path);
     let body = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
-    std::fs::write(&manifest_path, body)
+    let data_dir = crate::app_paths::app_data_dir(&app)
         .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| {
+        AppError::new(
+            "extension_host_register_failed",
+            "Could not resolve the user home directory.",
+        )
+    })?);
+    let selected_descriptor = descriptor_path(&data_dir);
+    if !allowed_descriptor_paths(&home).contains(&selected_descriptor) {
+        return Err(AppError::new(
+            "extension_host_register_failed",
+            "The extension host descriptor is outside June's app data directories.",
+        ));
+    }
+    write_descriptor_pointer(&descriptor_pointer_path(&home), &selected_descriptor)
+        .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
+    let mut manifest_paths = Vec::with_capacity(hosts_dirs.len());
+    for hosts_dir in hosts_dirs {
+        std::fs::create_dir_all(&hosts_dir)
+            .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
+        let manifest_path = hosts_dir.join(format!("{NATIVE_HOST_NAME}.json"));
+        std::fs::write(&manifest_path, &body)
+            .map_err(|error| AppError::new("extension_host_register_failed", error.to_string()))?;
+        manifest_paths.push(manifest_path);
+    }
+    let manifest_path = manifest_paths
+        .into_iter()
+        .next()
+        .expect("supported Chromium host directory list is non-empty");
     Ok(RegisterExtensionHostResult {
         manifest_path: manifest_path.to_string_lossy().into_owned(),
         shim_path: shim_path.to_string_lossy().into_owned(),
@@ -805,13 +916,14 @@ pub fn register_browser_extension_host(
 /// frame, and then pumps frames in both directions unchanged.
 pub mod shim {
     use super::{
-        json, read_frame, shim_data_dir, write_frame, HostDescriptor, Value, PROTOCOL_VERSION,
+        json, read_frame, shim_descriptor_path, write_frame, HostDescriptor, Value,
+        PROTOCOL_VERSION,
     };
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
     pub fn descriptor_path() -> Option<std::path::PathBuf> {
-        shim_data_dir().map(|dir| super::descriptor_path(&dir))
+        shim_descriptor_path()
     }
 
     fn read_descriptor() -> Result<HostDescriptor, String> {
@@ -1033,6 +1145,68 @@ mod tests {
         assert_eq!(
             origins,
             &[Value::String(format!("chrome-extension://{EXTENSION_ID}/"))]
+        );
+    }
+
+    #[test]
+    fn registration_targets_each_supported_chromium_browser() {
+        let home = std::path::Path::new("/Users/tester");
+        assert_eq!(
+            chromium_native_messaging_hosts_dirs_for_home(home),
+            vec![
+                PathBuf::from(
+                    "/Users/tester/Library/Application Support/Google/Chrome/NativeMessagingHosts"
+                ),
+                PathBuf::from(
+                    "/Users/tester/Library/Application Support/Microsoft Edge/NativeMessagingHosts"
+                ),
+                PathBuf::from(
+                    "/Users/tester/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+                ),
+                PathBuf::from(
+                    "/Users/tester/Library/Application Support/Chromium/NativeMessagingHosts"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn descriptor_pointer_preserves_the_registered_dev_or_prod_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        let allowed = allowed_descriptor_paths(home);
+        let pointer = descriptor_pointer_path(home);
+
+        write_descriptor_pointer(&pointer, &allowed[1]).expect("write dev selection");
+        assert_eq!(
+            read_descriptor_pointer(&pointer, &allowed),
+            Some(allowed[1].clone())
+        );
+
+        write_descriptor_pointer(&pointer, &allowed[0]).expect("replace with prod selection");
+        assert_eq!(
+            read_descriptor_pointer(&pointer, &allowed),
+            Some(allowed[0].clone())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&pointer)
+                .expect("pointer metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn descriptor_pointer_rejects_paths_outside_known_app_data_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pointer = temp.path().join("pointer");
+        std::fs::write(&pointer, "/tmp/untrusted/extension-host.json").expect("write pointer");
+        assert_eq!(
+            read_descriptor_pointer(&pointer, &allowed_descriptor_paths(temp.path())),
+            None
         );
     }
 

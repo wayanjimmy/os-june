@@ -25,12 +25,24 @@ function chromeHarness() {
   const detach = vi.fn().mockResolvedValue(undefined);
   const remove = vi.fn().mockResolvedValue(undefined);
   const sendCommand = vi.fn().mockResolvedValue({});
+  const debuggerEventListeners: Array<
+    (source: { tabId?: number }, method: string, params?: Record<string, unknown>) => void
+  > = [];
+  const emitDebuggerEvent = (tabId: number, method: string, params?: Record<string, unknown>) => {
+    for (const listener of [...debuggerEventListeners]) listener({ tabId }, method, params);
+  };
   vi.stubGlobal("chrome", {
     debugger: {
       attach,
       detach,
       sendCommand,
-      onEvent: { addListener: vi.fn() },
+      onEvent: {
+        addListener: vi.fn((listener) => debuggerEventListeners.push(listener)),
+        removeListener: vi.fn((listener) => {
+          const index = debuggerEventListeners.indexOf(listener);
+          if (index >= 0) debuggerEventListeners.splice(index, 1);
+        }),
+      },
       onDetach: { addListener: vi.fn() },
     },
     tabs: {
@@ -45,7 +57,7 @@ function chromeHarness() {
     },
     tabGroups: { onUpdated: { addListener: vi.fn() } },
   });
-  return { attach, detach, remove, sendCommand };
+  return { attach, detach, remove, sendCommand, emitDebuggerEvent };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -83,6 +95,16 @@ describe("task tab registry", () => {
     const registry = new TaskTabRegistry();
     registry.start("session-a");
     registry.addCreated("session-a", 10);
+    registry.session("session-a").groupId = 42;
+    registry.removeTab("session-a", 10);
+    expect(registry.session("session-a").groupId).toBeUndefined();
+  });
+
+  it("forgets a task group when only a shared tab remains", () => {
+    const registry = new TaskTabRegistry();
+    registry.start("session-a");
+    registry.addCreated("session-a", 10);
+    registry.addShared("session-a", 11);
     registry.session("session-a").groupId = 42;
     registry.removeTab("session-a", 10);
     expect(registry.session("session-a").groupId).toBeUndefined();
@@ -342,6 +364,44 @@ describe("attended reference actions", () => {
           String(call[2]?.functionDeclaration).includes("expected"),
       ),
     ).toBe(true);
+  });
+
+  it("waits for action-triggered navigation before taking the next snapshot", async () => {
+    const { controller, emitDebuggerEvent, sendCommand } = interactionController();
+    let readyChecks = 0;
+    sendCommand.mockImplementation(
+      async (_target: unknown, method: string, params?: Record<string, unknown>) => {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "frame-10" } } };
+        }
+        if (method === "DOM.resolveNode") return { object: { objectId: "node-20" } };
+        if (method === "Runtime.callFunctionOn") {
+          if (String(params?.functionDeclaration ?? "").includes("operation, value, expected")) {
+            emitDebuggerEvent(10, "Page.frameStartedLoading", { frameId: "frame-10" });
+            return { result: { value: { status: "ok" } } };
+          }
+          return { result: { value: { element, url: "https://example.com/checkout" } } };
+        }
+        if (method === "Runtime.evaluate") {
+          readyChecks += 1;
+          return { result: { value: "complete" } };
+        }
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        return {};
+      },
+    );
+
+    await expect(
+      controller.execute(
+        browserRequest(22, "click", {
+          session_id: "task",
+          tab_id: 10,
+          ref: "e0:n20",
+          expected: element,
+        }),
+      ),
+    ).resolves.toMatchObject({ response: { success: true, data: { epoch: 1 } } });
+    expect(readyChecks).toBeGreaterThan(0);
   });
 
   it("aborts the act message when element facts no longer match", async () => {

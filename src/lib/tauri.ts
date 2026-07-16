@@ -2029,9 +2029,8 @@ export type RegisterBrowserExtensionHostResult = {
   shimPath: string;
 };
 
-/** Writes the Chrome native messaging host manifest pinning the June
- * extension id to the bundled shim, so a load-unpacked extension can
- * connect. */
+/** Writes native messaging host manifests for the supported Chromium-family
+ * browsers, pinning the June extension id to the bundled shim. */
 export async function registerBrowserExtensionHost() {
   return invoke<RegisterBrowserExtensionHostResult>("register_browser_extension_host");
 }

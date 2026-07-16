@@ -48,6 +48,11 @@ use super::proxy::PinningProxy;
 /// usefully long before `load` fires, so this is a wait bound, not a failure).
 const LOAD_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// Activating DOM actions should begin a main-frame navigation immediately.
+/// This short observation window avoids returning the old document while not
+/// adding the full navigation timeout to ordinary non-navigating clicks.
+const ACTION_NAVIGATION_START_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Snapshots larger than this travel as a file reference instead of inline
 /// text (the contract-wide shape for big payloads, matching the
 /// native-messaging size cap on the attended transport).
@@ -595,6 +600,13 @@ impl ManagedBrowserSession {
         }
 
         let mut events = self.cdp.events();
+        let activates = operation == "click"
+            || (operation == "press" && matches!(value, "Enter" | " " | "Space" | "Spacebar"));
+        let main_frame_id = if activates {
+            self.main_frame_id().await
+        } else {
+            None
+        };
         let expected = serde_json::to_value(&element).map_err(|_| {
             reference_error("browser_reference_failed", operation, &self.id, reference)
         })?;
@@ -639,9 +651,19 @@ impl ManagedBrowserSession {
         // Every successful action consumes the whole reference set. The fresh
         // snapshot returned by the transport below mints the next epoch.
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        if matches!(operation, "click" | "press") && element.tag.eq_ignore_ascii_case("a") {
-            self.wait_for_load(&mut events, Duration::from_secs(10))
-                .await;
+        if activates {
+            if self
+                .wait_for_navigation_start(
+                    &mut events,
+                    main_frame_id.as_deref(),
+                    ACTION_NAVIGATION_START_TIMEOUT,
+                )
+                .await
+                .is_some_and(|wait_for_load| wait_for_load)
+            {
+                self.wait_for_load(&mut events, Duration::from_secs(10))
+                    .await;
+            }
             let final_url = self.evaluate_string("location.href").await.map_err(|_| {
                 reference_error("browser_reference_failed", operation, &self.id, reference)
             })?;
@@ -749,6 +771,43 @@ impl ManagedBrowserSession {
                 }
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => return,
+            }
+        }
+    }
+
+    async fn main_frame_id(&self) -> Option<String> {
+        self.cdp
+            .call(Some(&self.cdp_session_id), "Page.getFrameTree", json!({}))
+            .await
+            .ok()?
+            .pointer("/frameTree/frame/id")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// Wait for a main-frame navigation signal queued after an activating
+    /// action. The receiver is subscribed before the action, so fast commits
+    /// cannot race this check against the old document's ready state.
+    async fn wait_for_navigation_start(
+        &self,
+        events: &mut tokio::sync::broadcast::Receiver<super::cdp::CdpEvent>,
+        main_frame_id: Option<&str>,
+        timeout: Duration,
+    ) -> Option<bool> {
+        let main_frame_id = main_frame_id?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv()).await;
+            match event {
+                Ok(Ok(event)) => {
+                    if let Some(wait_for_load) =
+                        main_frame_navigation_wait(&event, &self.cdp_session_id, main_frame_id)
+                    {
+                        return Some(wait_for_load);
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => return None,
             }
         }
     }
@@ -1228,6 +1287,29 @@ fn reference_status_code(status: &str) -> &'static str {
     }
 }
 
+fn main_frame_navigation_wait(
+    event: &super::cdp::CdpEvent,
+    cdp_session_id: &str,
+    main_frame_id: &str,
+) -> Option<bool> {
+    if event.session_id.as_deref() != Some(cdp_session_id) {
+        return None;
+    }
+    let event_frame_id = event
+        .params
+        .get("frameId")
+        .and_then(Value::as_str)
+        .or_else(|| event.params.pointer("/frame/id").and_then(Value::as_str));
+    if event_frame_id != Some(main_frame_id) {
+        return None;
+    }
+    match event.method.as_str() {
+        "Page.frameStartedLoading" | "Page.frameNavigated" => Some(true),
+        "Page.navigatedWithinDocument" => Some(false),
+        _ => None,
+    }
+}
+
 fn reference_error(code: &str, operation: &str, session_id: &str, reference: &str) -> AppError {
     AppError::new(
         code,
@@ -1577,5 +1659,32 @@ mod interaction_tests {
         assert_eq!(reference_epoch("ref7"), None);
         assert_eq!(reference_epoch("eold:m4:n7"), None);
         assert_ne!(reference_epoch("e1:m0:n1"), reference_epoch("e2:m0:n1"));
+    }
+
+    #[test]
+    fn action_navigation_waits_only_for_the_main_frame_and_skips_same_document_load() {
+        let event = super::super::cdp::CdpEvent {
+            method: "Page.frameStartedLoading".into(),
+            session_id: Some("session-1".into()),
+            params: json!({ "frameId": "main-frame" }),
+        };
+        assert_eq!(
+            main_frame_navigation_wait(&event, "session-1", "main-frame"),
+            Some(true)
+        );
+        assert_eq!(
+            main_frame_navigation_wait(&event, "session-1", "child-frame"),
+            None
+        );
+
+        let same_document = super::super::cdp::CdpEvent {
+            method: "Page.navigatedWithinDocument".into(),
+            session_id: Some("session-1".into()),
+            params: json!({ "frameId": "main-frame" }),
+        };
+        assert_eq!(
+            main_frame_navigation_wait(&same_document, "session-1", "main-frame"),
+            Some(false)
+        );
     }
 }
