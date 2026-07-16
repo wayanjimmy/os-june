@@ -89,7 +89,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
   const accountRef = useRef(account);
   const mountedRef = useRef(true);
   accountRef.current = account;
-  const { refresh: refreshAvatar } = useAccountAvatar(account);
+  const { localOnly: avatarLocalOnly, refresh: refreshAvatar } = useAccountAvatar(account);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -114,9 +114,14 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
       );
     } catch (error) {
       if (mountedRef.current && (accountRef.current.signedIn || accountRef.current.localDev)) {
-        if (errorCode(error) === "account_permission_required") {
+        const code = errorCode(error);
+        if (code === "account_permission_required") {
           toast.warning(
             "Avatar changed on this device, but it couldn't sync. Sign out and sign in again to update your account permissions.",
+          );
+        } else if (code === "avatar_sync_unavailable") {
+          toast.warning(
+            "Avatar changed on this device, but syncing isn't available in this Accounts environment yet.",
           );
         } else {
           toast.error(messageFromError(error));
@@ -230,7 +235,9 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
                 <p className="settings-row-description">
                   {account.localDev
                     ? "A generated pattern saved on this device."
-                    : "A generated pattern synced with your OpenSoftware account."}
+                    : avatarLocalOnly
+                      ? "This pattern is saved only on this device."
+                      : "A generated pattern synced with your OpenSoftware account."}
                 </p>
               </div>
               <div className="settings-row-control">

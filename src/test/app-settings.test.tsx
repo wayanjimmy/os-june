@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSettings } from "../components/settings/AppSettings";
+import { accountAvatarStyle } from "../components/account/AccountAvatar";
 import { beginMaxGrantWait, clearMaxGrantWait, markMaxGrantWaitSlow } from "../lib/max-upgrade";
 import type { AccountStatus, DictationSettingsDto } from "../lib/tauri";
 import { APP_COMMIT_HASH, APP_VERSION } from "../app/build-info";
@@ -791,6 +792,7 @@ describe("AppSettings", () => {
     expect(mocks.toastWarning).toHaveBeenCalledWith(
       "Avatar changed on this device, but it couldn't sync. Sign out and sign in again to update your account permissions.",
     );
+    expect(screen.getByText("This pattern is saved only on this device.")).toBeInTheDocument();
     expect(screen.queryByText(/account permissions/)).not.toBeInTheDocument();
     expect(
       Object.keys(localStorage).some((key) => key.startsWith("june:account-avatar-pending:")),
@@ -803,6 +805,84 @@ describe("AppSettings", () => {
     expect(document.querySelector(".account-avatar-preview")?.getAttribute("style")).toBe(
       localStyle,
     );
+  });
+
+  it("warns when the Accounts environment cannot sync the locally refreshed avatar", async () => {
+    const user = userEvent.setup();
+    mocks.osAccountsSetAvatarSeed.mockRejectedValueOnce({
+      code: "avatar_sync_unavailable",
+      message: "Synced avatars are not available on this OS Accounts deployment yet.",
+    });
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        activeTab="general"
+        onTabChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(mocks.toastWarning).toHaveBeenCalledWith(
+      "Avatar changed on this device, but syncing isn't available in this Accounts environment yet.",
+    );
+    expect(screen.getByText("This pattern is saved only on this device.")).toBeInTheDocument();
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it("uses the canonical default when a future Avatar version replaces a pending fallback", async () => {
+    const user = userEvent.setup();
+    mocks.osAccountsSetAvatarSeed.mockRejectedValueOnce({
+      code: "account_permission_required",
+      message: "Your current sign-in does not include this permission.",
+    });
+    const settings = (account: AccountStatus) => (
+      <AppSettings
+        account={account}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        activeTab="general"
+        onTabChange={vi.fn()}
+      />
+    );
+    const { rerender } = render(settings(signedInAccount));
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      Object.keys(localStorage).some((key) => key.startsWith("june:account-avatar-pending:")),
+    ).toBe(true);
+
+    rerender(
+      settings({
+        ...signedInAccount,
+        user: { ...signedInAccount.user, avatarSeed: "v2:future" },
+      }),
+    );
+
+    const avatar = document.querySelector<HTMLElement>(".account-avatar-preview");
+    for (const [property, value] of Object.entries(accountAvatarStyle("v1:default:usr_123"))) {
+      expect(avatar?.style.getPropertyValue(property)).toBe(value);
+    }
+    await waitFor(() =>
+      expect(
+        Object.keys(localStorage).some((key) => key.startsWith("june:account-avatar-pending:")),
+      ).toBe(false),
+    );
+    expect(
+      screen.queryByText("This pattern is saved only on this device."),
+    ).not.toBeInTheDocument();
   });
 
   it("ignores an avatar response that lands after the account signs out", async () => {

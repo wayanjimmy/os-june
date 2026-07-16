@@ -35,25 +35,35 @@ export function AccountAvatar({
 export function useAccountAvatar(account: AccountStatus) {
   const identity = accountAvatarIdentity(account);
   const userId = account.user?.id?.trim() || identity;
-  const remoteSeed = supportedAccountAvatarSeed(account.user?.avatarSeed);
-  const defaultSeed = resolvedAccountAvatarSeed(account.user?.avatarSeed, userId);
+  const storedSeed = account.user?.avatarSeed;
+  const remoteSeed = supportedAccountAvatarSeed(storedSeed);
+  const hasUnsupportedStoredSeed = Boolean(storedSeed && !remoteSeed);
+  const pendingSeed = useSyncExternalStore(
+    subscribeAccountAvatar,
+    () => readPendingAccountAvatarSeed(identity),
+    () => undefined,
+  );
+  const defaultSeed = resolvedAccountAvatarSeed(storedSeed, userId);
   const getSnapshot = useCallback(
     () =>
-      readPendingAccountAvatarSeed(identity) ??
+      (hasUnsupportedStoredSeed ? undefined : readPendingAccountAvatarSeed(identity)) ??
       (account.localDev ? readLocalAccountAvatarSeed(identity) : undefined) ??
       defaultSeed,
-    [account.localDev, defaultSeed, identity],
+    [account.localDev, defaultSeed, hasUnsupportedStoredSeed, identity],
   );
   const seed = useSyncExternalStore(subscribeAccountAvatar, getSnapshot, () => defaultSeed);
 
   useEffect(() => {
     if (remoteSeed && readPendingAccountAvatarSeed(identity) === remoteSeed) {
       clearPendingAccountAvatarSeed(identity);
+    } else if (hasUnsupportedStoredSeed && readPendingAccountAvatarSeed(identity)) {
+      clearPendingAccountAvatarSeed(identity);
     }
-  }, [identity, remoteSeed]);
+  }, [hasUnsupportedStoredSeed, identity, remoteSeed]);
 
   return {
     style: accountAvatarStyle(seed),
+    localOnly: Boolean(pendingSeed && !hasUnsupportedStoredSeed && pendingSeed !== remoteSeed),
     refresh: async () => {
       const next = createAccountAvatarSeed();
       if (account.signedIn && !account.localDev) {
@@ -96,8 +106,8 @@ export function accountAvatarStyle(seed: string): AccountAvatarStyle {
   };
 }
 
-function seededInteger(seed: string, channel: string, min: number, max: number): number {
-  const hash = avatarHash(`${seed}:${channel}`);
+function seededInteger(seed: string, geometryAxis: string, min: number, max: number): number {
+  const hash = avatarHash(`${seed}:${geometryAxis}`);
   const unit = hash / 0xffffffff;
   return Math.round(min + unit * (max - min));
 }
@@ -162,6 +172,7 @@ function clearPendingAccountAvatarSeed(identity: string) {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.removeItem(accountAvatarPendingStorageKey(identity));
+    window.dispatchEvent(new CustomEvent(ACCOUNT_AVATAR_CHANGED_EVENT));
   } catch {
     // Best-effort reconciliation; a matching remote seed renders identically.
   }

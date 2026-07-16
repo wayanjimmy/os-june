@@ -35,6 +35,12 @@ seed fixes geometry and June supplies the active theme's palette. Existing
 sessions minted without the write scope remain signed in but must sign out and
 sign in again before a new selection can sync.
 
+**Release prerequisite:** the target environment's June OAuth client must
+allow `profile:write` before a build requesting this scope is released. OS
+Accounts rejects an authorization request containing a scope outside the
+client allowlist, which would block a fresh sign-in rather than only disable
+Avatar sync.
+
 ## Gates
 
 - **AccountGate** — the sign-in wall, shown until there is a valid session.

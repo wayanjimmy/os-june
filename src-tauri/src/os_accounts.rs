@@ -32,7 +32,7 @@ const DEFAULT_LOOPBACK_PORT: u16 = 8765;
 // Scopes June needs. profile:read/profile:write for /me and the User's avatar
 // seed, billing:read for /billing/balance, billing:write for subscription
 // checkout, and credits:spend so June API can authorize-and-charge against the
-// user's credits for transcription / generation / dictation work.
+// user's credits for note transcription / generation / dictation work.
 const OAUTH_SCOPES: &str = "profile:read profile:write billing:read billing:write credits:spend";
 // June's OS Accounts token store. Keep this app-scoped so June does not
 // touch credentials written by other Open Software apps on startup.
@@ -92,6 +92,7 @@ const AVATAR_SEED_MAX_LENGTH: usize = 128;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static REFRESH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+static ACCOUNT_OPERATION_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static ENV_LOADED: OnceLock<()> = OnceLock::new();
 static SIGNED_IN_CACHE: AtomicBool = AtomicBool::new(false);
 
@@ -563,6 +564,11 @@ pub async fn os_accounts_status() -> Result<AccountStatus, AppError> {
         return Ok(local_dev_account_status());
     }
     let cfg = Config::load();
+    // A status snapshot reads /me before two slower billing endpoints. Keep
+    // that whole operation ordered with profile writes so an old /me response
+    // cannot land after a newer Avatar selection and overwrite either the UI
+    // or the cached account snapshot.
+    let _operation_guard = account_operation_lock().lock().await;
     let Some(stored) = load_account().await else {
         set_cached_signed_in(false);
         return Ok(AccountStatus {
@@ -772,6 +778,7 @@ pub async fn os_accounts_set_avatar_seed(seed: String) -> Result<AccountUser, Ap
         ));
     }
 
+    let _operation_guard = account_operation_lock().lock().await;
     let requested_seed = seed.clone();
     let me: MeWire = authed_patch(&cfg, "/me", avatar_seed_request(&seed)).await?;
     let user = AccountUser::from(me);
@@ -1288,6 +1295,10 @@ fn http_client() -> &'static reqwest::Client {
 
 fn refresh_lock() -> &'static AsyncMutex<()> {
     REFRESH_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+fn account_operation_lock() -> &'static AsyncMutex<()> {
+    ACCOUNT_OPERATION_LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 async fn exchange_code(

@@ -23,7 +23,8 @@ on their own account — profile and own billing-config writes). The hard line i
 the **App API key**, not read-vs-write: anything requiring it (**app-attributed
 spend** — `authorize`/`charge`) goes through a backend you control. The pattern
 below deliberately keeps even Top-up off-device by opening the system browser, so
-the on-device surface stays identity + reads. It can still **capture the User's
+the on-device surface stays limited to User-authorized account access and never
+holds the App API key. It can still **capture the User's
 `credits:spend` Consent at login** (ADR-0010) so your backend Broker can meter —
 capturing consent is not spending, and the binary never holds the App API key.
 
