@@ -24,7 +24,6 @@ import {
   filterServers,
   hasAvailableTools,
   inlineSecurityLabels,
-  isManagedJuneMcpServer,
   oauthNeedFromMessage,
   oauthStateFor,
   oauthStatusMeta,
@@ -239,7 +238,6 @@ export function McpServersView({
    * opens a confirmation, while a standard enable applies immediately. The
    * heuristic is a WARNING only — the user can always confirm. */
   function handleToggle(server: HermesMcpServerInfo, enabled: boolean) {
-    if (isManagedJuneMcpServer(server)) return;
     if (!enabled) {
       state.setEnabled(server.name, false);
       return;
@@ -413,7 +411,7 @@ export function McpServersView({
             : undefined
         }
         onDelete={
-          toEdit && !isManagedJuneMcpServer(toEdit)
+          toEdit
             ? () => {
                 setToDelete(toEdit);
                 setToEdit(undefined);
@@ -541,7 +539,6 @@ function ServerRow({
   const status = statusMeta(server.status);
   const labelId = `mcp-server-${cssId(server.name)}`;
   const rowStatus = test?.pending ? { label: "Testing", tone: "neutral" as const } : status;
-  const managed = isManagedJuneMcpServer(server);
 
   return (
     <li className="mcp-server-row" data-enabled={server.enabled}>
@@ -552,21 +549,11 @@ function ServerRow({
         <span className="mcp-server-name" id={labelId}>
           {server.name}
         </span>
-        <p
-          className="mcp-server-subtitle"
-          title={managed ? "Managed by the Notion connector" : transport.blurb}
-        >
-          {managed
-            ? "Managed by the Notion connector. Disconnect Notion to remove it."
-            : transport.blurb}
+        <p className="mcp-server-subtitle" title={transport.blurb}>
+          {transport.blurb}
         </p>
       </div>
       <div className="mcp-server-actions">
-        {managed ? (
-          <span className="mcp-server-status" data-tone="neutral">
-            Managed
-          </span>
-        ) : null}
         <span className="mcp-server-status" data-tone={rowStatus.tone}>
           <StatusIcon tone={rowStatus.tone} />
           {rowStatus.label}
@@ -584,7 +571,7 @@ function ServerRow({
         <span className="mcp-server-toggle">
           <Switch
             checked={server.enabled}
-            disabled={pending || managed}
+            disabled={pending}
             aria-labelledby={labelId}
             onCheckedChange={onToggle}
           />

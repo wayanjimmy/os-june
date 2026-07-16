@@ -142,7 +142,7 @@ describe("mcp servers — view logic", () => {
     expect(serverHaystack(servers[0])).toContain("query");
   });
 
-  it("shows visible managed connector servers while hiding internal June servers", () => {
+  it("hides June-owned internal MCP servers from user-managed lists", () => {
     expect(INTERNAL_MCP_SERVER_NAMES).toContain("june_video");
     const servers = [
       ...INTERNAL_MCP_SERVER_NAMES.map((name) =>
@@ -154,12 +154,6 @@ describe("mcp servers — view logic", () => {
         }),
       ),
       serverFromWire({
-        name: "june_notion",
-        enabled: true,
-        transport: "stdio",
-        command: "june_notion_mcp.py",
-      }),
-      serverFromWire({
         name: "linear",
         enabled: true,
         transport: "http",
@@ -167,10 +161,7 @@ describe("mcp servers — view logic", () => {
       }),
     ];
 
-    expect(userManagedMcpServers(servers).map((server) => server.name)).toEqual([
-      "june_notion",
-      "linear",
-    ]);
+    expect(userManagedMcpServers(servers).map((server) => server.name)).toEqual(["linear"]);
   });
 
   it("treats a server as having available tools only when enabled with active tools", () => {
