@@ -15,6 +15,7 @@ pub mod meeting_detection;
 pub mod meeting_hud;
 pub mod menu_bar;
 pub mod notifications;
+pub mod obsidian;
 pub mod os_accounts;
 pub mod p3a;
 pub mod providers;
@@ -321,6 +322,9 @@ pub fn run() {
             connectors::commands::connectors_disconnect,
             connectors::commands::connectors_linear_teams,
             connectors::commands::connectors_selected_teams_set,
+            obsidian::obsidian_status,
+            obsidian::obsidian_configure,
+            obsidian::obsidian_disconnect,
             connectors::commands::routine_trust_get,
             connectors::commands::routine_trust_set,
             connectors::commands::routine_trust_record_run,
@@ -331,6 +335,7 @@ pub fn run() {
             connectors::approvals::connector_approval_respond,
             connectors::approvals::connector_approvals_respond_all,
             hermes_bridge::connectors_apply_runtime,
+            hermes_bridge::obsidian_apply_runtime,
             updates::get_release_channel,
             updates::set_release_channel,
             updates::fetch_update,

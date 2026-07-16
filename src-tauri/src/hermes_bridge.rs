@@ -454,6 +454,7 @@ const ISOLATED_HERMES_ENV_VARS: &[&str] = &[
     "REQUESTS_CA_BUNDLE",
     "SSL_CERT_FILE",
     "NODE_EXTRA_CA_CERTS",
+    crate::obsidian::OBSIDIAN_VAULT_PATH_ENV,
 ];
 
 #[derive(Default)]
@@ -1168,6 +1169,7 @@ async fn start_hermes_bridge_inner(
     );
     let hermes_home = resolve_june_hermes_home(app)?;
     let command_resolution = resolve_hermes_command(app, &hermes_home).await?;
+    let obsidian_vault_path = crate::obsidian::configured_vault_path(app);
     let command = command_resolution.command;
     let _command_source = command_resolution.source;
     let default_cwd = hermes_home.join("workspace");
@@ -1234,7 +1236,12 @@ async fn start_hermes_bridge_inner(
     let sandbox_profile = if full_mode {
         None
     } else {
-        prepare_sandbox(app, &hermes_home, agent_cli_access)
+        prepare_sandbox(
+            app,
+            &hermes_home,
+            agent_cli_access,
+            obsidian_vault_path.as_deref(),
+        )
     };
     let sandboxed = sandbox_profile.is_some();
     // SOUL.md is shared by both processes (single home), so its sandbox
@@ -1297,6 +1304,7 @@ async fn start_hermes_bridge_inner(
         &hermes_home,
         &token,
         environment_hint_for_spawn(full_mode, sandbox_available),
+        obsidian_vault_path.as_deref(),
     );
     // The pinned runtime otherwise auto-includes every enabled MCP server in
     // interactive chat. Per-routine autonomy servers carry bypass grants, so
@@ -1647,6 +1655,14 @@ pub async fn connectors_apply_runtime(
     reapply_hermes_runtime(&app, &bridge).await
 }
 
+#[tauri::command]
+pub async fn obsidian_apply_runtime(
+    app: AppHandle,
+    bridge: State<'_, HermesBridge>,
+) -> Result<(), AppError> {
+    reapply_hermes_runtime(&app, &bridge).await
+}
+
 /// Serializes `reapply_hermes_runtime` so two rapid settings toggles cannot
 /// interleave their stop/restart cycles. Reapply stops live runtimes before
 /// restarting them; without this lock a later toggle could observe that
@@ -1721,16 +1737,10 @@ pub(crate) async fn reapply_hermes_runtime(
             first_error.get_or_insert(error);
         }
     }
-    // Best-effort gateway restart so scheduled routines pick up the new config.
-    if let Some(connection) = live_connections(bridge)?.into_iter().next() {
-        let _ = hermes_connection_json(
-            &connection,
-            reqwest::Method::POST,
-            "/api/gateway/restart",
-            None,
-        )
-        .await;
-    }
+    // Do not call Hermes' `/api/gateway/restart`: it launches a replacement
+    // outside June's supervision, losing June-owned spawn configuration such as
+    // the selected Obsidian vault environment. The bridge-owned restart above
+    // is the complete reapply operation.
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -3768,7 +3778,7 @@ fn build_hermes_mcp_login_command(
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
-    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None, None);
     // Off macOS there is no PTY wrapper: keep the explicit non-interactive
     // marker so a future Hermes that honors it prints the URL instead of
     // blocking on a prompt June cannot answer. On macOS the PTY carries the
@@ -4188,7 +4198,7 @@ fn build_hermes_skill_reset_command(
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
-    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(&hermes_home);
     cmd.stdin(Stdio::null());
@@ -4387,7 +4397,7 @@ fn build_hermes_skill_tap_command(
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
-    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(&hermes_home);
     cmd.stdin(Stdio::null());
@@ -5714,7 +5724,7 @@ fn build_hermes_gateway_start_command(
     cmd.args(["gateway", "start"]);
     // No sandbox-status hint: `gateway start` is a helper invocation, not the
     // agent runtime, so it never builds a system prompt.
-    apply_isolated_hermes_env(&mut cmd, hermes_home, &connection.token, None);
+    apply_isolated_hermes_env(&mut cmd, hermes_home, &connection.token, None, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(hermes_home);
     cmd.stdin(Stdio::null());
@@ -5783,6 +5793,7 @@ fn build_hermes_tui_debug_launcher_script(
     environment_hint: Option<&str>,
     sandbox_profile: Option<&Path>,
     trace_line: &str,
+    obsidian_vault_path: Option<&Path>,
 ) -> String {
     let mut script = String::new();
     script.push_str("#!/bin/sh\n");
@@ -5808,6 +5819,13 @@ fn build_hermes_tui_debug_launcher_script(
         script.push_str(&format!(
             "export HERMES_ENVIRONMENT_HINT={}\n",
             shell_single_quote(hint)
+        ));
+    }
+    if let Some(vault_path) = obsidian_vault_path {
+        script.push_str(&format!(
+            "export {}={}\n",
+            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV,
+            shell_single_quote(&vault_path.to_string_lossy())
         ));
     }
     let quoted_args: Vec<String> = args.iter().map(|arg| shell_single_quote(arg)).collect();
@@ -5854,6 +5872,7 @@ pub async fn open_hermes_tui_debug(
 
     let hermes_home = resolve_june_hermes_home(&app)?;
     let command_resolution = resolve_hermes_command(&app, &hermes_home).await?;
+    let obsidian_vault_path = crate::obsidian::configured_vault_path(&app);
     let command = command_resolution.command;
 
     // Mirror the dashboard spawn's mode resolution: unrestricted => no jail;
@@ -5865,7 +5884,12 @@ pub async fn open_hermes_tui_debug(
     let sandbox_profile = if full_mode {
         None
     } else {
-        prepare_sandbox(&app, &hermes_home, agent_cli_access)
+        prepare_sandbox(
+            &app,
+            &hermes_home,
+            agent_cli_access,
+            obsidian_vault_path.as_deref(),
+        )
     };
     let sandbox_available = if full_mode {
         sandbox_would_engage(&app, &hermes_home)
@@ -5895,6 +5919,7 @@ pub async fn open_hermes_tui_debug(
         environment_hint,
         sandbox_profile.as_deref(),
         &trace_line,
+        obsidian_vault_path.as_deref(),
     );
 
     launch_hermes_tui_debug_terminal(&hermes_home, &session_id, &script)
@@ -6764,6 +6789,7 @@ fn apply_isolated_hermes_env(
     hermes_home: &std::path::Path,
     token: &str,
     environment_hint: Option<&str>,
+    obsidian_vault_path: Option<&Path>,
 ) {
     for name in ISOLATED_HERMES_ENV_VARS {
         cmd.env_remove(name);
@@ -6774,6 +6800,9 @@ fn apply_isolated_hermes_env(
         .env("no_proxy", "127.0.0.1,localhost,::1");
     if let Some(hint) = environment_hint {
         cmd.env("HERMES_ENVIRONMENT_HINT", hint);
+    }
+    if let Some(vault_path) = obsidian_vault_path {
+        cmd.env(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV, vault_path);
     }
 }
 
@@ -6788,7 +6817,12 @@ fn apply_isolated_hermes_env(
 /// jailed agent can't rewrite the policy that governs it or the one the next
 /// spawn will read.
 #[cfg(target_os = "macos")]
-fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) -> Option<PathBuf> {
+fn prepare_sandbox(
+    app: &AppHandle,
+    hermes_home: &Path,
+    agent_cli_access: bool,
+    obsidian_vault_path: Option<&Path>,
+) -> Option<PathBuf> {
     // The caller logs the sandboxed/unsandboxed outcome; this only short-circuits.
     if env_flag_enabled(JUNE_HERMES_DISABLE_SANDBOX_ENV) {
         return None;
@@ -6800,7 +6834,7 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
     let runtime_dir = managed_hermes_runtime_dir(app).ok()?;
     let app_data_dir = crate::app_paths::app_data_dir(app).ok()?;
     let image_source_key_path = image_source_capability_secret_path(&app_data_dir);
-    let write_roots = sandbox_write_roots(hermes_home, &runtime_dir);
+    let write_roots = sandbox_write_roots(hermes_home, &runtime_dir, obsidian_vault_path);
     let config_write_path = sandbox_config_write_path(hermes_home);
     let config_temp_prefix = sandbox_config_temp_prefix(hermes_home);
     // Block the jailed agent from reading the connector token stores: the
@@ -6845,6 +6879,7 @@ fn prepare_sandbox(
     _app: &AppHandle,
     _hermes_home: &Path,
     _agent_cli_access: bool,
+    _obsidian_vault_path: Option<&Path>,
 ) -> Option<PathBuf> {
     None
 }
@@ -6904,7 +6939,11 @@ fn env_flag_enabled(name: &str) -> bool {
 /// arbitrary directory — a project-dir feature would need an explicit, validated
 /// grant instead.
 #[cfg(target_os = "macos")]
-fn sandbox_write_roots(hermes_home: &Path, runtime_dir: &Path) -> Vec<PathBuf> {
+fn sandbox_write_roots(
+    hermes_home: &Path,
+    runtime_dir: &Path,
+    obsidian_vault_path: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut roots = vec![
         hermes_home.to_path_buf(),
         runtime_dir.to_path_buf(),
@@ -6920,6 +6959,9 @@ fn sandbox_write_roots(hermes_home: &Path, runtime_dir: &Path) -> Vec<PathBuf> {
             roots.push(PathBuf::from(tmpdir));
         }
     }
+    if let Some(vault_path) = obsidian_vault_path.and_then(sandbox_obsidian_write_root) {
+        roots.push(vault_path);
+    }
     let mut canonical: Vec<PathBuf> = Vec::with_capacity(roots.len());
     for root in roots {
         let resolved = std::fs::canonicalize(&root).unwrap_or(root);
@@ -6928,6 +6970,19 @@ fn sandbox_write_roots(hermes_home: &Path, runtime_dir: &Path) -> Vec<PathBuf> {
         }
     }
     canonical
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_obsidian_write_root(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    if canonical.parent().is_none() || !canonical.is_dir() || !canonical.join(".obsidian").is_dir()
+    {
+        return None;
+    }
+    Some(canonical)
 }
 
 /// The Hermes config file the jailed runtime persists through `save_config`,
@@ -15242,6 +15297,7 @@ mcp_servers:
             Some(JUNE_HINT_SANDBOXED),
             Some(Path::new("/tmp/profile.sb")),
             "trace: june session sess-1",
+            None,
         );
 
         // Sandboxed sessions must resume under the same Seatbelt jail June used.
@@ -15258,6 +15314,10 @@ mcp_servers:
         )));
         // Stale inherited values are scrubbed first.
         assert!(script.contains("unset HERMES_HOME"));
+        assert!(script.contains(&format!(
+            "unset {}",
+            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
+        )));
         // The session->TUI trace line is echoed in the terminal.
         assert!(script.contains("echo 'trace: june session sess-1'"));
     }
@@ -15273,6 +15333,7 @@ mcp_servers:
             Some(JUNE_HINT_UNRESTRICTED),
             None,
             "trace: june session sess-2",
+            None,
         );
 
         // No jail => no sandbox-exec wrapper; the runtime is launched directly.
@@ -15297,6 +15358,7 @@ mcp_servers:
             None,
             None,
             "trace",
+            None,
         );
         // The id stays one inert single-quoted literal: its embedded quote is
         // escaped (`'\''`), so `rm` is data passed to --resume, never a command.
@@ -15348,6 +15410,7 @@ mcp_servers:
             Path::new("/tmp/hermes-home"),
             "token",
             Some(JUNE_HINT_UNRESTRICTED),
+            None,
         );
         assert_eq!(
             envs_of(&hinted)
@@ -15360,10 +15423,19 @@ mcp_servers:
         // from the app's own environment must never reach the runtime.
         let mut bare = Command::new("hermes");
         std::env::set_var("HERMES_ENVIRONMENT_HINT", "stale-from-shell");
-        apply_isolated_hermes_env(&mut bare, Path::new("/tmp/hermes-home"), "token", None);
+        std::env::set_var(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV, "/stale-vault");
+        apply_isolated_hermes_env(
+            &mut bare,
+            Path::new("/tmp/hermes-home"),
+            "token",
+            None,
+            None,
+        );
         std::env::remove_var("HERMES_ENVIRONMENT_HINT");
+        std::env::remove_var(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV);
         assert!(!envs_of(&bare).contains_key("HERMES_ENVIRONMENT_HINT"));
         assert!(!envs_of(&bare).contains_key("HERMES_TUI_TOOLSETS"));
+        assert!(!envs_of(&bare).contains_key(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV));
     }
 
     #[test]
@@ -16386,7 +16458,7 @@ mcp_servers:
     fn write_roots_are_scoped_and_exclude_the_var_folders_blanket() {
         let hermes_home = PathBuf::from("/Users/test/Library/Application Support/june/hermes");
         let runtime_dir = PathBuf::from("/Users/test/Library/Application Support/june/runtime");
-        let roots = sandbox_write_roots(&hermes_home, &runtime_dir);
+        let roots = sandbox_write_roots(&hermes_home, &runtime_dir, None);
 
         assert!(roots.contains(&hermes_home), "workspace root missing");
         assert!(roots.contains(&runtime_dir), "runtime root missing");
