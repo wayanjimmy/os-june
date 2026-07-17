@@ -3492,6 +3492,7 @@ fn blocked_app(app: &str) -> bool {
         "chatgpt",
         "systemsettings",
         "systempreferences",
+        "universalaccessauthwarn",
         "securityagent",
         "keychainaccess",
         "loginwindow",
@@ -4250,6 +4251,8 @@ mod tests {
             "Terminal",
             "iTerm2",
             "System Settings",
+            "universalAccessAuthWarn",
+            "com.apple.accessibility.universalAccessAuthWarn",
             "Keychain Access",
             "SecurityAgent",
             "ChatGPT",
@@ -4261,6 +4264,16 @@ mod tests {
         }
         assert!(!blocked_app("TextEdit"));
         assert!(!blocked_app("Numbers"));
+    }
+
+    #[test]
+    fn macos_accessibility_authorization_helper_is_not_an_operable_app() {
+        let identity = fixture_identity(
+            "com.apple.accessibility.universalAccessAuthWarn",
+            "/System/Library/PrivateFrameworks/UniversalAccess.framework/Versions/A/Resources/universalAccessAuthWarn.app/Contents/MacOS/universalAccessAuthWarn",
+        );
+
+        assert!(blocked_target("macOS access prompt", &identity));
     }
 
     #[test]
