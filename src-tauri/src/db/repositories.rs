@@ -4570,6 +4570,23 @@ impl Repositories {
         Ok(row.map(share_key_from_row))
     }
 
+    pub async fn share_keys_for_profile_notes(
+        &self,
+        profile: &str,
+    ) -> Result<Vec<ShareKeyRecord>, sqlx::error::Error> {
+        let rows = query(
+            "SELECT sk.share_id, sk.item_kind, sk.item_id, sk.content_key
+             FROM share_keys sk
+             INNER JOIN notes n ON n.id = sk.item_id
+             WHERE sk.item_kind = 'note' AND n.profile = ?
+             ORDER BY sk.created_at ASC, sk.share_id ASC",
+        )
+        .bind(profile)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(share_key_from_row).collect())
+    }
+
     pub async fn save_share_invite_key(
         &self,
         record: &ShareInviteKeyRecord,

@@ -195,6 +195,29 @@ fn is_share_not_found(error: &AppError) -> bool {
     error.code == "june_request_failed" && error.message == "share_not_found"
 }
 
+async fn delete_profile_records_with_share_revoker<F, Fut>(
+    repos: &Repositories,
+    profile: &str,
+    mut revoke_share: F,
+) -> Result<Vec<String>, AppError>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), AppError>>,
+{
+    if profile == "default" {
+        return Ok(Vec::new());
+    }
+
+    for record in repos.share_keys_for_profile_notes(profile).await? {
+        revoke_share(record.share_id.clone()).await?;
+        repos.delete_share_keys(&record.share_id).await?;
+    }
+
+    let audio_paths = repos.audio_artifact_paths_for_profile(profile).await?;
+    repos.delete_profile_data(profile).await?;
+    Ok(audio_paths)
+}
+
 #[tauri::command]
 pub async fn delete_note(app: AppHandle, request: DeleteNoteRequest) -> Result<(), AppError> {
     let paths = app_paths(&app)?;
@@ -388,12 +411,16 @@ pub async fn move_profile_data_to_default(app: AppHandle, profile: String) -> Re
 
 #[tauri::command]
 pub async fn delete_profile_data(app: AppHandle, profile: String) -> Result<(), AppError> {
-    // "Delete permanently" is a privacy promise: recordings on disk go with
-    // the rows, mirroring delete_note / delete_notes.
+    // "Delete permanently" is a privacy promise: remote note shares are
+    // revoked before their source rows disappear, and recordings on disk go
+    // with those rows, mirroring delete_note / delete_notes.
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    let audio_paths = repos.audio_artifact_paths_for_profile(&profile).await?;
-    repos.delete_profile_data(&profile).await?;
+    let audio_paths =
+        delete_profile_records_with_share_revoker(&repos, &profile, |share_id| async move {
+            delete_remote_share_or_accept_missing(&share_id).await
+        })
+        .await?;
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -3064,8 +3091,9 @@ mod note_transcription_timing_tests;
 mod tests {
     use super::{
         apply_system_audio_permission_probe_result, assemble_recording_source_readiness,
-        capture_start_timeout_error, create_memory_with_settings, is_share_not_found,
-        load_memory_settings, persist_memory_settings, recovery_validation_expected_duration_ms,
+        capture_start_timeout_error, create_memory_with_settings,
+        delete_profile_records_with_share_revoker, is_share_not_found, load_memory_settings,
+        persist_memory_settings, recovery_validation_expected_duration_ms,
         should_probe_system_audio_permission, start_capture_with_timeout_and_cleanup,
         update_memory_with_settings, validated_folder_instructions,
     };
@@ -3087,7 +3115,7 @@ mod tests {
     }
     use crate::{
         audio::capture::{is_capture_active, CaptureStartState, StartedRecording, StartedSource},
-        db::repositories::Repositories,
+        db::repositories::{Repositories, ShareKeyRecord},
         domain::types::{
             AppError, AudioLevelDto, MemorySettingsDto, RecordingSource, RecordingSourceMode,
             RecordingState, RecordingStatusDto, SourceReadinessDto,
@@ -3112,6 +3140,113 @@ mod tests {
             .await
             .expect("migrations");
         Repositories::new(pool)
+    }
+
+    #[tokio::test]
+    async fn profile_record_deletion_revokes_note_shares_before_removing_rows() {
+        let repos = test_repositories().await;
+        let profile_note = repos
+            .create_note("research", None)
+            .await
+            .expect("create profile note");
+        let default_note = repos
+            .create_note("default", None)
+            .await
+            .expect("create default note");
+        let profile_share = ShareKeyRecord {
+            share_id: "share-research".to_string(),
+            item_kind: "note".to_string(),
+            item_id: profile_note.id.clone(),
+            content_key: vec![1; 32],
+        };
+        let default_share = ShareKeyRecord {
+            share_id: "share-default".to_string(),
+            item_kind: "note".to_string(),
+            item_id: default_note.id.clone(),
+            content_key: vec![2; 32],
+        };
+        repos
+            .save_share_key(&profile_share)
+            .await
+            .expect("save profile share");
+        repos
+            .save_share_key(&default_share)
+            .await
+            .expect("save default share");
+        let revoked = Arc::new(Mutex::new(Vec::new()));
+        let revoked_for_call = Arc::clone(&revoked);
+
+        let audio_paths =
+            delete_profile_records_with_share_revoker(&repos, "research", move |share_id| {
+                let revoked = Arc::clone(&revoked_for_call);
+                async move {
+                    revoked.lock().expect("revoked lock").push(share_id);
+                    Ok(())
+                }
+            })
+            .await
+            .expect("delete profile records");
+
+        assert!(audio_paths.is_empty());
+        assert_eq!(
+            *revoked.lock().expect("revoked lock"),
+            vec!["share-research".to_string()]
+        );
+        assert!(repos.get_note(&profile_note.id).await.is_err());
+        assert!(repos
+            .share_key_for_item("note", &profile_note.id)
+            .await
+            .expect("profile share lookup")
+            .is_none());
+        assert_eq!(
+            repos
+                .share_key_for_item("note", &default_note.id)
+                .await
+                .expect("default share lookup"),
+            Some(default_share)
+        );
+        repos
+            .get_note(&default_note.id)
+            .await
+            .expect("default note remains");
+    }
+
+    #[tokio::test]
+    async fn profile_record_deletion_keeps_rows_and_keys_when_share_revocation_fails() {
+        let repos = test_repositories().await;
+        let note = repos
+            .create_note("research", None)
+            .await
+            .expect("create profile note");
+        let share = ShareKeyRecord {
+            share_id: "share-research".to_string(),
+            item_kind: "note".to_string(),
+            item_id: note.id.clone(),
+            content_key: vec![1; 32],
+        };
+        repos
+            .save_share_key(&share)
+            .await
+            .expect("save profile share");
+
+        let error = delete_profile_records_with_share_revoker(&repos, "research", |_| async {
+            Err(AppError::new("june_request_failed", "network error"))
+        })
+        .await
+        .expect_err("failed revocation must keep local data");
+
+        assert_eq!(error.code, "june_request_failed");
+        repos
+            .get_note(&note.id)
+            .await
+            .expect("profile note remains");
+        assert_eq!(
+            repos
+                .share_key_for_item("note", &note.id)
+                .await
+                .expect("profile share lookup"),
+            Some(share)
+        );
     }
 
     #[test]
