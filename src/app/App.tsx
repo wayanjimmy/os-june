@@ -26,7 +26,6 @@ import type { ReportCategory } from "../components/agent/composer/reportCategory
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
 import { FoldersWorkspace } from "../components/folders/FoldersWorkspace";
 import { RoutinesView } from "../components/routines/RoutinesView";
-import { PluginsView } from "../components/plugins/PluginsView";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
@@ -54,7 +53,6 @@ import { IconProjects } from "central-icons/IconProjects";
 import { IconZap } from "central-icons/IconZap";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
-import { IconPlugin1 } from "central-icons/IconPlugin1";
 import { ConnectorApprovalsTray } from "../components/connectors/ConnectorApprovalsTray";
 import { ComputerUseApprovalsTray } from "../components/agent/ComputerUseApprovalsTray";
 import {
@@ -359,11 +357,6 @@ function tabMeta(
       return {
         title: "Routines",
         icon: <IconZap size={TAB_ICON_SIZE} />,
-      };
-    case "plugins":
-      return {
-        title: "Plugins",
-        icon: <IconPlugin1 size={TAB_ICON_SIZE} />,
       };
     case "dictation":
       return {
@@ -3915,19 +3908,6 @@ export function App() {
                     setAgentOrigin({ kind: "routines" });
                     setActiveAgentSession(session);
                     setActiveView("agent");
-                  }}
-                />
-              ) : activeView === "plugins" ? (
-                <PluginsView
-                  onOpenModels={() => {
-                    setSettingsReturnView("plugins");
-                    setSettingsTab("models");
-                    setActiveView("settings");
-                  }}
-                  onOpenBilling={() => {
-                    setSettingsReturnView("plugins");
-                    setSettingsTab("billing");
-                    setActiveView("settings");
                   }}
                 />
               ) : activeView === "agent" ? (

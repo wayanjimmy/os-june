@@ -8,10 +8,14 @@ export function PluginsView({
   onOpenBilling: () => void;
 }) {
   return (
-    <section className="plugins-view" aria-labelledby="plugins-view-heading">
-      <header className="plugins-view-header">
-        <h1 id="plugins-view-heading">Plugins</h1>
-        <p>Give June carefully scoped ways to work in other apps and services.</p>
+    <section className="settings-group" aria-labelledby="plugins-view-heading">
+      <header className="settings-page-header">
+        <h2 id="plugins-view-heading" className="settings-page-title">
+          Plugins
+        </h2>
+        <p className="settings-page-blurb">
+          Give June carefully scoped ways to work in other apps and services.
+        </p>
       </header>
       <div className="plugins-grid">
         <article className="plugin-tile">

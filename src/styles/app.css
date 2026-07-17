@@ -12686,34 +12686,6 @@ input:focus-visible,
 
 /* Plugins ------------------------------------------------------------ */
 
-.plugins-view {
-  width: 100%;
-  max-width: var(--content-max);
-  margin: 0 auto;
-  padding: var(--sp-10) 0 var(--sp-12);
-}
-
-.plugins-view-header {
-  padding-left: var(--sp-3);
-  margin-bottom: var(--sp-10);
-}
-
-.plugins-view-header h1 {
-  margin: 0;
-  color: var(--foreground);
-  font-family: var(--font-serif);
-  font-size: var(--fs-2xl);
-  font-weight: 400;
-}
-
-.plugins-view-header p {
-  margin: var(--sp-1) 0 0;
-  max-width: 60ch;
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-  line-height: 1.5;
-}
-
 .plugins-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--plugin-tile-min-w)), 1fr));

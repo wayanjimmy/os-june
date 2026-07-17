@@ -118,7 +118,6 @@ export type SidebarView =
   | "folders"
   | "dictation"
   | "routines"
-  | "plugins"
   | "agent"
   | "agent-sessions";
 
@@ -275,8 +274,8 @@ const SETTINGS_SIDEBAR_GROUPS: {
         icon: <IconBrainSideview size={16} />,
       },
       {
-        id: "connectors",
-        label: "Connectors",
+        id: "plugins",
+        label: "Plugins",
         icon: <IconPlugin1 size={16} />,
       },
       {
@@ -688,7 +687,10 @@ export function Sidebar({
         label: "Go to plugins",
         icon: <IconPlugin1 size={15} />,
         searchText: normalizeCommandQuery("plugins computer use go to"),
-        action: () => onChangeView("plugins"),
+        action: () => {
+          onSettingsTabChange?.("plugins");
+          onChangeView("settings");
+        },
       },
       {
         id: "quick:settings",
@@ -1234,18 +1236,6 @@ export function Sidebar({
                 <IconZap size={16} />
               </span>
               <span className="sidebar-nav-label">Routines</span>
-            </button>
-            <button
-              type="button"
-              className="sidebar-nav-item"
-              data-active={activeView === "plugins"}
-              aria-current={activeView === "plugins" ? "page" : undefined}
-              onClick={() => onChangeView("plugins")}
-            >
-              <span className="sidebar-nav-icon">
-                <IconPlugin1 size={16} />
-              </span>
-              <span className="sidebar-nav-label">Plugins</span>
             </button>
           </nav>
 
