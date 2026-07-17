@@ -1,4 +1,4 @@
-# ADR 0028: Session completion is June-owned local state
+# ADR 0030: Session completion is June-owned local state
 
 Date: 2026-07-15
 Status: accepted

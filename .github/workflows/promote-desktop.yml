@@ -38,6 +38,12 @@ jobs:
     runs-on: ${{ fromJSON(inputs.macos-runner == 'mac-studio' && '["self-hosted","macOS","ARM64","desktop-release"]' || '["blacksmith-6vcpu-macos-15"]') }}
     environment: production
     steps:
+      - name: Require the live Computer use release runner
+        if: inputs.macos-runner != 'mac-studio'
+        run: |
+          echo "::error::Computer use promotion requires the pre-granted Mac Studio so capture and background input are tested before publication."
+          exit 1
+
       - name: Mint release token (GitHub App)
         id: app-token
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
@@ -242,12 +248,16 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: .tauri-hermes/hermes
-          key: hermes-bundle-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bundle-hermes-runtime.sh', 'src-tauri/src/hermes_bridge.rs') }}
+          # v2 is the dual-runtime layout. Never restore a host-only v1 cache.
+          key: hermes-bundle-macos-universal-v2-${{ runner.os }}-${{ hashFiles('scripts/bundle-hermes-runtime.sh', 'scripts/audit-hermes-runtime.sh', 'scripts/hermes-native-import-smoke.py', 'src-tauri/src/hermes_bridge.rs', 'src-tauri/src/hermes/apply_june_patches.py', 'src-tauri/src/hermes/sitecustomize.py') }}
 
       - name: Bundle Hermes runtime into app resources
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: ./scripts/bundle-hermes-runtime.sh
+
+      - name: Prepare universal Computer use helper
+        run: pnpm computer-use:prepare -- --release --target universal-apple-darwin
 
       - name: Build and sign stable app artifacts
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
@@ -271,6 +281,9 @@ jobs:
           args: --bundles app,dmg --target universal-apple-darwin -- --locked
           includeUpdaterJson: false
 
+      - name: Run signed Computer use release self-test
+        run: ./scripts/computer-use-release-self-test.sh --live --target universal-apple-darwin
+
       - name: Notarize, verify, and publish stable release assets
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -288,6 +301,19 @@ jobs:
             echo "::error::Expected exactly one stable DMG, found ${#dmgs[@]}"
             exit 1
           fi
+
+          apps=(
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/release/bundle/macos/*.app
+          )
+          if [ "${#apps[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one stable app bundle, found ${#apps[@]}"
+            exit 1
+          fi
+          app="${apps[0]}"
+          ./scripts/audit-hermes-runtime.sh \
+            "$app/Contents/Resources/native/hermes" --require-signed
+          codesign --verify --deep --strict --verbose=2 "$app"
 
           dmg="${dmgs[0]}"
           xcrun notarytool submit "$dmg" \

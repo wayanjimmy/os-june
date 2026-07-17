@@ -11,6 +11,9 @@ June supports macOS 14.0 and later on Apple Silicon and Intel Macs, including
 macOS 15. Production and staging builds ship as universal macOS apps. System
 audio capture uses Core Audio process taps and is available only on macOS 14.2
 and later. On macOS 14.0 or 14.1, recording falls back to microphone-only mode.
+The embedded Hermes resource carries separate complete `arm64` and `x86_64`
+Python and site-packages trees behind one relocatable launcher. Release builds
+execute both trees before the universal app is assembled.
 
 The first updater-capable build must be installed manually once — earlier builds
 ship without the updater, so they can't pull it in — and every release after that
@@ -83,7 +86,7 @@ GitHub Actions -> rc-desktop-release -> Run workflow
 ```
 
 `rc-desktop-release` builds a signed + notarized `universal-apple-darwin` app at
-version `X.Y.Z-rc.N` (bundling the Hermes runtime), and publishes it to a fixed
+version `X.Y.Z-rc.N` (bundling both Hermes runtime architectures), and publishes it to a fixed
 `rc` prerelease in `open-software-network/os-june-releases` with `latest-rc.json`.
 The fixed `June_universal.dmg` asset follows the current RC for the updater, while
 an immutable versioned DMG remains available for each Slack announcement. The
@@ -194,10 +197,16 @@ plutil -extract CFBundleURLTypes xml1 -o - "$APP/Contents/Info.plist"
 lipo -archs "$APP/Contents/MacOS/os-june"
 lipo -archs "$APP/Contents/Resources/native/bin/June Dictation Helper.app/Contents/MacOS/june-dictation-helper"
 lipo -archs "$APP/Contents/Resources/native/bin/June.app/Contents/MacOS/june-system-audio-recorder"
+./scripts/audit-hermes-runtime.sh "$APP/Contents/Resources/native/hermes" --require-signed
+/usr/bin/arch -arm64 "$APP/Contents/Resources/native/hermes/bin/hermes" --version
+/usr/bin/arch -x86_64 "$APP/Contents/Resources/native/hermes/bin/hermes" --version
 ```
 
 Confirm `osjune` appears in `CFBundleURLSchemes` and each `lipo` command
-prints both `x86_64` and `arm64`.
+prints both `x86_64` and `arm64`. The Hermes audit must report native files for
+both runtime trees, and both launcher commands must execute successfully. On an
+Apple Silicon validation host, the x86_64 command is a real Rosetta execution,
+not an architecture inferred from file metadata.
 
 For the first updater-to-updater validation, install an older updater-capable
 build, run **June -> Check for updates…**, confirm the prompt shows the
