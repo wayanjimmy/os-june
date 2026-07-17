@@ -225,6 +225,12 @@ struct RegistrationResponse {
     client_secret: Option<String>,
 }
 
+struct PreparedRegistration {
+    listener: TcpListener,
+    redirect_uri: String,
+    registration: RegistrationResponse,
+}
+
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
 struct TokenResponse {
     access_token: String,
@@ -247,6 +253,9 @@ struct StoredNotionConnection {
     client_secret: Option<String>,
     #[zeroize(skip)]
     endpoint: String,
+    #[serde(default)]
+    #[zeroize(skip)]
+    registration_redirect_uri: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -356,18 +365,12 @@ pub async fn connect(
     let (verifier, challenge) = pkce();
     let csrf = random_b64url(24);
 
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| {
-        AppError::new(
-            "notion_loopback_bind_failed",
-            format!("Could not start the local Notion connect listener: {e}"),
-        )
-    })?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| AppError::new("notion_loopback_bind_failed", e.to_string()))?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let registration = register_client(&auth_server, &redirect_uri).await?;
+    let prepared = prepare_registration(&auth_server).await?;
+    let PreparedRegistration {
+        listener,
+        redirect_uri,
+        registration,
+    } = prepared;
     let auth_url = build_auth_url(
         &auth_server,
         &registration.client_id,
@@ -419,6 +422,7 @@ pub async fn connect(
         client_id: registration.client_id.clone(),
         client_secret: registration.client_secret.clone(),
         endpoint: MCP_ENDPOINT.to_string(),
+        registration_redirect_uri: Some(redirect_uri),
     };
     verify_hosted_mcp_discovery(&stored.access_token).await?;
     {
@@ -499,6 +503,7 @@ pub async fn call_hosted_tool(
             "That Notion hosted MCP tool is not enabled in June yet.",
         ));
     };
+    preflight_read_tool_arguments(tool_name, &request.arguments)?;
     call_hosted_tool_unchecked(app, tool_name, request.arguments).await
 }
 
@@ -692,6 +697,7 @@ fn merge_refreshed_tokens(
         client_id: stored.client_id.clone(),
         client_secret: stored.client_secret.clone(),
         endpoint: MCP_ENDPOINT.to_string(),
+        registration_redirect_uri: stored.registration_redirect_uri.clone(),
     }
 }
 
@@ -809,6 +815,77 @@ fn metadata_error() -> AppError {
     AppError::new(
         "notion_oauth_metadata_invalid",
         "Notion's hosted MCP OAuth metadata did not match June's expected endpoint.",
+    )
+}
+
+async fn prepare_registration(
+    auth_server: &AuthorizationServerMetadata,
+) -> Result<PreparedRegistration, AppError> {
+    let stored = store::load().await.ok().flatten();
+    if let Some(stored) = stored.as_ref() {
+        if let Some(redirect_uri) = stored.registration_redirect_uri.as_deref() {
+            if let Ok(listener) = bind_registration_redirect_uri(redirect_uri).await {
+                if !stored.client_id.trim().is_empty() {
+                    return Ok(PreparedRegistration {
+                        listener,
+                        redirect_uri: redirect_uri.to_string(),
+                        registration: RegistrationResponse {
+                            client_id: stored.client_id.clone(),
+                            client_secret: stored.client_secret.clone(),
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    let (listener, redirect_uri) = bind_ephemeral_redirect_uri().await?;
+    let registration = register_client(auth_server, &redirect_uri).await?;
+    Ok(PreparedRegistration {
+        listener,
+        redirect_uri,
+        registration,
+    })
+}
+
+async fn bind_ephemeral_redirect_uri() -> Result<(TcpListener, String), AppError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(loopback_bind_failed)?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| AppError::new("notion_loopback_bind_failed", error.to_string()))?
+        .port();
+    Ok((listener, format!("http://127.0.0.1:{port}/callback")))
+}
+
+async fn bind_registration_redirect_uri(redirect_uri: &str) -> Result<TcpListener, AppError> {
+    let parsed = reqwest::Url::parse(redirect_uri).map_err(|_| loopback_redirect_invalid())?;
+    if parsed.scheme() != "http"
+        || parsed.host_str() != Some("127.0.0.1")
+        || parsed.path() != "/callback"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(loopback_redirect_invalid());
+    }
+    let port = parsed.port().ok_or_else(loopback_redirect_invalid)?;
+    TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(loopback_bind_failed)
+}
+
+fn loopback_redirect_invalid() -> AppError {
+    AppError::new(
+        "notion_loopback_redirect_invalid",
+        "The saved Notion connection callback is invalid.",
+    )
+}
+
+fn loopback_bind_failed(error: std::io::Error) -> AppError {
+    AppError::new(
+        "notion_loopback_bind_failed",
+        format!("Could not start the local Notion connect listener: {error}"),
     )
 }
 
@@ -1241,6 +1318,28 @@ fn action_tool_allowed_for_hermes(name: &str) -> Option<&'static str> {
     canonical_allowed_tool_name(name, NOTION_ACTION_TOOL_ALLOWLIST)
 }
 
+fn preflight_read_tool_arguments(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> Result<(), AppError> {
+    if tool_name != "notion-fetch" {
+        return Ok(());
+    }
+    if arguments
+        .as_object()
+        .and_then(|object| object.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        == Some("self")
+    {
+        return Err(AppError::new(
+            "notion_fetch_identity_unsupported",
+            "Notion identity lookups are not available in this preview.",
+        ));
+    }
+    Ok(())
+}
+
 fn preflight_action_arguments(
     tool_name: &str,
     arguments: &serde_json::Value,
@@ -1404,6 +1503,9 @@ fn summarize_update_values(arguments: &serde_json::Value) -> Option<String> {
     summarize_payload_fields(
         arguments,
         &[
+            "command",
+            "selection_with_ellipsis",
+            "new_str",
             "properties",
             "content",
             "children",
@@ -1909,6 +2011,31 @@ mod tests {
         assert!(!is_loopback_callback_path("/callback-extra?code=x&state=y"));
     }
 
+    #[tokio::test]
+    async fn bind_registration_redirect_uri_accepts_exact_saved_callback() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+        let rebound = bind_registration_redirect_uri(&redirect_uri).await.unwrap();
+
+        assert_eq!(rebound.local_addr().unwrap().port(), port);
+    }
+
+    #[tokio::test]
+    async fn bind_registration_redirect_uri_rejects_unexpected_callback_shape() {
+        for redirect_uri in [
+            "https://127.0.0.1:49152/callback",
+            "http://localhost:49152/callback",
+            "http://127.0.0.1:49152/other",
+            "http://127.0.0.1/callback",
+            "not a uri",
+        ] {
+            assert!(bind_registration_redirect_uri(redirect_uri).await.is_err());
+        }
+    }
+
     #[test]
     fn connection_status_defaults_to_preview_unverified() {
         let connection = connection();
@@ -1947,6 +2074,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: None,
             endpoint: MCP_ENDPOINT.to_string(),
+            registration_redirect_uri: None,
         };
         assert!(!notion_token_expired_at(&stored, 1_000));
 
@@ -2082,6 +2210,66 @@ mod tests {
     }
 
     #[test]
+    fn update_page_preview_shows_replacement_text() {
+        let arguments = serde_json::json!({
+            "page_id": "page-123",
+            "command": "replace_content",
+            "new_str": "Replacement markdown for the whole page"
+        });
+
+        let preview = preview_update_page_action(&arguments);
+        assert!(preview.contains("command: replace_content"));
+        assert!(preview.contains("new_str: Replacement markdown for the whole page"));
+    }
+
+    #[test]
+    fn update_page_preview_shows_range_replacement_text() {
+        let arguments = serde_json::json!({
+            "page_id": "page-123",
+            "command": "replace_content_range",
+            "selection_with_ellipsis": "Old intro...old ending",
+            "new_str": "Replacement range markdown"
+        });
+
+        let preview = preview_update_page_action(&arguments);
+        assert!(preview.contains("selection_with_ellipsis: Old intro...old ending"));
+        assert!(preview.contains("new_str: Replacement range markdown"));
+    }
+
+    #[test]
+    fn notion_fetch_rejects_self_identity_lookup() {
+        for arguments in [
+            serde_json::json!({ "id": "self" }),
+            serde_json::json!({ "id": " self " }),
+        ] {
+            assert_eq!(
+                preflight_read_tool_arguments("notion-fetch", &arguments)
+                    .unwrap_err()
+                    .code,
+                "notion_fetch_identity_unsupported"
+            );
+        }
+    }
+
+    #[test]
+    fn notion_fetch_allows_page_targets_and_nested_self_data() {
+        for arguments in [
+            serde_json::json!({ "id": "page-123" }),
+            serde_json::json!({ "id": "https://notion.so/page-123" }),
+            serde_json::json!({ "content": { "id": "self" } }),
+            serde_json::json!({ "id": 123 }),
+            serde_json::json!({}),
+        ] {
+            assert!(preflight_read_tool_arguments("notion-fetch", &arguments).is_ok());
+        }
+        assert!(preflight_read_tool_arguments(
+            "notion-search",
+            &serde_json::json!({ "id": "self" })
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn create_and_update_reject_async_actions() {
         let create = serde_json::json!({
             "allow_async": true,
@@ -2156,6 +2344,7 @@ mod tests {
             client_id: "client".to_string(),
             client_secret: Some("secret".to_string()),
             endpoint: MCP_ENDPOINT.to_string(),
+            registration_redirect_uri: Some("http://127.0.0.1:49152/callback".to_string()),
         }
     }
 
