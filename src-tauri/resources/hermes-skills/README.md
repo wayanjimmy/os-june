@@ -24,13 +24,3 @@ release available when this was added (`v2026.7.1`) did not include `unbroker`.
 Vendoring the skill keeps the runtime compatibility pin unchanged while making
 the skill available in June.
 
-## obsidian
-
-Source: `NousResearch/hermes-agent/skills/note-taking/obsidian/SKILL.md`
-Branch: `main`
-Fetched: 2026-07-16
-
-The current pinned Hermes runtime is `v2026.6.19`. This prototype vendors the
-upstream Obsidian skill so June can expose a local vault connector without a
-runtime bump. June supplies the vault location at runtime via
-`OBSIDIAN_VAULT_PATH` after the user picks and validates a local vault.
