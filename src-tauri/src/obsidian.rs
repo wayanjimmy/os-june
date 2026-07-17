@@ -14,7 +14,6 @@ const HERMES_ENV_PROJECTION_LOCK_FILE: &str = ".june-obsidian-env.lock";
 const HERMES_ENV_PROJECTION_LOCK_WAIT: Duration = Duration::from_secs(2);
 const HERMES_ENV_PROJECTION_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ObsidianStatus {
@@ -152,15 +151,6 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, AppError> {
     crate::app_paths::app_config_dir(app)
         .map(|dir| dir.join(OBSIDIAN_CONFIG_FILE))
         .map_err(|error| AppError::new("obsidian_config_unavailable", error.to_string()))
-}
-
-fn read_config(app: &AppHandle) -> Result<ObsidianConfig, AppError> {
-    read_config_optional(app)?.ok_or_else(|| {
-        AppError::new(
-            "obsidian_not_connected",
-            "Connect an Obsidian vault before using Obsidian tools.",
-        )
-    })
 }
 
 fn read_config_optional(app: &AppHandle) -> Result<Option<ObsidianConfig>, AppError> {

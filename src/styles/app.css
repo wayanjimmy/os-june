@@ -26307,11 +26307,6 @@ button.memory-project:hover {
   color: var(--foreground);
 }
 
-.connector-provider-icon-linear {
-  font-size: var(--fs-md);
-  font-weight: var(--fw-medium);
-}
-
 .connector-main {
   min-width: 0;
   display: grid;
