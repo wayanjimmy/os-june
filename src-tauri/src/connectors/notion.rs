@@ -41,6 +41,7 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_RESPONSE_MAX_BYTES: usize = 512 * 1024;
 const MCP_TOOL_SCHEMA_MAX_BYTES: usize = 64 * 1024;
 const MCP_DESCRIPTION_MAX_CHARS: usize = 240;
+const MCP_TOOL_NAME_MAX_CHARS: usize = 128;
 const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
 const NOTION_READ_TOOL_ALLOWLIST: &[&str] = &[
     "notion-search",
@@ -154,8 +155,7 @@ pub struct NotionMcpTool {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "inputSchema")]
-    pub input_schema: serde_json::Value,
+    pub input_schema: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,7 +230,7 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct StoredNotionConnection {
     access_token: String,
     #[serde(default)]
@@ -1050,17 +1050,23 @@ fn ensure_jsonrpc_ok(value: &serde_json::Value, code: &'static str) -> Result<()
 }
 
 fn parse_hosted_tool(value: &serde_json::Value) -> Option<NotionMcpTool> {
-    let name = value.get("name")?.as_str()?.to_string();
+    let name = value
+        .get("name")?
+        .as_str()?
+        .trim()
+        .chars()
+        .take(MCP_TOOL_NAME_MAX_CHARS + 1)
+        .collect::<String>();
+    if name.is_empty() || name.chars().count() > MCP_TOOL_NAME_MAX_CHARS {
+        return None;
+    }
     let description = value
         .get("description")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|description| !description.is_empty())
         .map(truncate_description);
-    let input_schema = value
-        .get("inputSchema")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
+    let input_schema = value.get("inputSchema")?.as_object()?.clone();
     if serde_json::to_vec(&input_schema)
         .map(|schema| schema.len() > MCP_TOOL_SCHEMA_MAX_BYTES)
         .unwrap_or(true)
@@ -1796,23 +1802,67 @@ mod tests {
             NotionMcpTool {
                 name: "notion-update-page".to_string(),
                 description: Some("Update".to_string()),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: object_schema(),
             },
             NotionMcpTool {
                 name: "notion-update-page".to_string(),
                 description: Some("Duplicate".to_string()),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: object_schema(),
             },
             NotionMcpTool {
                 name: "notion-move-pages".to_string(),
                 description: Some("Move".to_string()),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: object_schema(),
             },
         ];
 
         let filtered = filter_allowed_tools(tools, action_tool_allowed_for_hermes);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "notion-update-page");
+    }
+
+    fn object_schema() -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({"type": "object"})
+            .as_object()
+            .cloned()
+            .expect("object schema")
+    }
+
+    #[test]
+    fn hosted_tool_validation_rejects_invalid_name_or_schema() {
+        assert!(parse_hosted_tool(&serde_json::json!({
+            "name": "",
+            "description": "Update a page",
+            "inputSchema": { "type": "object" },
+        }))
+        .is_none());
+        assert!(parse_hosted_tool(&serde_json::json!({
+            "name": "notion-update-page",
+            "description": "Update a page",
+            "inputSchema": null,
+        }))
+        .is_none());
+        assert!(parse_hosted_tool(&serde_json::json!({
+            "name": "notion-update-page",
+            "description": "Update a page",
+            "inputSchema": ["not", "an", "object"],
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn hosted_tool_serializes_input_schema_as_mcp_field() {
+        let tool = parse_hosted_tool(&serde_json::json!({
+            "name": " notion-update-page ",
+            "description": "Update a page",
+            "inputSchema": { "type": "object" },
+        }))
+        .expect("valid hosted tool");
+        let value = serde_json::to_value(&tool).expect("serialize tool");
+
+        assert_eq!(tool.name, "notion-update-page");
+        assert!(value.get("inputSchema").is_some());
+        assert!(value.get("input_schema").is_none());
     }
 
     #[test]

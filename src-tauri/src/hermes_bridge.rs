@@ -12520,20 +12520,35 @@ assert capped["has_more"] is True, capped
         assert!(provider_proxy_is_google_connector_route(
             "/v1/gcal-actions/create_event"
         ));
-        assert!(provider_proxy_is_notion_connector_route("/v1/notion/tools"));
-        assert!(provider_proxy_is_notion_connector_route(
-            "/v1/notion-actions/tools"
-        ));
-        assert!(provider_proxy_is_notion_connector_route(
-            "/v1/notion-actions/call"
-        ));
-        assert!(provider_proxy_is_notion_connector_route(
-            "/v1/notion-actions/notion-create-pages"
-        ));
+        for path in [
+            "/v1/notion/tools",
+            "/v1/notion/call",
+            "/v1/notion-actions/tools",
+            "/v1/notion-actions/call",
+            "/v1/notion-actions/notion-create-pages",
+        ] {
+            assert!(provider_proxy_is_notion_connector_route(path));
+            assert!(provider_proxy_is_connector_route(path));
+            assert_eq!(
+                provider_proxy_required_token(
+                    path,
+                    "provider-tok",
+                    "memory-tok",
+                    "recorder-tok",
+                    "connector-tok"
+                ),
+                "connector-tok"
+            );
+        }
         assert!(!provider_proxy_is_connector_route(
             "/v1/gmailish/search_threads"
         ));
         assert!(!provider_proxy_is_connector_route("/v1/notionish/tools"));
+        assert!(!provider_proxy_is_connector_route(
+            "/v1/notion-actionsish/tools"
+        ));
+        assert!(!provider_proxy_is_connector_route("/v1/notion"));
+        assert!(!provider_proxy_is_connector_route("/v1/notion-actions"));
         assert!(!provider_proxy_is_connector_route("/v1/models"));
         assert!(!provider_proxy_is_connector_route("/v1/recorder/start"));
 
