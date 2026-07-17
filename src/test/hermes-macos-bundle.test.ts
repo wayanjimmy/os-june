@@ -7,6 +7,15 @@ import macBundler from "../../scripts/bundle-hermes-runtime.sh?raw";
 import nativeImportSmoke from "../../scripts/hermes-native-import-smoke.py?raw";
 import tauriBuild from "../../src-tauri/build.rs?raw";
 
+function expectInOrder(source: string, needles: string[]) {
+  let previous = -1;
+  for (const needle of needles) {
+    const index = source.indexOf(needle);
+    expect(index, `missing release step: ${needle}`).toBeGreaterThan(previous);
+    previous = index;
+  }
+}
+
 describe("macOS Hermes universal runtime bundle", () => {
   it("installs complete target-qualified runtime trees for both architectures", () => {
     expect(macBundler).toContain("bundle_architectures=(arm64 x86_64)");
@@ -65,5 +74,19 @@ describe("macOS Hermes universal runtime bundle", () => {
     expect(signedDmgBuilder).toContain("--target universal-apple-darwin");
     expect(signedDmgBuilder).toContain("audit-hermes-runtime.sh");
     expect(signedDmgBuilder).toContain("--require-signed");
+  });
+
+  it("validates notarization only after stapling the published DMG", () => {
+    for (const releasePath of [rcWorkflow, promoteWorkflow, signedDmgBuilder]) {
+      expectInOrder(releasePath, [
+        'codesign --verify --deep --strict --verbose=2 "$app"',
+        'xcrun notarytool submit "$dmg"',
+        'xcrun stapler staple "$dmg"',
+        'xcrun stapler validate "$dmg"',
+        'spctl --assess --type install --verbose "$dmg"',
+      ]);
+      expect(releasePath).not.toContain('xcrun stapler validate "$app"');
+      expect(releasePath).not.toContain('spctl --assess --type execute --verbose "$app"');
+    }
   });
 });

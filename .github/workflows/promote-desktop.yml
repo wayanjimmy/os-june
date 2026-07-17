@@ -302,8 +302,6 @@ jobs:
           ./scripts/audit-hermes-runtime.sh \
             "$app/Contents/Resources/native/hermes" --require-signed
           codesign --verify --deep --strict --verbose=2 "$app"
-          xcrun stapler validate "$app"
-          spctl --assess --type execute --verbose "$app"
 
           dmg="${dmgs[0]}"
           xcrun notarytool submit "$dmg" \

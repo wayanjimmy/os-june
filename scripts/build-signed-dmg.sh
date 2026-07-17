@@ -159,8 +159,6 @@ app="${apps[0]}"
 "$ROOT_DIR/scripts/audit-hermes-runtime.sh" \
   "$app/Contents/Resources/native/hermes" --require-signed
 codesign --verify --deep --strict --verbose=2 "$app"
-xcrun stapler validate "$app"
-spctl --assess --type execute --verbose "$app"
 
 dmgs=(
   "$ROOT_DIR"/src-tauri/target/*-apple-darwin/release/bundle/dmg/*.dmg
@@ -178,4 +176,6 @@ for dmg in "${dmgs[@]}"; do
     --issuer "$APPLE_API_ISSUER" \
     --wait
   xcrun stapler staple "$dmg"
+  xcrun stapler validate "$dmg"
+  spctl --assess --type install --verbose "$dmg"
 done
