@@ -529,7 +529,9 @@ export function ConnectorsSection() {
             </div>
             <div className="connector-actions">
               {obsidian?.connected ? (
-                <span className="status-pill" data-tone="ok">Connected</span>
+                <span className="status-pill" data-tone="ok">
+                  Connected
+                </span>
               ) : null}
               <button
                 type="button"
