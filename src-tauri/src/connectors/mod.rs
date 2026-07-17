@@ -1393,7 +1393,7 @@ mod tests {
         let json = serde_json::to_value(&account).unwrap();
         assert_eq!(json["accountId"], "notion-hosted-mcp");
         assert_eq!(json["provider"], "notion");
-        assert_eq!(json["email"], "Notion hosted MCP preview");
+        assert_eq!(json["email"], "Notion");
         assert_eq!(json["scopes"].as_array().unwrap().len(), 0);
         assert_eq!(json["status"], "connected");
         assert!(json["workspaceName"].is_null());

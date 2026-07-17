@@ -153,7 +153,7 @@ describe("ConnectorsSection", () => {
       {
         accountId: "notion-hosted-mcp",
         provider: "notion",
-        email: "Notion hosted MCP preview",
+        email: "Notion",
         scopes: [],
         status: "connected",
         workspaceName: null,
@@ -179,7 +179,7 @@ describe("ConnectorsSection", () => {
       {
         accountId: "notion-hosted-mcp",
         provider: "notion",
-        email: "Notion hosted MCP preview",
+        email: "Notion",
         scopes: [],
         status: "reconnect_required",
         workspaceName: null,
