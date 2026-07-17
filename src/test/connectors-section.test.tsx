@@ -216,7 +216,9 @@ describe("ConnectorsSection", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Reconnect Notion" }));
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect Notion" })).toBeDisabled());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reconnect Notion" })).toBeDisabled(),
+    );
     expect(screen.getByRole("button", { name: "Disconnect Notion" })).toBeDisabled();
   });
 
