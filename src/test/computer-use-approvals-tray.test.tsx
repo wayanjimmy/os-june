@@ -27,10 +27,10 @@ function approval(overrides: Record<string, unknown> = {}) {
   return {
     approvalId: "approval-1",
     actionId: "action-1",
-    action: "click",
+    action: "use_app",
     targetApp: "TextEdit",
-    summary: "Click Save",
-    capturePath: "/tmp/capture.png",
+    summary: "June can inspect and operate this app until the current task ends.",
+    capturePath: null,
     requestedAtMs: 1,
     expiresAtMs: Date.now() + 60_000,
     ...overrides,
@@ -55,15 +55,18 @@ describe("ComputerUseApprovalsTray", () => {
     expect(screen.queryByLabelText("Computer use approvals")).toBeNull();
   });
 
-  it("shows target context and only per-action decisions", async () => {
+  it("shows one task-scoped decision for the target app", async () => {
     tauriMocks.computerUseApprovalsPending.mockResolvedValue([approval()]);
     render(<ComputerUseApprovalsTray />);
 
-    expect(await screen.findByText("Click Save")).toBeInTheDocument();
-    expect(screen.getByText(/TextEdit/)).toBeInTheDocument();
-    expect(screen.getByRole("img")).toHaveAttribute("src", "asset:///tmp/capture.png");
+    expect(await screen.findByText("June wants to use TextEdit")).toBeInTheDocument();
+    expect(
+      screen.getByText("June can inspect and operate this app until the current task ends."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/TextEdit/)).toHaveLength(1);
+    expect(screen.queryByRole("img")).toBeNull();
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Allow once" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow for this task" })).toBeInTheDocument();
     expect(screen.getByText(/Expires at/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve all" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Deny all" })).toBeNull();
@@ -76,11 +79,20 @@ describe("ComputerUseApprovalsTray", () => {
       .mockResolvedValue([]);
     render(<ComputerUseApprovalsTray />);
 
-    await userEvent.click(await screen.findByRole("button", { name: "Allow once" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Allow for this task" }));
     expect(tauriMocks.respondComputerUseApproval).toHaveBeenCalledWith({
       approvalId: "approval-1",
       approve: true,
     });
+  });
+
+  it("does not expose implementation details", async () => {
+    tauriMocks.computerUseApprovalsPending.mockResolvedValue([approval()]);
+    render(<ComputerUseApprovalsTray />);
+
+    expect(await screen.findByText("June wants to use TextEdit")).toBeInTheDocument();
+    expect(screen.getAllByText(/TextEdit/)).toHaveLength(1);
+    expect(screen.queryByText(/MCP/i)).toBeNull();
   });
 
   it("stops the broker and clears pending work", async () => {
@@ -100,6 +112,8 @@ describe("ComputerUseApprovalsTray", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Deny" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Approval expired");
-    expect(screen.getByText("Click Save")).toBeInTheDocument();
+    expect(
+      screen.getByText("June can inspect and operate this app until the current task ends."),
+    ).toBeInTheDocument();
   });
 });

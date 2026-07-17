@@ -12,7 +12,13 @@ fn main() {
                 eprintln!("Computer use self-test host requires the bundled helper path.");
                 std::process::exit(64);
             };
-            if arguments.len() != 3 {
+            let permission_prompt = arguments.get(3).and_then(|argument| {
+                argument
+                    .to_str()
+                    .and_then(|value| value.strip_prefix("--permission-prompt="))
+                    .map(str::to_string)
+            });
+            if arguments.len() > 4 || (arguments.len() == 4 && permission_prompt.is_none()) {
                 eprintln!("Computer use self-test host received unexpected arguments.");
                 std::process::exit(64);
             }
@@ -23,6 +29,7 @@ fn main() {
             if let Err(error) =
                 runtime.block_on(os_june_lib::computer_use::run_release_self_test_host(
                     std::path::PathBuf::from(driver),
+                    permission_prompt,
                 ))
             {
                 eprintln!("Computer use self-test host stopped: {error}");

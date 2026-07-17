@@ -33,7 +33,6 @@ import { IconPlugin1 } from "central-icons/IconPlugin1";
 import { IconGithub } from "central-icons/IconGithub";
 import { IconArrowInbox } from "central-icons/IconArrowInbox";
 import { IconToolbox } from "central-icons/IconToolbox";
-import { IconTelevision } from "central-icons/IconTelevision";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconHeartBeat } from "central-icons/IconHeartBeat";
@@ -269,11 +268,6 @@ const SETTINGS_SIDEBAR_GROUPS: {
       },
       { id: "models", label: "Models", icon: <IconBrain2 size={16} /> },
       { id: "agent", label: "Agent", icon: <IconRobot2 size={16} /> },
-      {
-        id: "computer-use",
-        label: "Computer use",
-        icon: <IconTelevision size={16} />,
-      },
       {
         id: "connectors",
         label: "Connectors",

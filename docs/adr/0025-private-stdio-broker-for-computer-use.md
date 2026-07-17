@@ -146,3 +146,86 @@ June uses option 4.
   proxy: it accepts only the bundled helper and only the two disposable fixture
   bundle identifiers. This lets the real signed June parent exercise TCC and
   background input without adding a production bypass.
+
+## Addendum - Tauri development launcher identity (2026-07-16)
+
+Tauri's development runner expects the product-name executable `June`, while
+Cargo produces the canonical `os-june` binary. The repo runner materializes
+`target/**/June` as a byte-identical copy of `target/**/os-june` before launch.
+The development helper therefore accepts either exact basename inside this
+checkout's Cargo target tree. It continues to reject every other basename and
+every path outside that target tree; the peer PID check and fresh initialization
+capability remain mandatory. Packaged helper verification is unchanged and
+still requires the signed outer `June.app` executable and matching signing team.
+
+## Addendum - policy-brokered app lifecycle (2026-07-16)
+
+The initial allowlist could operate only windows that were already available.
+That made an ordinary request depend on the user opening the target app first,
+and a Stage Manager shelf thumbnail could be mistaken for the real window. The
+broker now owns two narrow lifecycle operations:
+
+- `open_app` accepts only an installed app display name. Rust rejects blocked
+  targets, paths, and URLs before approval, then verifies the launched PID,
+  bundle identifier, executable path, and returned windows. The helper maps it
+  to the pinned driver's background launch path. Its published schema excludes
+  file/URL handoff, environment variables, arguments, debugging ports, and
+  forced new-process options.
+- `focus_app` with `raise_window: true` is the sole foreground exception. It
+  requires a separate Allow once decision, revalidates the exact selected
+  process/window/app identity after approval, and sends only that PID to a
+  helper-local activation operation. The model cannot activate an arbitrary
+  process. Selecting a target without `raise_window` remains background-only
+  and does not require an action decision.
+
+Window listings preserve bounds and visibility metadata. A tiny Stage Manager
+shelf surface fails capture with a structured instruction to use the approved
+restore path instead of treating the thumbnail as the document. Normal capture
+and input retain the no-cursor, no-focus, and no-Space-change contract. Bringing
+a window forward is allowed only when the user requested it or the selected
+window must be restored, and the approval card states that foreground change.
+
+The agent-facing schema names the capability only as Computer use. It instructs
+the runtime to invoke mutations immediately and wait on June's native approval
+decision, never to request a textual `yes` or expose the internal transport in
+conversation.
+
+## Addendum - task-scoped app authorization and current-stage restore (2026-07-16)
+
+This addendum supersedes the per-action approval binding and separately
+approved `focus_app` restore described above. Repeated prompts made ordinary
+attended editing feel like a sequence of unrelated permissions even though the
+user had already chosen the app and task.
+
+The broker now asks once before the first access to each target app in an
+attended task. Existing apps are keyed by verified bundle identifier and
+executable path. A display-name authorization used for `open_app` is paired
+with that verified identity immediately after launch. Captures and mutations
+for the same identity then proceed without another decision until the final
+run lease ends. Stop, revoke, readiness loss, shutdown, or the start of a new
+task clears all app authorizations. Blocked targets, sensitive-field policy,
+exact-window capture binding, and pre-mutation stale-target revalidation remain
+enforced for every operation.
+
+Stage Manager grouping has no public application API; AppKit activation can
+switch to the target's existing group instead of joining it to June. The
+private helper therefore exposes one narrower `join_current_stage` operation
+instead of arbitrary process activation. Rust first brings June's main window
+to its stage. The helper focuses the exact target PID/window without Space
+follow using the already pinned SkyLight path, then performs `AXRaise` on the
+matching Accessibility window. The broker re-lists the exact window and
+accepts the result only when it is no longer a shelf-sized or off-current-Space
+surface. Failure is explicit and closed; there is no fallback that switches
+Spaces or moves the real pointer.
+
+WindowServer can publish a Stage Manager app twice: a full-size hidden window
+that maps to the real Accessibility window, plus a small titled shelf proxy
+that does not. The broker collapses that pair to the real window before target
+selection, treats the hidden window as requiring restore, and never exposes
+the proxy as an operable target. A failed restore is terminal for that window
+during the current task so the runtime cannot alternate between the proxy and
+the hidden window.
+
+This keeps the user-visible contract simple: one authorization to use an app
+for the current task, no separate prompt to restore it, and June plus the
+target window in the same Stage Manager group when restoration succeeds.

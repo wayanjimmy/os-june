@@ -3,6 +3,7 @@ pub mod app_paths;
 pub mod audio;
 pub mod commands;
 pub mod computer_use;
+mod computer_use_permission_drag;
 pub mod connectors;
 pub mod db;
 pub mod dictation;
@@ -313,6 +314,7 @@ pub fn run() {
             computer_use::computer_use_status,
             computer_use::set_computer_use_grant,
             computer_use::computer_use_request_permissions,
+            computer_use_permission_drag::set_computer_use_permission_drag_bounds,
             computer_use::computer_use_stop,
             computer_use::computer_use_begin_run,
             computer_use::computer_use_end_run,
@@ -703,6 +705,7 @@ extern "C-unwind" fn main_window_send_event(
     use objc2::msg_send;
 
     const NS_EVENT_TYPE_LEFT_MOUSE_DOWN: i64 = 1;
+    const NS_EVENT_TYPE_LEFT_MOUSE_DRAGGED: i64 = 6;
 
     unsafe {
         let is_registered_main_window = MAIN_WINDOW_NS_WINDOW
@@ -719,6 +722,13 @@ extern "C-unwind" fn main_window_send_event(
                 && main_first_mouse_hits_recording_presence(this, event)
             {
                 emit_recording_presence_reopen();
+            }
+            if event_type == NS_EVENT_TYPE_LEFT_MOUSE_DRAGGED
+                && MAIN_WINDOW_APP
+                    .get()
+                    .is_some_and(|app| computer_use::begin_permission_drag(app, this, event))
+            {
+                return;
             }
         }
 

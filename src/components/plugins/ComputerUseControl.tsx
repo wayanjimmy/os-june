@@ -3,7 +3,7 @@ import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
 import { IconLock } from "central-icons/IconLock";
 import { IconStop } from "central-icons/IconStop";
 import { IconTelevision } from "central-icons/IconTelevision";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { messageFromError } from "../../lib/errors";
 import {
   COMPUTER_USE_STATUS_CHANGED_EVENT,
@@ -13,15 +13,14 @@ import {
   computerUseStop,
   openPrivacySettings,
   setComputerUseGrant,
+  setComputerUsePermissionDragBounds,
 } from "../../lib/tauri";
 import { InlineNotice } from "../ui/InlineNotice";
 import { Switch } from "../ui/Switch";
 
 type ComputerUseControlProps = {
-  surface: "plugin" | "settings";
   onOpenModels: () => void;
   onOpenBilling: () => void;
-  onOpenSettings?: () => void;
 };
 
 function statusLabel(status?: ComputerUseStatusDto) {
@@ -43,19 +42,15 @@ function requirementState(ready: boolean, enabled: boolean) {
 }
 
 /**
- * Shared front for the single native Computer use grant. Plugins and Settings
- * deliberately render this same controller so neither can drift into a second
- * preference or imply that macOS TCC access was granted by June's switch.
+ * Canonical front for the single native Computer use grant. Keeping management
+ * in Plugins avoids a second preference surface and never implies that macOS
+ * TCC access was granted by June's switch.
  */
-export function ComputerUseControl({
-  surface,
-  onOpenModels,
-  onOpenBilling,
-  onOpenSettings,
-}: ComputerUseControlProps) {
+export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseControlProps) {
   const [status, setStatus] = useState<ComputerUseStatusDto>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>();
+  const permissionDragRef = useRef<HTMLButtonElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -165,8 +160,39 @@ export function ComputerUseControl({
   const permissionsMissing =
     enabled && status !== undefined && (!status.accessibility || !status.screenRecording);
 
+  useEffect(() => {
+    const element = permissionDragRef.current;
+    if (!permissionsMissing || !element) {
+      void setComputerUsePermissionDragBounds(null);
+      return;
+    }
+
+    const publishBounds = () => {
+      const bounds = element.getBoundingClientRect();
+      void setComputerUsePermissionDragBounds({
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      }).catch((error) => setMessage(messageFromError(error)));
+    };
+    publishBounds();
+
+    const observer =
+      typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(publishBounds);
+    observer?.observe(element);
+    window.addEventListener("resize", publishBounds);
+    window.addEventListener("scroll", publishBounds, true);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", publishBounds);
+      window.removeEventListener("scroll", publishBounds, true);
+      void setComputerUsePermissionDragBounds(null);
+    };
+  }, [permissionsMissing]);
+
   return (
-    <div className="computer-use-control" data-surface={surface} data-state={status?.state}>
+    <div className="computer-use-control" data-state={status?.state}>
       <div className="computer-use-control-header">
         <span className="computer-use-mark" aria-hidden>
           <IconTelevision size={20} />
@@ -253,14 +279,42 @@ export function ComputerUseControl({
 
       {enabled ? (
         <div className="computer-use-setup">
+          {permissionsMissing ? (
+            <section className="computer-use-permission-assistant" aria-labelledby="add-june-macos">
+              <div className="computer-use-permission-assistant-copy">
+                <h4 id="add-june-macos">Add June to macOS</h4>
+                <p>
+                  Open each missing permission, then drag the helper into the open list. No Finder
+                  browsing needed.
+                </p>
+              </div>
+              <button
+                ref={permissionDragRef}
+                type="button"
+                className="computer-use-permission-drag-card"
+                aria-label="Drag June Computer Use Driver to the open System Settings list"
+                onClick={() =>
+                  void openPermissionSettings(
+                    status?.accessibility ? "screenRecording" : "accessibility",
+                  )
+                }
+              >
+                <span className="computer-use-permission-drag-icon" aria-hidden>
+                  <IconTelevision size={20} />
+                </span>
+                <span className="computer-use-permission-drag-copy">
+                  <strong>June Computer Use Driver</strong>
+                  <span>Drag to the open list</span>
+                </span>
+              </button>
+            </section>
+          ) : null}
+
           <section
             className="computer-use-requirements"
-            aria-labelledby={`computer-use-requirements-${surface}`}
+            aria-labelledby="computer-use-requirements"
           >
-            <h4
-              id={`computer-use-requirements-${surface}`}
-              className="computer-use-requirements-heading"
-            >
+            <h4 id="computer-use-requirements" className="computer-use-requirements-heading">
               Requirements
             </h4>
             <div className="computer-use-requirement">
@@ -279,6 +333,7 @@ export function ComputerUseControl({
                 <button
                   type="button"
                   className="btn btn-ghost computer-use-inline-action"
+                  aria-label="Open Accessibility settings"
                   onClick={() => void openPermissionSettings("accessibility")}
                 >
                   Open settings
@@ -301,6 +356,7 @@ export function ComputerUseControl({
                 <button
                   type="button"
                   className="btn btn-ghost computer-use-inline-action"
+                  aria-label="Open Screen Recording settings"
                   onClick={() => void openPermissionSettings("screenRecording")}
                 >
                   Open settings
@@ -354,11 +410,6 @@ export function ComputerUseControl({
               <IconStop size={14} aria-hidden />
               Stop current task
             </button>
-            {surface === "plugin" && onOpenSettings ? (
-              <button type="button" className="btn btn-ghost" onClick={onOpenSettings}>
-                Open Computer use settings
-              </button>
-            ) : null}
           </div>
         </div>
       ) : null}

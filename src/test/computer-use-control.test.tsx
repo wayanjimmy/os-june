@@ -8,6 +8,7 @@ const tauriMocks = vi.hoisted(() => ({
   computerUseRequestPermissions: vi.fn(),
   computerUseStop: vi.fn(),
   openPrivacySettings: vi.fn(),
+  setComputerUsePermissionDragBounds: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", async (importOriginal) => ({
@@ -17,9 +18,12 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   computerUseRequestPermissions: tauriMocks.computerUseRequestPermissions,
   computerUseStop: tauriMocks.computerUseStop,
   openPrivacySettings: tauriMocks.openPrivacySettings,
+  setComputerUsePermissionDragBounds: tauriMocks.setComputerUsePermissionDragBounds,
 }));
 
 import { ComputerUseControl } from "../components/plugins/ComputerUseControl";
+import { PluginsView } from "../components/plugins/PluginsView";
+import { SETTINGS_TABS } from "../components/settings/AppSettings";
 import type { ComputerUseStatusDto } from "../lib/tauri";
 
 function status(overrides: Partial<ComputerUseStatusDto> = {}): ComputerUseStatusDto {
@@ -55,6 +59,7 @@ beforeEach(() => {
   );
   tauriMocks.computerUseStop.mockResolvedValue({ stopped: true });
   tauriMocks.openPrivacySettings.mockResolvedValue(undefined);
+  tauriMocks.setComputerUsePermissionDragBounds.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -64,7 +69,7 @@ afterEach(() => {
 
 describe("ComputerUseControl", () => {
   it("enables the June grant without prompting for macOS access", async () => {
-    render(<ComputerUseControl surface="plugin" onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
     const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
 
     await userEvent.click(toggle);
@@ -77,9 +82,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, state: "permission_missing" }),
     );
-    render(
-      <ComputerUseControl surface="settings" onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />,
-    );
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
 
     expect(await screen.findByText("Accessibility")).toBeInTheDocument();
     expect(screen.getByText("Screen recording")).toBeInTheDocument();
@@ -87,6 +90,21 @@ describe("ComputerUseControl", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Continue to macOS access" }));
     expect(tauriMocks.computerUseRequestPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers the real helper app as a drag source when macOS access is missing", async () => {
+    tauriMocks.computerUseStatus.mockResolvedValue(
+      status({ grantEnabled: true, state: "permission_missing" }),
+    );
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+
+    expect(await screen.findByText("Add June to macOS")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Drag June Computer Use Driver to the open System Settings list",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/No Finder browsing needed/)).toBeInTheDocument();
   });
 
   it("routes a model mismatch to the model picker", async () => {
@@ -101,9 +119,7 @@ describe("ComputerUseControl", () => {
         state: "model_unsupported",
       }),
     );
-    render(
-      <ComputerUseControl surface="settings" onOpenModels={onOpenModels} onOpenBilling={vi.fn()} />,
-    );
+    render(<ComputerUseControl onOpenModels={onOpenModels} onOpenBilling={vi.fn()} />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Choose model" }));
     expect(onOpenModels).toHaveBeenCalledTimes(1);
@@ -113,7 +129,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ platformSupported: false, driverAvailable: false, state: "unsupported" }),
     );
-    render(<ComputerUseControl surface="plugin" onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
 
     const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
     await waitFor(() => expect(toggle).toBeDisabled());
@@ -125,9 +141,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ planEligible: false, driverAvailable: false, state: "plan_required" }),
     );
-    render(
-      <ComputerUseControl surface="plugin" onOpenModels={vi.fn()} onOpenBilling={onOpenBilling} />,
-    );
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={onOpenBilling} />);
 
     expect(await screen.findByRole("switch", { name: "Enable Computer use" })).toBeDisabled();
     expect(screen.getByText(/macOS will ask for Accessibility/)).toBeInTheDocument();
@@ -144,7 +158,7 @@ describe("ComputerUseControl", () => {
         error: "Computer use is temporarily unavailable for this June or macOS version.",
       }),
     );
-    render(<ComputerUseControl surface="plugin" onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
 
     expect(await screen.findByRole("switch", { name: "Enable Computer use" })).toBeDisabled();
     expect(screen.getAllByText("Temporarily unavailable")).toHaveLength(2);
@@ -152,5 +166,16 @@ describe("ComputerUseControl", () => {
       screen.getAllByText(/temporarily unavailable for this June or macOS version/),
     ).toHaveLength(1);
     expect(screen.queryByText("Bundled driver unavailable")).not.toBeInTheDocument();
+  });
+
+  it("keeps Computer use management in Plugins instead of Settings", async () => {
+    render(<PluginsView onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "Plugins" })).toBeInTheDocument();
+    expect(await screen.findByRole("switch", { name: "Enable Computer use" })).toBeInTheDocument();
+    expect(SETTINGS_TABS.some((tab) => tab.label === "Computer use")).toBe(false);
+    expect(
+      screen.queryByRole("button", { name: "Open Computer use settings" }),
+    ).not.toBeInTheDocument();
   });
 });

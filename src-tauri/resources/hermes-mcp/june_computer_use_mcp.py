@@ -19,10 +19,23 @@ import urllib.request
 TOOL_SCHEMA = {
     "name": "computer_use",
     "description": (
-        "Operate an allowed macOS app in the background without moving the "
-        "user's cursor, taking keyboard focus, or switching Spaces. Capture "
-        "first, then prefer numbered elements over coordinates. June asks "
-        "the user to approve every action that can change app state."
+        "Refer to this capability as Computer use. Never mention its server, "
+        "transport, or implementation. Operate allowed macOS apps without "
+        "moving the user's cursor. Normally work in the background: call "
+        "list_apps, capture a specific window, then prefer numbered elements "
+        "over coordinates. Never ask for approval in chat and never ask the "
+        "user to reply yes or approve. Call the requested action immediately. "
+        "The first access to each target app pauses once for June's native "
+        "Allow for this task or Deny decision; later actions in that app do "
+        "not ask again until the task ends. Use open_app with an app display name when "
+        "the app or document window is not open. If list_apps reports "
+        "needs_restore, or the user asks to bring a window back from Stage "
+        "Manager, continue directly. capture restores parked windows "
+        "automatically, while focus_app with raise_window true adds the target "
+        "window to June's current Stage Manager group without another decision. "
+        "After open_app, use its top-level window_id; never substitute a shelf "
+        "thumbnail. If current-stage restore fails, do not retry focus or capture "
+        "for that window during the same task; report the failure once."
     ),
     "inputSchema": {
         "type": "object",
@@ -41,11 +54,19 @@ TOOL_SCHEMA = {
                     "set_value",
                     "wait",
                     "list_apps",
+                    "open_app",
                     "focus_app",
                 ],
             },
             "mode": {"type": "string", "enum": ["som", "vision", "ax"]},
-            "app": {"type": "string", "maxLength": 200},
+            "app": {
+                "type": "string",
+                "maxLength": 200,
+                "description": (
+                    "Installed app display name for open_app, or an app/window "
+                    "filter returned by list_apps for capture and focus_app."
+                ),
+            },
             "window_id": {
                 "type": "integer",
                 "minimum": 0,
@@ -100,7 +121,13 @@ TOOL_SCHEMA = {
             "text": {"type": "string", "maxLength": 10000},
             "keys": {"type": "string", "maxLength": 64},
             "seconds": {"type": "number", "minimum": 0, "maximum": 30},
-            "raise_window": {"type": "boolean"},
+            "raise_window": {
+                "type": "boolean",
+                "description": (
+                    "For focus_app only. Set true when the user asked to bring "
+                    "the window forward. Parked windows are restored automatically."
+                ),
+            },
             "capture_after": {"type": "boolean"},
         },
         "required": ["action"],

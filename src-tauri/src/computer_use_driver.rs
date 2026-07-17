@@ -2,9 +2,10 @@
 //!
 //! This binary links the pinned upstream macOS implementation, but it does
 //! not expose upstream's CLI or complete MCP registry. June starts it over a
-//! private stdio pipe and authenticates the connection with a fresh in-memory
-//! capability. Launching the bundled executable directly therefore provides
-//! no desktop-control surface.
+//! private local socket and authenticates both June's peer process and a fresh
+//! in-memory capability. LaunchServices owns the helper process so macOS TCC
+//! grants belong to this bundle, while direct launches still provide no
+//! desktop-control surface.
 
 #[cfg(target_os = "macos")]
 use cua_driver_core::{
@@ -16,7 +17,13 @@ use serde_json::{json, Value};
 #[cfg(target_os = "macos")]
 use std::{collections::HashSet, io, path::PathBuf, sync::Arc};
 #[cfg(target_os = "macos")]
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::{
+    io::{
+        AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+        BufReader,
+    },
+    net::UnixListener,
+};
 
 const UPSTREAM_VERSION: &str = "0.5.0";
 const UPSTREAM_COMMIT: &str = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1";
@@ -55,6 +62,8 @@ where
 const ALLOWED_TOOLS: &[&str] = &[
     "check_permissions",
     "list_windows",
+    "launch_app",
+    "join_current_stage",
     "get_window_state",
     "click",
     "double_click",
@@ -75,11 +84,15 @@ async fn main() {
         println!("june-computer-use-driver {UPSTREAM_VERSION} {UPSTREAM_COMMIT}");
         return;
     }
-    if args.as_slice() != ["mcp"] {
-        eprintln!("This helper is private to June.");
-        std::process::exit(64);
-    }
-    if let Err(error) = serve().await {
+    let result = match args.as_slice() {
+        [mode] if mode == "mcp" && parent_is_june() => serve_stdio().await,
+        [mode] if mode == "mcp-daemon" => serve_daemon().await,
+        [mode] if mode == "mcp" => Err(anyhow::anyhow!(
+            "the helper must be launched directly by June"
+        )),
+        _ => Err(anyhow::anyhow!("This helper is private to June.")),
+    };
+    if let Err(error) = result {
         eprintln!("Computer use helper stopped: {error}");
         std::process::exit(1);
     }
@@ -92,17 +105,108 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
-async fn serve() -> anyhow::Result<()> {
-    if !parent_is_june() {
-        anyhow::bail!("the helper must be launched directly by June");
+async fn serve_stdio() -> anyhow::Result<()> {
+    serve(tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+#[cfg(target_os = "macos")]
+async fn serve_daemon() -> anyhow::Result<()> {
+    let socket_path = std::env::var("JUNE_COMPUTER_USE_SOCKET")
+        .map(PathBuf::from)
+        .map_err(|_| anyhow::anyhow!("the private June socket is missing"))?;
+    if !socket_path.is_absolute() {
+        anyhow::bail!("the private June socket must be absolute");
     }
+    let listener = UnixListener::bind(&socket_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    request_startup_permission();
+    let (stream, _) = tokio::time::timeout(std::time::Duration::from_secs(15), listener.accept())
+        .await
+        .map_err(|_| anyhow::anyhow!("June did not connect to the private helper"))??;
+    let peer_pid = stream
+        .peer_cred()?
+        .pid()
+        .ok_or_else(|| anyhow::anyhow!("the private June peer has no process identity"))?;
+    if !process_is_june(peer_pid) {
+        anyhow::bail!("the private helper accepts only June");
+    }
+    let (reader, writer) = stream.into_split();
+    let result = serve(reader, writer).await;
+    let _ = std::fs::remove_file(socket_path);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn request_startup_permission() {
+    match std::env::var("JUNE_COMPUTER_USE_PERMISSION_PROMPT").as_deref() {
+        Ok("accessibility") => {
+            let _ = platform_macos::permissions::status::request_accessibility();
+        }
+        Ok("screen-recording") => {
+            let _ = platform_macos::permissions::status::request_screen_recording();
+        }
+        _ => {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn permission_result() -> Value {
+    let status = platform_macos::permissions::current_status();
+    let accessibility = status.accessibility;
+    let screen_recording = status.screen_recording;
+    let text = format!(
+        "{} Accessibility: {}.\n{} Screen Recording: {}.",
+        if accessibility { "✅" } else { "❌" },
+        if accessibility {
+            "granted"
+        } else {
+            "NOT granted"
+        },
+        if screen_recording { "✅" } else { "❌" },
+        if screen_recording {
+            "granted"
+        } else {
+            "NOT granted"
+        },
+    );
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": {
+            "accessibility": accessibility,
+            "screen_recording": screen_recording,
+            // This fresh LaunchServices process owns both the preflight and
+            // every later capture. Avoid upstream's blocking live probe here;
+            // actual captures remain the authoritative runtime check.
+            "screen_recording_capturable": screen_recording,
+            "source": {
+                "attribution": "driver-app",
+                "pid": std::process::id(),
+                "executable": std::env::current_exe()
+                    .ok()
+                    .and_then(|path| path.to_str().map(str::to_owned))
+                    .unwrap_or_default(),
+            },
+        },
+        "isError": false,
+    })
+}
+
+#[cfg(target_os = "macos")]
+async fn serve<R, W>(reader: R, writer: W) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let registry = Arc::new(platform_macos::register_tools());
     registry.init_self_weak();
     let allowed: HashSet<&'static str> = ALLOWED_TOOLS.iter().copied().collect();
     let mut authenticated = false;
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
-    let mut stdout = tokio::io::BufWriter::new(tokio::io::stdout());
+    let mut reader = BufReader::new(reader);
+    let mut stdout = tokio::io::BufWriter::new(writer);
 
     loop {
         let line = match read_bounded_line(&mut reader, MAX_REQUEST_BYTES).await? {
@@ -156,6 +260,12 @@ async fn serve() -> anyhow::Result<()> {
                     -32602,
                     "The driver request contains fields outside June's contract.",
                 ),
+                Ok(call) if call.name == "check_permissions" => {
+                    Response::ok(id, permission_result())
+                }
+                Ok(call) if call.name == "join_current_stage" => {
+                    Response::ok(id, join_current_stage_result(&call.args))
+                }
                 Ok(call) => {
                     let result = registry.invoke(&call.name, call.args).await;
                     match serde_json::to_value(result) {
@@ -175,8 +285,12 @@ async fn serve() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn parent_is_june() -> bool {
-    let parent_pid = unsafe { libc::getppid() };
-    let Some(parent_path) = process_path(parent_pid) else {
+    process_is_june(unsafe { libc::getppid() })
+}
+
+#[cfg(target_os = "macos")]
+fn process_is_june(pid: libc::pid_t) -> bool {
+    let Some(process_path) = process_path(pid) else {
         return false;
     };
     let Ok(helper_path) = std::env::current_exe() else {
@@ -195,18 +309,30 @@ fn parent_is_june() -> bool {
         .collect();
     if let (Some(helper_app), Some(outer_app)) = (app_ancestors.first(), app_ancestors.get(1)) {
         return same_file(
-            &parent_path,
+            &process_path,
             &outer_app.join("Contents").join("MacOS").join("June"),
         ) && packaged_signatures_match(outer_app, helper_app);
     }
 
-    // Development builds are not nested yet. The only accepted parent is the
-    // os-june executable produced inside this checkout's Cargo target tree.
+    // Development builds are not nested yet. Accept only the Cargo binary or
+    // the byte-identical `June` launcher materialized by the Tauri dev runner,
+    // both inside this checkout's Cargo target tree.
     cfg!(debug_assertions)
-        && parent_path.starts_with(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"))
-        && parent_path
+        && development_process_path_is_june(
+            &process_path,
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
+        )
+}
+
+#[cfg(target_os = "macos")]
+fn development_process_path_is_june(
+    process_path: &std::path::Path,
+    target_root: &std::path::Path,
+) -> bool {
+    process_path.starts_with(target_root)
+        && process_path
             .file_name()
-            .is_some_and(|name| name == "os-june")
+            .is_some_and(|name| name == "os-june" || name == "June")
 }
 
 #[cfg(target_os = "macos")]
@@ -332,12 +458,135 @@ fn valid_capability(candidate: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn allowed_tool_list(registry: &ToolRegistry, allowed: &HashSet<&str>) -> Value {
-    let tools: Vec<Value> = registry
+    let mut tools: Vec<Value> = registry
         .iter_defs()
         .filter(|(name, _)| allowed.contains(name))
-        .map(|(_, definition)| definition.to_list_entry())
+        .map(|(name, definition)| {
+            if name == "launch_app" {
+                launch_app_tool_definition()
+            } else {
+                definition.to_list_entry()
+            }
+        })
         .collect();
+    tools.push(join_current_stage_tool_definition());
     json!({ "tools": tools })
+}
+
+#[cfg(target_os = "macos")]
+fn launch_app_tool_definition() -> Value {
+    json!({
+        "name": "launch_app",
+        "description": "Open an installed macOS app by display name in the background.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 200 }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn join_current_stage_tool_definition() -> Value {
+    json!({
+        "name": "join_current_stage",
+        "description": "Raise one authorized app window inside June's current Stage Manager group without following it to another Space.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pid": { "type": "integer", "minimum": 1 },
+                "window_id": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["pid", "window_id"],
+            "additionalProperties": false
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn join_current_stage_result(arguments: &Value) -> Value {
+    let pid = arguments
+        .get("pid")
+        .and_then(Value::as_i64)
+        .and_then(|pid| i32::try_from(pid).ok())
+        .filter(|pid| *pid > 0);
+    let Some(pid) = pid else {
+        return json!({
+            "content": [{ "type": "text", "text": "join_current_stage requires a positive pid." }],
+            "isError": true
+        });
+    };
+    let window_id = arguments
+        .get("window_id")
+        .and_then(Value::as_u64)
+        .and_then(|window_id| u32::try_from(window_id).ok())
+        .filter(|window_id| *window_id > 0);
+    let Some(window_id) = window_id else {
+        return json!({
+            "content": [{ "type": "text", "text": "join_current_stage requires a positive window_id." }],
+            "isError": true
+        });
+    };
+
+    let focused_without_space_follow =
+        platform_macos::input::skylight::activate_without_raise(pid, window_id);
+    if raise_ax_window(pid, window_id) {
+        json!({
+            "content": [{ "type": "text", "text": format!("Added app window {window_id} to the current stage.") }],
+            "structuredContent": {
+                "pid": pid,
+                "window_id": window_id,
+                "raised": true,
+                "focused_without_space_follow": focused_without_space_follow
+            },
+            "isError": false
+        })
+    } else {
+        json!({
+            "content": [{ "type": "text", "text": "The selected app window could not be raised in the current stage." }],
+            "structuredContent": {
+                "pid": pid,
+                "window_id": window_id,
+                "raised": false,
+                "focused_without_space_follow": focused_without_space_follow
+            },
+            "isError": true
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn raise_ax_window(pid: i32, window_id: u32) -> bool {
+    use platform_macos::ax::bindings::{
+        ax_get_window_id, copy_ax_windows, kAXErrorSuccess, perform_action,
+        AXUIElementCreateApplication,
+    };
+
+    unsafe extern "C" {
+        fn CFRelease(value: *const libc::c_void);
+    }
+
+    unsafe {
+        let application = AXUIElementCreateApplication(pid);
+        if application.is_null() {
+            return false;
+        }
+        let windows = copy_ax_windows(application);
+        let mut raised = false;
+        for window in windows {
+            if ax_get_window_id(window) == Some(window_id)
+                && perform_action(window, "AXRaise") == kAXErrorSuccess
+            {
+                raised = true;
+            }
+            CFRelease(window.cast());
+        }
+        CFRelease(application.cast());
+        raised
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -348,6 +597,8 @@ fn arguments_are_narrow(tool: &str, arguments: &Value) -> bool {
     let allowed: &[&str] = match tool {
         "check_permissions" => &["prompt"],
         "list_windows" => &["pid", "on_screen_only"],
+        "launch_app" => &["name"],
+        "join_current_stage" => &["pid", "window_id"],
         "get_window_state" => &["pid", "window_id", "capture_mode"],
         "click" | "double_click" | "right_click" => &[
             "pid",
@@ -374,14 +625,40 @@ fn arguments_are_narrow(tool: &str, arguments: &Value) -> bool {
         "set_value" => &["pid", "window_id", "element_index", "value"],
         _ => return false,
     };
-    arguments.keys().all(|key| allowed.contains(&key.as_str()))
+    if !arguments.keys().all(|key| allowed.contains(&key.as_str())) {
+        return false;
+    }
+    match tool {
+        "launch_app" => {
+            arguments.len() == 1
+                && arguments
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.trim().is_empty() && name.chars().count() <= 200)
+        }
+        "join_current_stage" => {
+            arguments.len() == 2
+                && arguments
+                    .get("pid")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|pid| pid > 0 && i32::try_from(pid).is_ok())
+                && arguments
+                    .get("window_id")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|window_id| window_id > 0 && u32::try_from(window_id).is_ok())
+        }
+        _ => true,
+    }
 }
 
 #[cfg(target_os = "macos")]
-async fn write_response(
-    stdout: &mut tokio::io::BufWriter<tokio::io::Stdout>,
+async fn write_response<W>(
+    stdout: &mut tokio::io::BufWriter<W>,
     response: Response,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let mut bytes = serde_json::to_vec(&response)?;
     bytes.push(b'\n');
     stdout.write_all(&bytes).await?;
@@ -392,6 +669,28 @@ async fn write_response(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn development_peer_accepts_cargo_and_tauri_runner_names_only() {
+        let target = std::path::Path::new("/repo/src-tauri/target");
+
+        assert!(development_process_path_is_june(
+            std::path::Path::new("/repo/src-tauri/target/debug/os-june"),
+            target,
+        ));
+        assert!(development_process_path_is_june(
+            std::path::Path::new("/repo/src-tauri/target/debug/June"),
+            target,
+        ));
+        assert!(!development_process_path_is_june(
+            std::path::Path::new("/repo/src-tauri/target/debug/june-lookalike"),
+            target,
+        ));
+        assert!(!development_process_path_is_june(
+            std::path::Path::new("/tmp/target/debug/June"),
+            target,
+        ));
+    }
 
     #[tokio::test]
     async fn request_reader_enforces_the_limit_while_reading() {
@@ -411,9 +710,10 @@ mod tests {
     }
 
     #[test]
-    fn narrow_contract_excludes_upstream_process_and_update_tools() {
+    fn narrow_contract_allows_only_policy_brokered_lifecycle_tools() {
+        assert!(ALLOWED_TOOLS.contains(&"launch_app"));
+        assert!(ALLOWED_TOOLS.contains(&"join_current_stage"));
         for denied in [
-            "launch_app",
             "kill_app",
             "move_cursor",
             "set_config",
@@ -423,6 +723,35 @@ mod tests {
         ] {
             assert!(!ALLOWED_TOOLS.contains(&denied));
         }
+    }
+
+    #[test]
+    fn app_lifecycle_arguments_cannot_smuggle_paths_urls_or_process_options() {
+        assert!(arguments_are_narrow(
+            "launch_app",
+            &json!({ "name": "TextEdit" }),
+        ));
+        assert!(arguments_are_narrow(
+            "join_current_stage",
+            &json!({ "pid": 42, "window_id": 84 }),
+        ));
+        for arguments in [
+            json!({ "name": "TextEdit", "urls": ["file:///tmp/private"] }),
+            json!({ "name": "TextEdit", "additional_arguments": ["--unsafe"] }),
+            json!({ "name": "TextEdit", "electron_debugging_port": 9222 }),
+            json!({ "name": "TextEdit", "webkit_inspector_port": 9223 }),
+            json!({ "name": "TextEdit", "creates_new_application_instance": true }),
+        ] {
+            assert!(!arguments_are_narrow("launch_app", &arguments));
+        }
+        assert!(!arguments_are_narrow(
+            "join_current_stage",
+            &json!({ "pid": 42, "window_id": 84, "bundle_id": "com.apple.TextEdit" }),
+        ));
+        assert!(!arguments_are_narrow(
+            "join_current_stage",
+            &json!({ "pid": 42 }),
+        ));
     }
 
     #[test]

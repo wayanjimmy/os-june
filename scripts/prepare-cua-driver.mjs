@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pinPath = path.join(rootDir, "src-tauri", "cua-driver-pin.json");
@@ -22,6 +23,11 @@ const parsed = parseArguments(process.argv.slice(2));
 const release = parsed.release;
 const target = parsed.target || tauriTargetTriple();
 const profile = release ? "release" : "debug";
+const bundleIdentifier = computerUseBundleIdentifier({
+  baseIdentifier: pin.bundleIdentifier,
+  profile,
+  worktreeRoot: rootDir,
+});
 const rustTargets =
   target === "universal-apple-darwin"
     ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
@@ -107,7 +113,7 @@ writeFileSync(
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleDisplayName</key><string>June Computer Use Driver</string>
   <key>CFBundleExecutable</key><string>${pin.executable}</string>
-  <key>CFBundleIdentifier</key><string>${pin.bundleIdentifier}</string>
+  <key>CFBundleIdentifier</key><string>${bundleIdentifier}</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>June Computer Use Driver</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -126,6 +132,7 @@ writeFileSync(
   `${JSON.stringify(
     {
       ...pin,
+      bundleIdentifier,
       juneBuild: { profile, architectures: [...architectures].sort(), sourceSha256 },
     },
     null,
@@ -140,7 +147,7 @@ run("/usr/bin/codesign", [
   "--sign",
   "-",
   "--identifier",
-  pin.bundleIdentifier,
+  bundleIdentifier,
   bundleDir,
 ]);
 
@@ -196,6 +203,7 @@ function preparedBundleMatches() {
   return (
     stamp.version === pin.version &&
     stamp.sourceCommit === pin.sourceCommit &&
+    stamp.bundleIdentifier === bundleIdentifier &&
     stamp.juneBuild?.profile === profile &&
     stamp.juneBuild?.sourceSha256 === sourceSha256 &&
     architectures.every((architecture) => actualArchitectures.has(architecture)) &&
@@ -218,9 +226,7 @@ function bundleSignatureMatches() {
   });
   return (
     details.status === 0 &&
-    `${details.stdout || ""}\n${details.stderr || ""}`.includes(
-      `Identifier=${pin.bundleIdentifier}`,
-    )
+    `${details.stdout || ""}\n${details.stderr || ""}`.includes(`Identifier=${bundleIdentifier}`)
   );
 }
 

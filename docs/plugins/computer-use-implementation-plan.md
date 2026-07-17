@@ -34,6 +34,8 @@ new ADR before hardening the plan.
 - Compile the June-owned narrow helper only in controlled build tooling; never
   install or update it at runtime.
 - Sign it with the app release identity and include it as a Tauri resource.
+- Give each debug worktree a stable derived helper identity and reset only that
+  identity's TCC grants at local dev startup. Keep the release identity fixed.
 - Keep the exact helper path and fresh initialization capability inside the
   Rust broker; do not expose either as runtime overrides.
 - Add SBOM/provenance and a release test that starts, handshakes, captures a
@@ -41,8 +43,9 @@ new ADR before hardening the plan.
 
 ## Grant and TCC state
 
-One Computer use grant is represented in Plugins, Settings, and the runtime
-config. Granting does not fabricate macOS permission. The state machine is:
+One Computer use grant is managed from Plugins and represented in the runtime
+config. June does not duplicate this control in Settings. Granting does not
+fabricate macOS permission. The state machine is:
 
 `off -> grant_on_permission_missing -> permission_prompted -> ready -> error`
 
@@ -55,11 +58,19 @@ permission remains; removing TCC access is an explicit user follow-up.
 
 - Keep both upstream Computer Use toolsets disabled. Expose only June's single
   app-owned MCP tool when every native readiness gate passes.
-- Route every mutation through the Rust approval registry and June approval
-  card.
-- Park with a stable action id, target application identity, action summary,
-  relevant capture reference, and expiry.
-- Never offer approve-all or autonomous mode in v1.
+- Route the first access to each verified target app through the Rust
+  authorization registry and June approval card. The authorization lasts only
+  for the active attended task.
+- Instruct the agent to invoke the requested operation immediately and wait for the native
+  decision. It must not ask for a textual approval or name the internal
+  transport in chat.
+- Allow app lifecycle only through the broker: display-name-only background
+  launch, plus exact-PID/window current-stage restoration after the app
+  authorization and target revalidation. Reject paths, URLs, arguments,
+  environment, debug ports, and arbitrary process activation.
+- Bind authorization to the verified bundle identifier and executable path,
+  with a stable id and expiry. Clear it on task end, Stop, revoke, or shutdown.
+- Never offer cross-task Allow always, approve-all, or autonomous mode in v1.
 - Block password, one-time code, payment, permission/security settings, keychain,
   terminal privilege escalation, and destructive system actions.
 
@@ -81,7 +92,8 @@ permission remains; removing TCC access is an explicit user follow-up.
 - Contract fixture against the pinned runtime and driver handshake.
 - Signed-build tests on the oldest and newest supported macOS releases.
 - Fixture applications for text fields, menus, lists, scrolling, modal dialogs,
-  multiple windows, app quit, target movement, and capture change races.
+  multiple windows, cold launch, Stage Manager restore, app quit, target
+  movement, and capture change races.
 - Proof that background actions do not move cursor, change focus, or switch
   Space.
 - Security tests for denied apps/fields/actions and stale capture references.

@@ -46,7 +46,10 @@ for arg in "$@"; do
   esac
 done
 
-cargo build "${cargo_args[@]}"
+# The Computer use helper is prepared and signed separately before Tauri runs.
+# Building only June here prevents Cargo from relinking that helper with the
+# app's lower deployment target or a different active Swift toolchain.
+cargo build --bin os-june "${cargo_args[@]}"
 
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [[ "$target_dir" != /* ]]; then

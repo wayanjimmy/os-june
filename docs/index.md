@@ -34,7 +34,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0022](adr/0022-venice-private-first-model-routing.md) — service-managed text uses Venice private zero-retention first with Phala TEE fallback; existing `/v1` provider semantics stay compatible and pricing is fallback-safe
 - [adr/0023](adr/0023-attested-os-api-service-chain.md) - superseded by ADR-0024
 - [adr/0024](adr/0024-independent-product-verification.md) - June, Open Software API, and Chat publish independent verification evidence without cross-product release pinning
-- [adr/0025](adr/0025-private-stdio-broker-for-computer-use.md) - Computer use runs through a June-owned private stdio driver broker with signed-helper TCC identity and per-action approval binding
+- [adr/0025](adr/0025-private-stdio-broker-for-computer-use.md) - Computer use runs through a June-owned private stdio driver broker with signed-helper TCC identity, task-scoped app authorization, and exact-window Stage Manager restoration
 
 ## Enforceable rules (spec/)
 

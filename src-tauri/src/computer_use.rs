@@ -3,8 +3,8 @@
 //! Hermes reaches one internal MCP server. That server can only call the
 //! authenticated loopback broker in `hermes_bridge`; it never receives the
 //! bundled driver's path or a direct driver transport. The Rust broker owns a
-//! private stdio child and parks every state-changing call here for a human
-//! decision. This is intentionally structural: a model prompt, inherited
+//! private stdio child and requires one attended authorization for each target
+//! app used by the current task. This is intentionally structural: a model prompt, inherited
 //! environment variable, or unrestricted Hermes process cannot bypass it.
 
 use crate::domain::types::AppError;
@@ -13,13 +13,14 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     future::Future,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -29,7 +30,8 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    net::{unix::OwnedReadHalf, unix::OwnedWriteHalf, UnixStream},
+    process::Command,
     sync::{oneshot, Mutex as AsyncMutex},
 };
 
@@ -39,9 +41,11 @@ pub const MCP_SCRIPT_NAME: &str = "june_computer_use_mcp.py";
 pub const PROXY_PATH: &str = "/v1/computer-use/action";
 pub const APPROVALS_CHANGED_EVENT: &str = "june://computer-use-approvals-changed";
 
-const GRANT_ACCOUNT: &str = "grant-v1";
+#[cfg(not(debug_assertions))]
+const GRANT_FILE_NAME: &str = "computer-use-grant-v1";
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 const DRIVER_CALL_TIMEOUT: Duration = Duration::from_secs(45);
+const DRIVER_START_TIMEOUT: Duration = Duration::from_secs(12);
 const DRIVER_MAX_LINE_BYTES: usize = 24 * 1024 * 1024;
 const SCREENSHOT_MAX_BYTES: usize = 12 * 1024 * 1024;
 const DEFAULT_MAX_ELEMENTS: usize = 100;
@@ -70,6 +74,7 @@ pub struct ComputerUseState {
     driver_pid: AtomicU32,
     target: Mutex<Option<TargetContext>>,
     approvals: Mutex<HashMap<String, PendingEntry>>,
+    authorized_apps: Mutex<HashSet<AppAuthorizationKey>>,
     attended_runs: Mutex<HashSet<String>>,
     attended_generation: AtomicU64,
     cleanup_in_progress: AtomicU32,
@@ -97,10 +102,16 @@ struct ElementSummary {
     metadata: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AppIdentity {
     bundle_id: String,
     executable_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AppAuthorizationKey {
+    Identity(AppIdentity),
+    RequestedName(String),
 }
 
 struct PendingEntry {
@@ -169,6 +180,27 @@ struct PermissionProbe {
     screen_recording: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverPermissionPrompt {
+    Accessibility,
+    ScreenRecording,
+}
+
+impl DriverPermissionPrompt {
+    fn as_env_value(self) -> &'static str {
+        match self {
+            Self::Accessibility => "accessibility",
+            Self::ScreenRecording => "screen-recording",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DriverLaunchSpec {
+    program: PathBuf,
+    args: Vec<String>,
+}
+
 #[derive(Clone)]
 struct RolloutGate {
     enabled: bool,
@@ -199,6 +231,8 @@ impl Drop for CleanupInProgress<'_> {
 static ROLLOUT_GATE: OnceLock<Mutex<Option<CachedRolloutGate>>> = OnceLock::new();
 static ROLLOUT_REFRESH: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static MACOS_VERSION: OnceLock<String> = OnceLock::new();
+#[cfg(debug_assertions)]
+static DEVELOPMENT_GRANT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, PartialEq, Eq)]
 enum BoundedLine {
@@ -231,46 +265,91 @@ where
 }
 
 struct DriverClient {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdin: OwnedWriteHalf,
+    stdout: BufReader<OwnedReadHalf>,
     next_id: u64,
+    pid: u32,
+    socket_dir: PathBuf,
 }
 
 impl DriverClient {
-    async fn start(path: &Path) -> Result<Self, AppError> {
+    async fn start(
+        path: &Path,
+        permission_prompt: Option<DriverPermissionPrompt>,
+    ) -> Result<Self, AppError> {
         let capability = random_id();
-        let mut command = driver_command(path);
-        command
-            .arg("mcp")
-            .env("JUNE_COMPUTER_USE_HELPER_CAPABILITY", &capability)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|error| {
+        let socket_dir = PathBuf::from("/tmp").join(format!("june-cua-{}", random_id()));
+        std::fs::create_dir(&socket_dir).map_err(|error| {
             AppError::new(
                 "computer_use_driver_start_failed",
-                format!("Could not start the bundled Computer use driver. {error}"),
+                format!("Could not prepare the Computer use driver channel. {error}"),
             )
         })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    AppError::new(
+                        "computer_use_driver_start_failed",
+                        format!("Could not secure the Computer use driver channel. {error}"),
+                    )
+                },
+            )?;
+        }
+        let socket_path = socket_dir.join("driver.sock");
+        let launch = driver_launch_spec(path, &socket_path, &capability, permission_prompt)?;
+        let output = driver_command(&launch.program)
+            .args(&launch.args)
+            .output()
+            .await
+            .map_err(|error| {
+                AppError::new(
+                    "computer_use_driver_start_failed",
+                    format!("Could not launch the bundled Computer use driver. {error}"),
+                )
+            })?;
+        if !output.status.success() {
+            let _ = std::fs::remove_dir_all(&socket_dir);
+            return Err(AppError::new(
+                "computer_use_driver_start_failed",
+                format!(
+                    "Could not launch the bundled Computer use driver. {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            ));
+        }
+
+        let stream = connect_driver_socket(&socket_path).await.map_err(|error| {
+            let _ = std::fs::remove_dir_all(&socket_dir);
             AppError::new(
                 "computer_use_driver_start_failed",
-                "The Computer use driver did not open stdin.",
+                format!("The Computer use driver did not open its private channel. {error}"),
             )
         })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            AppError::new(
-                "computer_use_driver_start_failed",
-                "The Computer use driver did not open stdout.",
-            )
-        })?;
+        let pid = stream
+            .peer_cred()
+            .ok()
+            .and_then(|credentials| credentials.pid())
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| {
+                process_executable_path(*pid as libc::pid_t)
+                    .is_some_and(|actual| same_path(&actual, path))
+            })
+            .ok_or_else(|| {
+                let _ = std::fs::remove_dir_all(&socket_dir);
+                AppError::new(
+                    "computer_use_driver_start_failed",
+                    "The private Computer use channel was not owned by June's bundled driver.",
+                )
+            })?;
+        let (stdout, stdin) = stream.into_split();
         let mut client = Self {
-            child,
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
+            pid,
+            socket_dir,
         };
         client
             .request(
@@ -291,7 +370,16 @@ impl DriverClient {
     }
 
     fn pid(&self) -> u32 {
-        self.child.id().unwrap_or(0)
+        self.pid
+    }
+
+    fn terminate(&mut self) {
+        if self.pid > 0 {
+            unsafe {
+                libc::kill(self.pid as libc::pid_t, libc::SIGTERM);
+            }
+            self.pid = 0;
+        }
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, AppError> {
@@ -307,6 +395,7 @@ impl DriverClient {
         let response = tokio::time::timeout(DRIVER_CALL_TIMEOUT, self.read_response(id))
             .await
             .map_err(|_| {
+                self.terminate();
                 AppError::new(
                     "computer_use_driver_timeout",
                     "The Computer use driver did not respond in time.",
@@ -382,7 +471,7 @@ impl DriverClient {
                     ));
                 }
                 BoundedLine::TooLarge => {
-                    let _ = self.child.start_kill();
+                    self.terminate();
                     return Err(AppError::new(
                         "computer_use_driver_response_too_large",
                         "The Computer use driver returned an oversized response.",
@@ -400,8 +489,16 @@ impl DriverClient {
     }
 
     async fn stop(mut self) {
-        let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
+        let _ = self.stdin.shutdown().await;
+        self.terminate();
+        let _ = tokio::fs::remove_dir_all(&self.socket_dir).await;
+    }
+}
+
+impl Drop for DriverClient {
+    fn drop(&mut self) {
+        self.terminate();
+        let _ = std::fs::remove_dir_all(&self.socket_dir);
     }
 }
 
@@ -410,11 +507,20 @@ impl DriverClient {
 /// two disposable fixture bundle identifiers created by the release test.
 /// This deliberately is not a general driver proxy.
 #[cfg(target_os = "macos")]
-pub async fn run_release_self_test_host(path: PathBuf) -> Result<(), String> {
+pub async fn run_release_self_test_host(
+    path: PathBuf,
+    permission_prompt: Option<String>,
+) -> Result<(), String> {
     if !release_self_test_driver_path_allowed(&path) {
         return Err("the self-test host accepts only June's bundled helper".to_string());
     }
-    let mut driver = DriverClient::start(&path)
+    let permission_prompt = match permission_prompt.as_deref() {
+        None => None,
+        Some("accessibility") => Some(DriverPermissionPrompt::Accessibility),
+        Some("screen-recording") => Some(DriverPermissionPrompt::ScreenRecording),
+        Some(_) => return Err("the self-test permission prompt is invalid".to_string()),
+    };
+    let mut driver = DriverClient::start(&path, permission_prompt)
         .await
         .map_err(|error| error.message)?;
     let stdin = tokio::io::stdin();
@@ -609,6 +715,88 @@ async fn write_release_self_test_response(
     stdout.flush().await.map_err(|error| error.to_string())
 }
 
+fn driver_launch_spec(
+    executable: &Path,
+    socket_path: &Path,
+    capability: &str,
+    permission_prompt: Option<DriverPermissionPrompt>,
+) -> Result<DriverLaunchSpec, AppError> {
+    let bundle = executable
+        .ancestors()
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        })
+        .ok_or_else(|| {
+            AppError::new(
+                "computer_use_driver_start_failed",
+                "The bundled Computer use driver is not inside a macOS app bundle.",
+            )
+        })?;
+    let socket = socket_path.to_str().ok_or_else(|| {
+        AppError::new(
+            "computer_use_driver_start_failed",
+            "The Computer use driver channel path is not valid UTF-8.",
+        )
+    })?;
+    let bundle = bundle.to_str().ok_or_else(|| {
+        AppError::new(
+            "computer_use_driver_start_failed",
+            "The Computer use driver bundle path is not valid UTF-8.",
+        )
+    })?;
+    let mut args = vec![
+        "-n".to_string(),
+        "-g".to_string(),
+        "--env".to_string(),
+        format!("JUNE_COMPUTER_USE_SOCKET={socket}"),
+        "--env".to_string(),
+        format!("JUNE_COMPUTER_USE_HELPER_CAPABILITY={capability}"),
+    ];
+    if let Some(prompt) = permission_prompt {
+        args.extend([
+            "--env".to_string(),
+            format!(
+                "JUNE_COMPUTER_USE_PERMISSION_PROMPT={}",
+                prompt.as_env_value()
+            ),
+        ]);
+    }
+    args.extend([
+        bundle.to_string(),
+        "--args".to_string(),
+        "mcp-daemon".to_string(),
+    ]);
+    Ok(DriverLaunchSpec {
+        program: PathBuf::from("/usr/bin/open"),
+        args,
+    })
+}
+
+async fn connect_driver_socket(path: &Path) -> io::Result<UnixStream> {
+    let deadline = Instant::now() + DRIVER_START_TIMEOUT;
+    loop {
+        let error = match UnixStream::connect(path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => error,
+        };
+        if Instant::now() >= deadline {
+            return Err(error);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn next_permission_prompt(probe: &PermissionProbe) -> Option<DriverPermissionPrompt> {
+    if !probe.accessibility {
+        Some(DriverPermissionPrompt::Accessibility)
+    } else if !probe.screen_recording {
+        Some(DriverPermissionPrompt::ScreenRecording)
+    } else {
+        None
+    }
+}
+
 fn driver_command(path: &Path) -> Command {
     let mut command = Command::new(path);
     for (name, _) in std::env::vars_os() {
@@ -625,6 +813,8 @@ fn should_scrub_driver_env(name: &OsStr) -> bool {
         || name.starts_with("HERMES_CUA_DRIVER")
         || name == "HERMES_COMPUTER_USE_BACKEND"
         || name == "JUNE_COMPUTER_USE_HELPER_CAPABILITY"
+        || name == "JUNE_COMPUTER_USE_PERMISSION_PROMPT"
+        || name == "JUNE_COMPUTER_USE_SOCKET"
         || matches!(
             name.as_ref(),
             "HTTP_PROXY"
@@ -657,86 +847,112 @@ fn tool_result_text(result: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn grant_service() -> &'static str {
-    if cfg!(debug_assertions) {
-        "co.opensoftware.june.computer-use.dev"
-    } else {
-        "co.opensoftware.june.computer-use"
-    }
+#[cfg(not(debug_assertions))]
+fn release_grant_file(app: &AppHandle) -> Result<PathBuf, AppError> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join(GRANT_FILE_NAME))
+        .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))
 }
 
-pub(crate) async fn grant_enabled() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        tokio::task::spawn_blocking(|| {
-            keyring::Entry::new(grant_service(), GRANT_ACCOUNT)
-                .and_then(|entry| entry.get_password())
-                .is_ok_and(|value| value == "enabled")
-        })
-        .await
-        .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+#[cfg(debug_assertions)]
+pub(crate) async fn grant_enabled(_app: &AppHandle) -> bool {
+    DEVELOPMENT_GRANT.load(Ordering::SeqCst)
 }
 
-async fn store_grant(enabled: bool) -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
-    {
-        tokio::task::spawn_blocking(move || {
-            let entry = keyring::Entry::new(grant_service(), GRANT_ACCOUNT)
-                .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))?;
-            if enabled {
-                entry.set_password("enabled")
-            } else {
-                match entry.delete_credential() {
-                    Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                    Err(error) => Err(error),
-                }
-            }
-            .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))
-        })
-        .await
-        .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))??;
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = enabled;
-        Err(AppError::new(
-            "computer_use_unsupported",
-            "Computer use is available on macOS only.",
-        ))
-    }
+#[cfg(all(not(debug_assertions), target_os = "macos"))]
+pub(crate) async fn grant_enabled(app: &AppHandle) -> bool {
+    let Ok(path) = release_grant_file(app) else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || {
+        std::fs::read(path).is_ok_and(|value| value == b"enabled\n")
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[cfg(all(not(debug_assertions), not(target_os = "macos")))]
+pub(crate) async fn grant_enabled(_app: &AppHandle) -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+async fn store_grant(_app: &AppHandle, enabled: bool) -> Result<(), AppError> {
+    DEVELOPMENT_GRANT.store(enabled, Ordering::SeqCst);
+    Ok(())
+}
+
+#[cfg(all(not(debug_assertions), target_os = "macos"))]
+async fn store_grant(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
+    let path = release_grant_file(app)?;
+    tokio::task::spawn_blocking(move || {
+        if !enabled {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
+
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "grant path has no parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let temporary = path.with_extension("tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(b"enabled\n")?;
+        file.sync_all()?;
+        std::fs::rename(temporary, path)
+    })
+    .await
+    .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))?
+    .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))
+}
+
+#[cfg(all(not(debug_assertions), not(target_os = "macos")))]
+async fn store_grant(_app: &AppHandle, _enabled: bool) -> Result<(), AppError> {
+    Err(AppError::new(
+        "computer_use_unsupported",
+        "Computer use is available on macOS only.",
+    ))
 }
 
 fn bundled_driver_executable(app: &AppHandle) -> Result<PathBuf, AppError> {
     let pin = driver_pin();
-    let mut candidates = Vec::new();
-    if let Ok(resources) = app.path().resource_dir() {
-        candidates.push(
-            resources
-                .join("native")
-                .join("bin")
-                .join(&pin.bundle_name)
-                .join("Contents")
-                .join("MacOS")
-                .join(&pin.executable),
-        );
-    }
-    if let Some(repo) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
-        candidates.push(
-            repo.join(".tauri-helper")
-                .join(&pin.bundle_name)
-                .join("Contents")
-                .join("MacOS")
-                .join(&pin.executable),
-        );
-    }
+    let packaged = app.path().resource_dir().ok().map(|resources| {
+        resources
+            .join("native")
+            .join("bin")
+            .join(&pin.bundle_name)
+            .join("Contents")
+            .join("MacOS")
+            .join(&pin.executable)
+    });
+    let development = Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(|repo| {
+        repo.join(".tauri-helper")
+            .join(&pin.bundle_name)
+            .join("Contents")
+            .join("MacOS")
+            .join(&pin.executable)
+    });
+    let candidates = if cfg!(debug_assertions) {
+        [development, packaged]
+    } else {
+        [packaged, development]
+    };
     candidates
         .into_iter()
+        .flatten()
         .find(|candidate| candidate.is_file() && driver_stamp_matches(candidate, &pin))
         .ok_or_else(|| {
             AppError::new(
@@ -759,6 +975,27 @@ fn driver_stamp_matches(executable: &Path, pin: &DriverPin) -> bool {
     };
     value.get("version").and_then(Value::as_str) == Some(pin.version.as_str())
         && value.get("sourceCommit").and_then(Value::as_str) == Some(pin.source_commit.as_str())
+}
+
+fn permission_drag_bundle_path(executable: &Path) -> Option<PathBuf> {
+    crate::computer_use_permission_drag::app_bundle_path(executable).map(Path::to_path_buf)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn begin_permission_drag(
+    app: &AppHandle,
+    window: &objc2::runtime::AnyObject,
+    event: *mut objc2::runtime::AnyObject,
+) -> bool {
+    let Ok(executable) = bundled_driver_executable(app) else {
+        return false;
+    };
+    let Some(bundle) = permission_drag_bundle_path(&executable) else {
+        return false;
+    };
+    // SAFETY: The main NSWindow sendEvent: bridge forwards the active window
+    // and event on AppKit's main thread.
+    unsafe { crate::computer_use_permission_drag::begin_permission_drag(&bundle, window, event) }
 }
 
 async fn driver_version(path: &Path) -> Result<String, AppError> {
@@ -799,9 +1036,22 @@ async fn driver_version(path: &Path) -> Result<String, AppError> {
 }
 
 async fn probe_permissions(path: &Path, prompt: bool) -> Result<PermissionProbe, AppError> {
-    let mut client = DriverClient::start(path).await?;
+    let initial = read_permission_probe(path, None).await?;
+    if prompt {
+        if let Some(next) = next_permission_prompt(&initial) {
+            return read_permission_probe(path, Some(next)).await;
+        }
+    }
+    Ok(initial)
+}
+
+async fn read_permission_probe(
+    path: &Path,
+    permission_prompt: Option<DriverPermissionPrompt>,
+) -> Result<PermissionProbe, AppError> {
+    let mut client = DriverClient::start(path, permission_prompt).await?;
     let result = client
-        .call_tool("check_permissions", json!({ "prompt": prompt }))
+        .call_tool("check_permissions", json!({ "prompt": false }))
         .await;
     client.stop().await;
     let result = result?;
@@ -824,8 +1074,9 @@ async fn probe_permissions(path: &Path, prompt: bool) -> Result<PermissionProbe,
         .unwrap_or(false);
     Ok(PermissionProbe {
         accessibility,
-        // A cached preflight grant is insufficient. The live
-        // ScreenCaptureKit probe must agree before the broker can be enabled.
+        // The helper is a fresh LaunchServices-owned process for every probe,
+        // so this preflight belongs to the same app identity that captures.
+        // Keep accepting the live field for compatibility with older helpers.
         screen_recording: preflight && capturable,
     })
 }
@@ -940,7 +1191,7 @@ fn macos_version() -> &'static str {
 async fn status_inner(app: &AppHandle) -> ComputerUseStatus {
     let platform_supported = cfg!(target_os = "macos");
     let plan_eligible = plan_eligible().await;
-    let grant_enabled = grant_enabled().await;
+    let grant_enabled = grant_enabled(app).await;
     let model_supports_vision = crate::providers::generation_model_supports_vision().await;
     let generation_model = crate::providers::generation_model();
     if !platform_supported {
@@ -1125,7 +1376,7 @@ pub(crate) async fn runtime_ready(app: &AppHandle, supports_vision: bool) -> boo
     let ready = if !rollout_gate().await.enabled
         || !supports_vision
         || !plan_eligible().await
-        || !grant_enabled().await
+        || !grant_enabled(app).await
     {
         false
     } else if let Ok(path) = bundled_driver_executable(app) {
@@ -1186,7 +1437,7 @@ pub async fn set_computer_use_grant(
             "Computer use requires an active Pro or Max plan.",
         ));
     }
-    store_grant(request.enabled).await?;
+    store_grant(&app, request.enabled).await?;
     if !request.enabled {
         stop_inner(&app, &state).await;
     }
@@ -1200,7 +1451,7 @@ pub async fn computer_use_request_permissions(
     state: State<'_, ComputerUseState>,
     bridge: State<'_, crate::hermes_bridge::HermesBridge>,
 ) -> Result<ComputerUseStatus, AppError> {
-    if !grant_enabled().await {
+    if !grant_enabled(&app).await {
         return Err(AppError::new(
             "computer_use_grant_required",
             "Enable Computer use before requesting macOS access.",
@@ -1269,10 +1520,14 @@ pub fn computer_use_begin_run(
             "Computer use is still stopping. Start the task again in a moment.",
         ));
     }
+    let starts_new_task = runs.is_empty();
     let inserted = runs.insert(session_id);
     drop(runs);
     if inserted {
         state.attended_generation.fetch_add(1, Ordering::SeqCst);
+        if starts_new_task {
+            clear_app_authorizations(&state);
+        }
     }
     Ok(())
 }
@@ -1362,6 +1617,7 @@ async fn stop_inner(app: &AppHandle, state: &ComputerUseState) {
     if let Ok(mut target) = state.target.lock() {
         *target = None;
     }
+    clear_app_authorizations(state);
     clear_capture_dir(app);
 }
 
@@ -1385,7 +1641,14 @@ async fn stop_if_idle(app: &AppHandle, state: &ComputerUseState, generation: u64
     if let Ok(mut target) = state.target.lock() {
         *target = None;
     }
+    clear_app_authorizations(state);
     clear_capture_dir(app);
+}
+
+fn clear_app_authorizations(state: &ComputerUseState) {
+    if let Ok(mut authorized_apps) = state.authorized_apps.lock() {
+        authorized_apps.clear();
+    }
 }
 
 fn force_stop_pid(pid: u32) {
@@ -1443,6 +1706,7 @@ async fn handle_action(
     let _operation = state.operation.lock().await;
     let epoch = state.epoch.load(Ordering::SeqCst);
     ensure_attended_run(state)?;
+    let task_generation = state.attended_generation.load(Ordering::SeqCst);
     ensure_action_eligible(app).await?;
     let action = arguments
         .get("action")
@@ -1451,7 +1715,7 @@ async fn handle_action(
         .trim()
         .to_ascii_lowercase();
     match action.as_str() {
-        "capture" => capture(app, state, &arguments, Some(epoch)).await,
+        "capture" => capture(app, state, &arguments, Some(epoch), task_generation).await,
         "list_apps" => list_apps(app, state, Some(epoch)).await,
         "wait" => {
             let seconds = arguments
@@ -1462,13 +1726,15 @@ async fn handle_action(
             tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
             ensure_epoch_current(state, Some(epoch))?;
             ensure_attended_run(state)?;
+            ensure_task_generation_current(state, task_generation)?;
             Ok(mcp_text(
                 json!({ "ok": true, "action": "wait", "seconds": seconds }),
             ))
         }
-        "focus_app" => focus_app(app, state, &arguments, epoch).await,
+        "open_app" => open_app(app, state, &arguments, epoch, task_generation).await,
+        "focus_app" => focus_app(app, state, &arguments, epoch, task_generation).await,
         "click" | "double_click" | "right_click" | "drag" | "scroll" | "type" | "key"
-        | "set_value" => mutate(app, state, &action, &arguments, epoch).await,
+        | "set_value" => mutate(app, state, &action, &arguments, epoch, task_generation).await,
         _ => Err(AppError::new(
             "computer_use_action_invalid",
             "Computer use received an unknown action.",
@@ -1492,6 +1758,20 @@ fn ensure_attended_run(state: &ComputerUseState) -> Result<(), AppError> {
     }
 }
 
+fn ensure_task_generation_current(
+    state: &ComputerUseState,
+    expected_generation: u64,
+) -> Result<(), AppError> {
+    if state.attended_generation.load(Ordering::SeqCst) == expected_generation {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "computer_use_task_changed",
+            "The Computer use task changed before app access was authorized.",
+        ))
+    }
+}
+
 async fn ensure_action_eligible(app: &AppHandle) -> Result<(), AppError> {
     if !cfg!(target_os = "macos") {
         return Err(AppError::new(
@@ -1505,7 +1785,7 @@ async fn ensure_action_eligible(app: &AppHandle) -> Result<(), AppError> {
             "Computer use is temporarily unavailable for this June or macOS version.",
         ));
     }
-    if !grant_enabled().await {
+    if !grant_enabled(app).await {
         return Err(AppError::new(
             "computer_use_grant_required",
             "Computer use is off. Enable it in Plugins and finish setup.",
@@ -1541,7 +1821,7 @@ async fn driver_call(
     if driver.is_none() {
         let path = bundled_driver_executable(app)?;
         driver_version(&path).await?;
-        let client = DriverClient::start(&path).await?;
+        let client = DriverClient::start(&path, None).await?;
         state.driver_pid.store(client.pid(), Ordering::SeqCst);
         *driver = Some(client);
     }
@@ -1582,6 +1862,10 @@ struct WindowTarget {
     identity: AppIdentity,
     title: String,
     z_index: i64,
+    width: f64,
+    height: f64,
+    is_on_screen: bool,
+    on_current_space: Option<bool>,
 }
 
 async fn windows(
@@ -1628,11 +1912,56 @@ async fn windows(
                     .get("z_index")
                     .and_then(Value::as_i64)
                     .unwrap_or(i64::MAX),
+                width: window
+                    .pointer("/bounds/width")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+                height: window
+                    .pointer("/bounds/height")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+                is_on_screen: window
+                    .get("is_on_screen")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                on_current_space: window.get("on_current_space").and_then(Value::as_bool),
             })
         })
         .collect();
     windows.sort_by_key(|window| window.z_index);
-    Ok(windows)
+    Ok(collapse_stage_manager_shelf_surfaces(windows))
+}
+
+fn is_stage_manager_shelf_surface(window: &WindowTarget) -> bool {
+    window.is_on_screen && window.width < 160.0 && window.height < 160.0
+}
+
+/// Stage Manager can publish both the real hidden app window and a small,
+/// titled shelf proxy owned by the same process. The proxy is not an AX window
+/// and therefore cannot be captured or raised by its CGWindowID. Keep the real
+/// window as the sole candidate whenever that pair is present.
+fn collapse_stage_manager_shelf_surfaces(windows: Vec<WindowTarget>) -> Vec<WindowTarget> {
+    windows
+        .iter()
+        .filter(|candidate| {
+            !is_stage_manager_shelf_surface(candidate)
+                || !windows.iter().any(|underlying| {
+                    underlying.window_id != candidate.window_id
+                        && underlying.pid == candidate.pid
+                        && underlying.identity == candidate.identity
+                        && !underlying.is_on_screen
+                        && underlying.width >= 160.0
+                        && underlying.height >= 160.0
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+fn window_needs_restore(window: &WindowTarget) -> bool {
+    !window.is_on_screen
+        || is_stage_manager_shelf_surface(window)
+        || window.on_current_space == Some(false)
 }
 
 fn select_window(
@@ -1671,6 +2000,58 @@ fn select_window(
         ));
     }
     Ok(selected)
+}
+
+async fn refresh_window_target(
+    app: &AppHandle,
+    state: &ComputerUseState,
+    target: &WindowTarget,
+    epoch: u64,
+) -> Result<WindowTarget, AppError> {
+    windows(app, state, Some(epoch))
+        .await?
+        .into_iter()
+        .find(|window| {
+            window.pid == target.pid
+                && window.window_id == target.window_id
+                && window.identity == target.identity
+                && !blocked_target(&window.app_name, &window.identity)
+        })
+        .ok_or_else(stale_target_error)
+}
+
+async fn join_target_to_june_stage(
+    app: &AppHandle,
+    state: &ComputerUseState,
+    target: &WindowTarget,
+    epoch: u64,
+    task_generation: u64,
+) -> Result<WindowTarget, AppError> {
+    ensure_task_generation_current(state, task_generation)?;
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    ensure_task_generation_current(state, task_generation)?;
+    driver_call(
+        app,
+        state,
+        "join_current_stage",
+        json!({ "pid": target.pid, "window_id": target.window_id }),
+        Some(epoch),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let restored = refresh_window_target(app, state, target, epoch).await?;
+    if window_needs_restore(&restored) {
+        return Err(AppError::new(
+            "computer_use_window_restore_failed",
+            "June could not add that app window to the current Stage Manager group. Do not retry this window during the current task.",
+        ));
+    }
+    Ok(restored)
 }
 
 #[cfg(target_os = "macos")]
@@ -1788,13 +2169,31 @@ async fn capture(
     state: &ComputerUseState,
     arguments: &Value,
     expected_epoch: Option<u64>,
+    task_generation: u64,
 ) -> Result<Value, AppError> {
+    let epoch = expected_epoch.unwrap_or_else(|| state.epoch.load(Ordering::SeqCst));
     let windows = windows(app, state, expected_epoch).await?;
-    let target = select_window(
+    let mut target = select_window(
         &windows,
         arguments.get("app").and_then(Value::as_str),
         optional_window_id(arguments)?,
     )?;
+    let newly_authorized = ensure_app_authorized(
+        app,
+        state,
+        identity_app_authorization(&target.identity),
+        &target.app_name,
+        epoch,
+        task_generation,
+    )
+    .await?;
+    if newly_authorized {
+        target = refresh_window_target(app, state, &target, epoch).await?;
+    }
+    if window_needs_restore(&target) {
+        target = join_target_to_june_stage(app, state, &target, epoch, task_generation).await?;
+    }
+    ensure_task_generation_current(state, task_generation)?;
     let mode = arguments
         .get("mode")
         .and_then(Value::as_str)
@@ -1909,6 +2308,10 @@ async fn list_apps(
             "pid": window.pid,
             "window_id": window.window_id,
             "title": sanitize_line(&window.title),
+            "bounds": { "width": window.width, "height": window.height },
+            "is_on_screen": window.is_on_screen,
+            "on_current_space": window.on_current_space,
+            "needs_restore": window_needs_restore(&window),
         }));
     }
     let app_count = apps.len();
@@ -1921,55 +2324,100 @@ async fn list_apps(
     })))
 }
 
-async fn focus_app(
-    app: &AppHandle,
-    state: &ComputerUseState,
-    arguments: &Value,
-    epoch: u64,
-) -> Result<Value, AppError> {
-    if arguments
-        .get("raise_window")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(AppError::new(
-            "computer_use_focus_theft_blocked",
-            "Computer use cannot raise a window or take focus.",
-        ));
-    }
-    let app_name = arguments
+fn open_app_name(arguments: &Value) -> Result<String, AppError> {
+    let name = arguments
         .get("app")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let window_id = optional_window_id(arguments)?;
-    if app_name.is_none() && window_id.is_none() {
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            AppError::new(
+                "computer_use_app_required",
+                "open_app requires an installed app display name.",
+            )
+        })?;
+    if name.chars().count() > 200
+        || name.chars().any(char::is_control)
+        || name
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | ':'))
+    {
         return Err(AppError::new(
-            "computer_use_target_required",
-            "focus_app requires an app name or exact window_id from list_apps.",
+            "computer_use_app_invalid",
+            "open_app accepts an installed app display name, not a path or URL.",
         ));
     }
-    let windows = windows(app, state, Some(epoch)).await?;
-    let target = select_window(&windows, app_name, window_id)?;
-    let action_id = random_id();
-    let summary = format!("Target {} for Computer use", target.app_name);
-    park_approval(
-        app,
-        state,
-        &action_id,
-        "focus_app",
-        &target.app_name,
-        &summary,
-        None,
-    )
-    .await?;
-    recheck_after_approval(app, state, epoch).await?;
+    if blocked_app(name) {
+        return Err(AppError::new(
+            "computer_use_target_blocked",
+            format!("June cannot open {name} with Computer use."),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn requested_app_authorization(name: &str) -> AppAuthorizationKey {
+    AppAuthorizationKey::RequestedName(name.trim().to_lowercase())
+}
+
+fn identity_app_authorization(identity: &AppIdentity) -> AppAuthorizationKey {
+    AppAuthorizationKey::Identity(identity.clone())
+}
+
+fn remember_app_authorization(
+    state: &ComputerUseState,
+    key: AppAuthorizationKey,
+) -> Result<(), AppError> {
+    state
+        .authorized_apps
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "App authorization lock failed."))?
+        .insert(key);
+    Ok(())
+}
+
+fn app_is_authorized(
+    state: &ComputerUseState,
+    key: &AppAuthorizationKey,
+) -> Result<bool, AppError> {
+    Ok(state
+        .authorized_apps
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "App authorization lock failed."))?
+        .contains(key))
+}
+
+async fn ensure_app_authorized(
+    app: &AppHandle,
+    state: &ComputerUseState,
+    key: AppAuthorizationKey,
+    target_app: &str,
+    epoch: u64,
+    task_generation: u64,
+) -> Result<bool, AppError> {
+    ensure_task_generation_current(state, task_generation)?;
+    if app_is_authorized(state, &key)? {
+        return Ok(false);
+    }
+
+    park_app_authorization(app, state, target_app).await?;
+    recheck_after_approval(app, state, epoch, task_generation).await?;
+    remember_app_authorization(state, key.clone())?;
+    if let Err(error) = ensure_task_generation_current(state, task_generation) {
+        if let Ok(mut authorized_apps) = state.authorized_apps.lock() {
+            authorized_apps.remove(&key);
+        }
+        return Err(error);
+    }
+    Ok(true)
+}
+
+fn store_target_selection(state: &ComputerUseState, target: &WindowTarget) -> Result<(), AppError> {
     let previous_capture = {
         let mut current = state
             .target
             .lock()
             .map_err(|_| AppError::new("computer_use_unavailable", "Target lock failed."))?;
-        ensure_epoch_current(state, Some(epoch))?;
         current
             .replace(TargetContext {
                 pid: target.pid,
@@ -1986,12 +2434,180 @@ async fn focus_app(
     if let Some(previous_capture) = previous_capture {
         let _ = std::fs::remove_file(previous_capture);
     }
+    Ok(())
+}
+
+async fn open_app(
+    app: &AppHandle,
+    state: &ComputerUseState,
+    arguments: &Value,
+    epoch: u64,
+    task_generation: u64,
+) -> Result<Value, AppError> {
+    let requested_name = open_app_name(arguments)?;
+    ensure_app_authorized(
+        app,
+        state,
+        requested_app_authorization(&requested_name),
+        &requested_name,
+        epoch,
+        task_generation,
+    )
+    .await?;
+    ensure_task_generation_current(state, task_generation)?;
+    let result = driver_call(
+        app,
+        state,
+        "launch_app",
+        json!({ "name": requested_name }),
+        Some(epoch),
+    )
+    .await?;
+    let launched = structured(&result).ok_or_else(|| {
+        AppError::new(
+            "computer_use_driver_invalid_response",
+            "The Computer use driver did not identify the opened app.",
+        )
+    })?;
+    let pid = launched.get("pid").and_then(Value::as_i64).ok_or_else(|| {
+        AppError::new(
+            "computer_use_driver_invalid_response",
+            "The Computer use driver did not identify the opened app process.",
+        )
+    })?;
+    let identity = app_identity(pid).ok_or_else(|| {
+        AppError::new(
+            "computer_use_target_unverified",
+            "June could not verify the opened app identity.",
+        )
+    })?;
+    let reported_name = launched
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty() && *name != "?")
+        .unwrap_or(&requested_name);
+    if blocked_target(reported_name, &identity) {
+        return Err(AppError::new(
+            "computer_use_target_blocked",
+            format!("June cannot operate {reported_name} with Computer use."),
+        ));
+    }
+    ensure_task_generation_current(state, task_generation)?;
+    let identity_key = identity_app_authorization(&identity);
+    remember_app_authorization(state, identity_key.clone())?;
+    if let Err(error) = ensure_task_generation_current(state, task_generation) {
+        if let Ok(mut authorized_apps) = state.authorized_apps.lock() {
+            authorized_apps.remove(&identity_key);
+        }
+        return Err(error);
+    }
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let matching: Vec<_> = windows(app, state, Some(epoch))
+        .await?
+        .into_iter()
+        .filter(|window| window.pid == pid && window.identity == identity)
+        .collect();
+    let selected = matching
+        .iter()
+        .find(|window| !window_needs_restore(window))
+        .or_else(|| matching.first())
+        .cloned();
+    let selected = match selected {
+        Some(target) if window_needs_restore(&target) => {
+            Some(join_target_to_june_stage(app, state, &target, epoch, task_generation).await?)
+        }
+        selected => selected,
+    };
+    if let Some(target) = selected.as_ref() {
+        store_target_selection(state, target)?;
+    }
+    let available_windows: Vec<_> = matching
+        .iter()
+        .map(|window| {
+            let window = selected
+                .as_ref()
+                .filter(|selected| selected.window_id == window.window_id)
+                .unwrap_or(window);
+            json!({
+                "window_id": window.window_id,
+                "title": sanitize_line(&window.title),
+                "bounds": { "width": window.width, "height": window.height },
+                "is_on_screen": window.is_on_screen,
+                "needs_restore": window_needs_restore(window),
+            })
+        })
+        .collect();
+    Ok(mcp_text(json!({
+        "ok": true,
+        "action": "open_app",
+        "target_app": selected.as_ref().map(|window| window.app_name.as_str()).unwrap_or(reported_name),
+        "pid": pid,
+        "window_id": selected.as_ref().map(|window| window.window_id),
+        "windows": available_windows,
+        "message": if selected.is_some() {
+            "The app is ready in June's current Stage Manager group. Capture the returned window before acting."
+        } else {
+            "The app opened, but no operable window appeared yet. Wait, then call list_apps."
+        },
+    })))
+}
+
+async fn focus_app(
+    app: &AppHandle,
+    state: &ComputerUseState,
+    arguments: &Value,
+    epoch: u64,
+    task_generation: u64,
+) -> Result<Value, AppError> {
+    let raise_window = arguments
+        .get("raise_window")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let app_name = arguments
+        .get("app")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let window_id = optional_window_id(arguments)?;
+    if app_name.is_none() && window_id.is_none() {
+        return Err(AppError::new(
+            "computer_use_target_required",
+            "focus_app requires an app name or exact window_id from list_apps.",
+        ));
+    }
+    let available_windows = windows(app, state, Some(epoch)).await?;
+    let mut target = select_window(&available_windows, app_name, window_id)?;
+    let newly_authorized = ensure_app_authorized(
+        app,
+        state,
+        identity_app_authorization(&target.identity),
+        &target.app_name,
+        epoch,
+        task_generation,
+    )
+    .await?;
+    if newly_authorized {
+        target = refresh_window_target(app, state, &target, epoch).await?;
+    }
+    let joined_current_stage = raise_window || window_needs_restore(&target);
+    if joined_current_stage {
+        target = join_target_to_june_stage(app, state, &target, epoch, task_generation).await?;
+    }
+    ensure_epoch_current(state, Some(epoch))?;
+    ensure_task_generation_current(state, task_generation)?;
+    store_target_selection(state, &target)?;
     Ok(mcp_text(json!({
         "ok": true,
         "action": "focus_app",
-        "action_id": action_id,
         "target_app": target.app_name,
-        "message": "Target selected without raising its window. Capture it before acting.",
+        "window_id": target.window_id,
+        "raised": joined_current_stage,
+        "message": if joined_current_stage {
+            "The window was added to June's current Stage Manager group. Capture it before acting."
+        } else {
+            "Target selected without raising its window. Capture it before acting."
+        },
     })))
 }
 
@@ -2001,6 +2617,7 @@ async fn mutate(
     action: &str,
     arguments: &Value,
     epoch: u64,
+    task_generation: u64,
 ) -> Result<Value, AppError> {
     let target = state
         .target
@@ -2014,25 +2631,23 @@ async fn mutate(
             )
         })?;
     validate_sensitive_action(action, arguments, &target)?;
-    // Normalize and validate the driver request before asking the user. An
-    // approval card must never describe an action that will later turn into a
-    // different fallback because required coordinates/keys were malformed.
+    // Normalize and validate the driver request before any first-use app
+    // authorization. The approved app must not turn an invalid request into a
+    // different fallback action.
     let (tool, driver_args) = driver_action(action, arguments, &target)?;
     let action_id = random_id();
-    let summary = action_summary(action, arguments, &target);
-    park_approval(
+    ensure_app_authorized(
         app,
         state,
-        &action_id,
-        action,
+        identity_app_authorization(&target.identity),
         &target.app_name,
-        &summary,
-        target.capture_path.clone(),
+        epoch,
+        task_generation,
     )
     .await?;
-    recheck_after_approval(app, state, epoch).await?;
     revalidate_target(app, state, action, arguments, &target, epoch).await?;
     ensure_epoch_current(state, Some(epoch))?;
+    ensure_task_generation_current(state, task_generation)?;
     let mut result = driver_call(app, state, tool, driver_args, Some(epoch)).await?;
     add_result_metadata(&mut result, &action_id, &target.app_name);
     if arguments
@@ -2050,6 +2665,7 @@ async fn mutate(
                 "window_id": target.window_id,
             }),
             Some(epoch),
+            task_generation,
         )
         .await
         .map(|mut capture| {
@@ -2064,9 +2680,11 @@ async fn recheck_after_approval(
     app: &AppHandle,
     state: &ComputerUseState,
     epoch: u64,
+    task_generation: u64,
 ) -> Result<(), AppError> {
     ensure_epoch_current(state, Some(epoch))?;
     ensure_attended_run(state)?;
+    ensure_task_generation_current(state, task_generation)?;
     ensure_action_eligible(app).await
 }
 
@@ -2198,24 +2816,21 @@ fn stale_element_error() -> AppError {
     )
 }
 
-async fn park_approval(
+async fn park_app_authorization(
     app: &AppHandle,
     state: &ComputerUseState,
-    action_id: &str,
-    action: &str,
     target_app: &str,
-    summary: &str,
-    capture_path: Option<String>,
 ) -> Result<(), AppError> {
     let approval_id = random_id();
+    let action_id = random_id();
     let now = now_ms();
     let approval = PendingComputerUseApproval {
         approval_id: approval_id.clone(),
-        action_id: action_id.to_string(),
-        action: action.to_string(),
+        action_id,
+        action: "use_app".to_string(),
         target_app: sanitize_line(target_app),
-        summary: sanitize_line(summary),
-        capture_path,
+        summary: "June can inspect and operate this app until the current task ends.".to_string(),
+        capture_path: None,
         requested_at_ms: now,
         expires_at_ms: now.saturating_add(APPROVAL_TIMEOUT.as_millis() as u64),
     };
@@ -2245,8 +2860,8 @@ async fn park_approval(
         Ok(())
     } else {
         Err(AppError::new(
-            "computer_use_action_denied",
-            "The Computer use action was denied, cancelled, or timed out.",
+            "computer_use_app_denied",
+            "Computer use access to this app was denied, cancelled, or timed out.",
         ))
     }
 }
@@ -3169,53 +3784,6 @@ fn element_arg(arguments: &Value, key: &str) -> Result<u32, AppError> {
         })
 }
 
-fn action_summary(action: &str, arguments: &Value, target: &TargetContext) -> String {
-    let element = arguments
-        .get("element")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok());
-    let element_label = element
-        .and_then(|index| target.elements.get(&index))
-        .map(|element| element.label.trim())
-        .filter(|label| !label.is_empty())
-        .map(|label| format!(" ({label})"))
-        .unwrap_or_default();
-    match action {
-        "click" => format!("Click in {}{element_label}", target.app_name),
-        "double_click" => format!("Double-click in {}{element_label}", target.app_name),
-        "right_click" => format!("Right-click in {}{element_label}", target.app_name),
-        "drag" => format!("Drag an item in {}", target.app_name),
-        "scroll" => format!(
-            "Scroll {} in {}",
-            arguments
-                .get("direction")
-                .and_then(Value::as_str)
-                .unwrap_or("down"),
-            target.app_name
-        ),
-        "type" => format!(
-            "Type {} characters in {}{element_label}",
-            arguments
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::chars)
-                .map(Iterator::count)
-                .unwrap_or(0),
-            target.app_name
-        ),
-        "key" => format!(
-            "Press {} in {}",
-            arguments
-                .get("keys")
-                .and_then(Value::as_str)
-                .unwrap_or("a key"),
-            target.app_name
-        ),
-        "set_value" => format!("Change a value in {}{element_label}", target.app_name),
-        _ => format!("Run {action} in {}", target.app_name),
-    }
-}
-
 fn add_result_metadata(result: &mut Value, action_id: &str, target_app: &str) {
     let key = if result.get("structuredContent").is_some() {
         "structuredContent"
@@ -3269,6 +3837,85 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn non_secret_computer_use_grant_never_uses_keychain() {
+        let source = include_str!("computer_use.rs");
+        let start = source
+            .find("pub(crate) async fn grant_enabled")
+            .expect("grant read boundary");
+        let end = source[start..]
+            .find("fn bundled_driver_executable")
+            .map(|offset| start + offset)
+            .expect("grant storage boundary");
+
+        assert!(
+            !source[start..end].contains("keyring::Entry"),
+            "the non-secret Computer use grant must not trigger a Keychain authorization prompt"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn permission_drag_publishes_the_real_helper_app_bundle() {
+        let executable =
+            Path::new("/tmp/June Computer Use Driver.app/Contents/MacOS/june-computer-use-driver");
+        assert_eq!(
+            permission_drag_bundle_path(executable),
+            Some(PathBuf::from("/tmp/June Computer Use Driver.app"))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn driver_launch_uses_launch_services_and_the_helper_bundle() {
+        let executable =
+            Path::new("/tmp/June Computer Use Driver.app/Contents/MacOS/june-computer-use-driver");
+        let launch = driver_launch_spec(
+            executable,
+            Path::new("/tmp/june-cua-test/driver.sock"),
+            "a-secret-capability",
+            Some(DriverPermissionPrompt::ScreenRecording),
+        )
+        .expect("valid helper bundle");
+
+        assert_eq!(launch.program, PathBuf::from("/usr/bin/open"));
+        assert!(launch.args.iter().any(|arg| arg == "-n"));
+        assert!(launch.args.iter().any(|arg| arg == "-g"));
+        assert!(launch
+            .args
+            .iter()
+            .any(|arg| { arg == "/tmp/June Computer Use Driver.app" }));
+        assert!(launch
+            .args
+            .iter()
+            .any(|arg| { arg == "JUNE_COMPUTER_USE_PERMISSION_PROMPT=screen-recording" }));
+    }
+
+    #[test]
+    fn permission_prompts_are_requested_one_at_a_time() {
+        assert_eq!(
+            next_permission_prompt(&PermissionProbe {
+                accessibility: false,
+                screen_recording: false,
+            }),
+            Some(DriverPermissionPrompt::Accessibility),
+        );
+        assert_eq!(
+            next_permission_prompt(&PermissionProbe {
+                accessibility: true,
+                screen_recording: false,
+            }),
+            Some(DriverPermissionPrompt::ScreenRecording),
+        );
+        assert_eq!(
+            next_permission_prompt(&PermissionProbe {
+                accessibility: true,
+                screen_recording: true,
+            }),
+            None,
+        );
+    }
+
     fn fixture_identity(bundle_id: &str, executable: &str) -> AppIdentity {
         AppIdentity {
             bundle_id: bundle_id.to_string(),
@@ -3311,6 +3958,10 @@ mod tests {
                 ),
                 title: "First note".to_string(),
                 z_index: 1,
+                width: 900.0,
+                height: 700.0,
+                is_on_screen: true,
+                on_current_space: Some(true),
             },
             WindowTarget {
                 pid: 10,
@@ -3322,6 +3973,10 @@ mod tests {
                 ),
                 title: "Second note".to_string(),
                 z_index: 2,
+                width: 900.0,
+                height: 700.0,
+                is_on_screen: true,
+                on_current_space: Some(true),
             },
             WindowTarget {
                 pid: 20,
@@ -3333,6 +3988,10 @@ mod tests {
                 ),
                 title: "Document".to_string(),
                 z_index: 3,
+                width: 900.0,
+                height: 700.0,
+                is_on_screen: true,
+                on_current_space: Some(true),
             },
         ]
     }
@@ -3495,6 +4154,74 @@ mod tests {
                 .code,
             "computer_use_target_required"
         );
+    }
+
+    #[test]
+    fn stage_manager_thumbnails_and_hidden_windows_require_restore() {
+        let mut window = fixture_windows().remove(0);
+        assert!(!window_needs_restore(&window));
+
+        window.width = 80.0;
+        window.height = 111.0;
+        assert!(window_needs_restore(&window));
+
+        window.width = 900.0;
+        window.height = 700.0;
+        window.is_on_screen = false;
+        assert!(
+            window_needs_restore(&window),
+            "the live TextEdit trace exposed a full-size hidden document beside its shelf thumbnail"
+        );
+
+        window.is_on_screen = true;
+        window.on_current_space = Some(false);
+        assert!(window_needs_restore(&window));
+    }
+
+    #[test]
+    fn stage_manager_shelf_proxy_collapses_into_the_real_hidden_window() {
+        let mut document = fixture_windows().remove(0);
+        document.window_id = 4460;
+        document.title.clear();
+        document.width = 500.0;
+        document.height = 500.0;
+        document.is_on_screen = false;
+        document.on_current_space = None;
+
+        let mut shelf_proxy = document.clone();
+        shelf_proxy.window_id = 4461;
+        shelf_proxy.title = "Untitled".to_string();
+        shelf_proxy.width = 80.0;
+        shelf_proxy.height = 102.0;
+        shelf_proxy.is_on_screen = true;
+
+        let candidates = collapse_stage_manager_shelf_surfaces(vec![document.clone(), shelf_proxy]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].window_id, document.window_id);
+        assert!(window_needs_restore(&candidates[0]));
+        assert_eq!(
+            select_window(&candidates, Some("TextEdit"), None)
+                .expect("the real TextEdit document must be unambiguous")
+                .window_id,
+            document.window_id
+        );
+    }
+
+    #[test]
+    fn open_app_accepts_display_names_but_rejects_sensitive_or_path_targets() {
+        assert_eq!(
+            open_app_name(&json!({ "app": " TextEdit " })).expect("safe app"),
+            "TextEdit"
+        );
+        for arguments in [
+            json!({}),
+            json!({ "app": "" }),
+            json!({ "app": "Terminal" }),
+            json!({ "app": "/System/Applications/TextEdit.app" }),
+            json!({ "app": "file:///Applications/TextEdit.app" }),
+        ] {
+            assert!(open_app_name(&arguments).is_err(), "{arguments}");
+        }
     }
 
     #[test]
@@ -3907,35 +4634,47 @@ mod tests {
     }
 
     #[test]
-    fn approval_summary_never_contains_typed_text() {
-        let target = TargetContext {
-            pid: 1,
-            window_id: 2,
-            app_name: "TextEdit".to_string(),
-            identity: fixture_identity(
-                "com.apple.TextEdit",
-                "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-            ),
-            elements: HashMap::from([(
-                1,
-                ElementSummary {
-                    role: "AXTextArea".to_string(),
-                    label: "Body".to_string(),
-                    metadata: "AXTextArea \"Body\" editable=true".to_string(),
-                },
-            )]),
-            capture_path: None,
-            capture_sha256: None,
-            capture_generation: 7,
-        };
-        let summary = action_summary(
-            "type",
-            &json!({ "text": "confidential customer text" }),
-            &target,
+    fn app_authorizations_are_scoped_by_verified_identity_and_clear_together() {
+        assert_eq!(
+            requested_app_authorization(" TextEdit "),
+            requested_app_authorization("textedit")
         );
-        assert!(summary.contains("26 characters"));
-        assert!(!summary.contains("confidential"));
-        assert!(!summary.contains("customer"));
+        let identity = fixture_identity(
+            "com.apple.TextEdit",
+            "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+        );
+        let other_binary = fixture_identity(
+            "com.apple.TextEdit",
+            "/tmp/TextEdit.app/Contents/MacOS/TextEdit",
+        );
+        assert_ne!(
+            identity_app_authorization(&identity),
+            identity_app_authorization(&other_binary)
+        );
+
+        let state = ComputerUseState::default();
+        remember_app_authorization(&state, identity_app_authorization(&identity))
+            .expect("remember authorization");
+        assert!(
+            app_is_authorized(&state, &identity_app_authorization(&identity))
+                .expect("authorization lookup")
+        );
+        assert!(
+            !app_is_authorized(&state, &identity_app_authorization(&other_binary))
+                .expect("authorization lookup")
+        );
+        clear_app_authorizations(&state);
+        assert!(state.authorized_apps.lock().expect("lock").is_empty());
+
+        let generation = state.attended_generation.load(Ordering::SeqCst);
+        assert!(ensure_task_generation_current(&state, generation).is_ok());
+        state.attended_generation.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            ensure_task_generation_current(&state, generation)
+                .expect_err("new task must invalidate old authorization")
+                .code,
+            "computer_use_task_changed"
+        );
     }
 
     #[test]

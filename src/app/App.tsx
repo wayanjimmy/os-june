@@ -3790,11 +3790,6 @@ export function App() {
                 />
               ) : activeView === "plugins" ? (
                 <PluginsView
-                  onOpenComputerUseSettings={() => {
-                    setSettingsReturnView("plugins");
-                    setSettingsTab("computer-use");
-                    setActiveView("settings");
-                  }}
                   onOpenModels={() => {
                     setSettingsReturnView("plugins");
                     setSettingsTab("models");

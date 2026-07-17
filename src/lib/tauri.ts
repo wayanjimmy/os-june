@@ -2240,6 +2240,14 @@ export async function computerUseRequestPermissions() {
   return invoke<ComputerUseStatusDto>("computer_use_request_permissions");
 }
 
+export async function setComputerUsePermissionDragBounds(
+  bounds: RecordingPresenceBoundsDto | null,
+) {
+  return invoke<void>("set_computer_use_permission_drag_bounds", {
+    request: { bounds },
+  });
+}
+
 export async function computerUseStop() {
   return invoke<{ stopped: boolean }>("computer_use_stop");
 }

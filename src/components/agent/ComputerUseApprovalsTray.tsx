@@ -13,23 +13,6 @@ import {
   respondComputerUseApproval,
 } from "../../lib/tauri";
 
-function actionLabel(action: string) {
-  const labels: Record<string, string> = {
-    click: "Click",
-    double_click: "Double click",
-    right_click: "Right click",
-    drag: "Drag",
-    type: "Type text",
-    key: "Press key",
-    press_key: "Press key",
-    hotkey: "Use shortcut",
-    scroll: "Scroll",
-    set_value: "Change value",
-    focus_app: "Select app",
-  };
-  return labels[action] || action.replaceAll("_", " ");
-}
-
 function expiryLabel(expiresAtMs: number) {
   return new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
@@ -37,9 +20,17 @@ function expiryLabel(expiresAtMs: number) {
   }).format(new Date(expiresAtMs));
 }
 
+function approvalHeading(pending: PendingComputerUseApprovalDto[]) {
+  const targetApps = [
+    ...new Set(pending.map((item) => item.targetApp.trim()).filter((target) => target.length > 0)),
+  ];
+  if (targetApps.length === 1) return `June wants to use ${targetApps[0]}`;
+  if (targetApps.length > 1) return `June wants to use ${targetApps.length} apps`;
+  return "June wants to use an app";
+}
+
 /** Always-mounted decision surface for the app-owned Computer use broker.
- * There is intentionally no batch path: every mutation is an independent,
- * expiring Allow once or Deny decision. */
+ * Approval is scoped to one target app and expires with the current task. */
 export function ComputerUseApprovalsTray() {
   const [pending, setPending] = useState<PendingComputerUseApprovalDto[]>([]);
   const [busy, setBusy] = useState(false);
@@ -135,7 +126,7 @@ export function ComputerUseApprovalsTray() {
           <span className="connector-approvals-stack-mark" aria-hidden>
             <IconTelevision size={11} />
           </span>
-          Computer use needs approval
+          {approvalHeading(pending)}
           {collapsed ? <span className="status-pill">{pending.length}</span> : null}
         </button>
         <span className="connector-approvals-header-actions">
@@ -182,9 +173,6 @@ export function ComputerUseApprovalsTray() {
               <div className="computer-use-approval-copy">
                 <strong>{item.summary}</strong>
                 <span>
-                  {item.targetApp} · {actionLabel(item.action)}
-                </span>
-                <span>
                   Expires at{" "}
                   <time dateTime={new Date(item.expiresAtMs).toISOString()}>
                     {expiryLabel(item.expiresAtMs)}
@@ -206,7 +194,7 @@ export function ComputerUseApprovalsTray() {
                   disabled={busy}
                   onClick={() => void respond(item.approvalId, true)}
                 >
-                  Allow once
+                  Allow for this task
                 </button>
               </div>
             </li>

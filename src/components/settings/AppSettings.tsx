@@ -118,7 +118,6 @@ import { IMAGE_GENERATION_ENABLED, VIDEO_GENERATION_ENABLED } from "../../lib/fe
 import { DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { ConnectorsSection } from "./ConnectorsSection";
-import { ComputerUseSettingsSection } from "./ComputerUseSettingsSection";
 import { ExternalDirsSection } from "./ExternalDirsSection";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
 import { SkillDetailSection } from "./SkillDetailSection";
@@ -300,7 +299,6 @@ export type SettingsTab =
   | "audio"
   | "models"
   | "agent"
-  | "computer-use"
   | "connectors"
   | "skills"
   | "external-dirs"
@@ -327,7 +325,6 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "audio", label: "Audio" },
   { id: "models", label: "Models" },
   { id: "agent", label: "Agent" },
-  { id: "computer-use", label: "Computer use" },
   { id: "connectors", label: "Connectors" },
   { id: "skills", label: "Installed skills" },
   { id: "external-dirs", label: "External skill directories" },
@@ -2337,13 +2334,6 @@ export function AppSettings({
             selectedPlatformId={agentPlatformId}
             onSelectPlatform={setAgentPlatformId}
             onBackFromPlatform={() => setAgentPlatformId(undefined)}
-          />
-        ) : null}
-
-        {activeTab === "computer-use" ? (
-          <ComputerUseSettingsSection
-            onOpenModels={() => setActiveTab("models")}
-            onOpenBilling={() => setActiveTab("billing")}
           />
         ) : null}
 

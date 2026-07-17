@@ -1,11 +1,9 @@
 import { ComputerUseControl } from "./ComputerUseControl";
 
 export function PluginsView({
-  onOpenComputerUseSettings,
   onOpenModels,
   onOpenBilling,
 }: {
-  onOpenComputerUseSettings: () => void;
   onOpenModels: () => void;
   onOpenBilling: () => void;
 }) {
@@ -17,12 +15,7 @@ export function PluginsView({
       </header>
       <div className="plugins-grid">
         <article className="plugin-tile">
-          <ComputerUseControl
-            surface="plugin"
-            onOpenModels={onOpenModels}
-            onOpenBilling={onOpenBilling}
-            onOpenSettings={onOpenComputerUseSettings}
-          />
+          <ComputerUseControl onOpenModels={onOpenModels} onOpenBilling={onOpenBilling} />
         </article>
       </div>
     </section>

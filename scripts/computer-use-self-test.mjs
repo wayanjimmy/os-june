@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pin = readJson(path.join(rootDir, "src-tauri", "cua-driver-pin.json"));
@@ -32,8 +33,8 @@ async function main() {
     return;
   }
 
-  if (options.promptPermissions && !options.live) {
-    throw new Error("--prompt-permissions requires --live");
+  if (options.promptPermissions && !options.live && !options.permissionsOnly) {
+    throw new Error("--prompt-permissions requires --live or --permissions-only");
   }
 
   let driver;
@@ -41,12 +42,42 @@ async function main() {
     validateBundle();
     validateDirectLaunchRefusal();
     const host = resolveSelfTestHost();
-    driver = await startMcp(host, ["--computer-use-release-self-test-host", executable]);
+    const startHost = (permissionPrompt) =>
+      startMcp(host, [
+        "--computer-use-release-self-test-host",
+        executable,
+        ...(permissionPrompt ? [`--permission-prompt=${permissionPrompt}`] : []),
+      ]);
+    driver = await startHost();
+    if (options.promptPermissions) {
+      const current = structured(
+        await callTool(driver, "check_permissions", { prompt: false }, 45_000),
+      );
+      const permissionPrompt =
+        current.accessibility !== true
+          ? "accessibility"
+          : current.screen_recording !== true
+            ? "screen-recording"
+            : undefined;
+      if (permissionPrompt) {
+        await driver.close();
+        driver = await startHost(permissionPrompt);
+        console.error(`Requested ${permissionPrompt} for June Computer Use Driver.`);
+      }
+    }
     const toolsResult = await driver.request("tools/list", {});
     validateDriverContract(toolsResult.tools);
     await validateJuneMcpContract();
-    if (options.live) {
-      await runLiveSelfTest(driver, options.promptPermissions);
+    if (options.permissionsOnly) {
+      const result = await callTool(
+        driver,
+        "check_permissions",
+        { prompt: options.promptPermissions },
+        options.promptPermissions ? 60_000 : 45_000,
+      );
+      console.log(JSON.stringify(structured(result), null, 2));
+    } else if (options.live) {
+      await runLiveSelfTest(driver, false);
     }
     console.error(
       `Computer use ${options.live ? "live " : ""}self-test passed for June's helper built from cua-driver ${pin.version} (${pin.sourceCommit}).`,
@@ -61,6 +92,7 @@ function parseArguments(args) {
     bundle: undefined,
     host: undefined,
     live: false,
+    permissionsOnly: false,
     promptPermissions: false,
     requireDeveloperId: false,
   };
@@ -78,6 +110,9 @@ function parseArguments(args) {
         break;
       case "--live":
         parsed.live = true;
+        break;
+      case "--permissions-only":
+        parsed.permissionsOnly = true;
         break;
       case "--prompt-permissions":
         parsed.promptPermissions = true;
@@ -110,9 +145,22 @@ function validateBundle() {
     );
   }
 
+  const stamp = readJson(stampPath);
+  const profile = stamp.juneBuild?.profile;
+  const expectedBundleIdentifier = computerUseBundleIdentifier({
+    baseIdentifier: pin.bundleIdentifier,
+    profile,
+    worktreeRoot: rootDir,
+  });
+  if (stamp.bundleIdentifier !== expectedBundleIdentifier) {
+    throw new Error(
+      `Computer use helper stamp identifies ${stamp.bundleIdentifier || "nothing"}; expected ${expectedBundleIdentifier}.`,
+    );
+  }
+
   const plist = path.join(bundleDir, "Contents", "Info.plist");
   for (const [key, expected] of [
-    ["CFBundleIdentifier", pin.bundleIdentifier],
+    ["CFBundleIdentifier", expectedBundleIdentifier],
     ["CFBundleDisplayName", "June Computer Use Driver"],
     ["CFBundleName", "June Computer Use Driver"],
     ["LSMinimumSystemVersion", pin.minimumMacOSVersion],
@@ -134,7 +182,6 @@ function validateBundle() {
     throw new Error("Computer use helper is missing June's Screen Recording usage description.");
   }
 
-  const stamp = readJson(stampPath);
   if (
     stamp.version !== pin.version ||
     stamp.sourceCommit !== pin.sourceCommit ||
@@ -180,7 +227,7 @@ function validateBundle() {
 
   run("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundleDir]);
   const signature = run("/usr/bin/codesign", ["-dv", "--verbose=4", bundleDir]).combined;
-  if (!signature.includes(`Identifier=${pin.bundleIdentifier}`)) {
+  if (!signature.includes(`Identifier=${expectedBundleIdentifier}`)) {
     throw new Error("Computer use helper signature has the wrong bundle identifier.");
   }
   if (
@@ -299,6 +346,24 @@ async function validateJuneMcpContract() {
     }
     if (tool?.inputSchema?.additionalProperties !== false) {
       throw new Error("June's Computer use MCP input schema must remain closed.");
+    }
+    const description = tool?.description?.toLowerCase() || "";
+    for (const instruction of [
+      "refer to this capability as computer use",
+      "never ask for approval in chat",
+      "call the requested action immediately",
+      "allow for this task",
+      "open_app",
+      "raise_window",
+      "stage manager",
+      "do not retry",
+    ]) {
+      if (!description.includes(instruction)) {
+        throw new Error(`June's Computer use instructions must include: ${instruction}.`);
+      }
+    }
+    if (description.includes("mcp")) {
+      throw new Error("June's Computer use instructions must hide the transport implementation.");
     }
   } finally {
     await client.close();

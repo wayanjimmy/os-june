@@ -12,7 +12,7 @@ are enabled.
 | `unsupported` | This is not macOS. | Computer use is not shipped on Windows. |
 | `rollout_disabled` | June API disabled this app/macOS version, or the first safety decision could not be fetched. | Keep the grant revocable, check connectivity, then inspect June API's `[computer_use]` config. Do not bypass the gate. |
 | `plan_required` | No active Pro/Max or compatible legacy paid subscription is cached. | Refresh the account or open View plans. An existing June grant can still be revoked. |
-| `off` | The June grant is off. The helper may still have macOS grants. | Enable from Plugins or Settings after reading the permission explanation. |
+| `off` | The June grant is off. The helper may still have macOS grants. | Enable from Plugins after reading the permission explanation. |
 | `driver_missing` | The signed app does not contain the pinned helper/stamp. | Reinstall or update June. Do not run an upstream installer. |
 | `driver_mismatch` | The helper version does not match the repo pin. | Stop rollout and inspect the build provenance/SBOM. |
 | `permission_missing` | Accessibility, Screen Recording, or the live capture probe is absent. | Use Continue to macOS access, then the separate Open settings links. |
@@ -34,12 +34,45 @@ are enabled.
    runtime when the signed helper becomes capturable.
 5. If the driver crashed, Stop clears its private child and the next eligible
    task starts a new one. Never start an upstream daemon beside June.
-6. If the target changed while a card waited, recapture it and ask June to
-   propose the action again. A stale-action failure is expected safety behavior.
+6. The first access to each target app asks once for access during the current
+   task. Click Allow for this task. Captures and actions in that verified app do
+   not ask again until the task ends or Stop is pressed.
+7. A Stage Manager shelf window is restored automatically after the app is
+   allowed. June first activates its own window, then raises the exact target
+   window into June's current group without a separate approval. If restore
+   fails, June stops retrying that window for the current task. Press Stop and
+   start a new task rather than switching Spaces manually.
+8. If the target changed while an authorization card waited, ask June to retry
+   the app. A stale-target failure is expected safety behavior.
 
 Turning the June switch off removes June's runtime grant and immediately stops
 the task. It cannot silently remove macOS TCC entries; the user removes those
 from System Settings.
+
+## Local worktree permission testing
+
+Every macOS `make dev` launch gives the debug Computer use helper a stable
+bundle identifier derived from the current worktree path. The launch registers
+that helper with LaunchServices, clears Accessibility and Screen Recording for
+that exact identifier, and removes stale debug staging copies before Tauri
+copies the signed bundle again. This provides a fresh permission walkthrough
+on every dev restart without changing another worktree's TCC state.
+
+The Tauri dev runner executes a byte-identical copy of Cargo's `os-june` binary
+as `target/**/June`. The authenticated helper accepts those two exact development
+host names only when they are inside this checkout's Cargo target tree. If the
+Plugins surface reports that the driver stopped while the default self-test
+passes, rerun the self-test through the live launcher to check this boundary:
+
+```sh
+node scripts/computer-use-self-test.mjs --permissions-only \
+  --host src-tauri/target/debug/June
+```
+
+The launch log prints the effective identifier and reset result. The production
+helper always keeps `co.opensoftware.june.computer-use-driver`; release builds
+never run the automatic reset. A successful reset removes prior grants but does
+not grant either permission or bypass the explanatory Continue action.
 
 ## Build and release diagnosis
 
@@ -76,8 +109,11 @@ The live fixture runs through the real signed June executable's fixed QA host,
 which accepts only the bundled helper and the two disposable fixture bundle
 identifiers. It captures the target, clicks a numbered button while the observer
 remains frontmost, verifies the real pointer and current-Space window flags did
-not change, kills both fixtures, and exits the private driver. RC and stable
-workflows run this before notarization. A failure blocks publication.
+not change, kills both fixtures, and exits the private driver. The manual
+Stage Manager pass additionally verifies that the exact shelf window joins
+June's current group without moving the pointer or showing another decision.
+RC and stable workflows run this before notarization. A failure blocks
+publication.
 
 ## OS update or regression
 
