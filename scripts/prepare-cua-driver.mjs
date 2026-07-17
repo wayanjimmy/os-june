@@ -254,6 +254,10 @@ function parseArguments(values) {
   let target;
   for (let index = 0; index < values.length; index += 1) {
     const argument = values[index];
+    // pnpm forwards the conventional `--` separator verbatim (npm strips it).
+    if (argument === "--") {
+      continue;
+    }
     if (argument === "--release") {
       release = true;
       continue;
