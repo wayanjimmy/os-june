@@ -71,7 +71,12 @@ describe("macOS Hermes universal runtime bundle", () => {
       expect(workflow).toContain('"darwin-aarch64": platform');
       expect(workflow).toContain('"darwin-x86_64": platform');
     }
-    expect(signedDmgBuilder).toContain("--target universal-apple-darwin");
+    expect(signedDmgBuilder).toContain('computer_use_target="universal-apple-darwin"');
+    expect(signedDmgBuilder).toContain(
+      'pnpm computer-use:prepare -- "${computer_use_prepare_args[@]}"',
+    );
+    expect(signedDmgBuilder).toContain('--target "$computer_use_target"');
+    expect(signedDmgBuilder).not.toContain('--target universal-apple-darwin "$@"');
     expect(signedDmgBuilder).toContain("audit-hermes-runtime.sh");
     expect(signedDmgBuilder).toContain("--require-signed");
   });
