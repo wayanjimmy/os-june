@@ -10,10 +10,22 @@ import {
   computerUseBundleIdentifier,
   resetComputerUseDevGrants,
 } from "./computer-use-dev.mjs";
+import { devAppIdentityForBranch } from "./dev-app-identity.mjs";
 import { chooseDevPort } from "./dev-ports.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(SCRIPT_DIR, "..");
+const branch = spawnSync("git", ["branch", "--show-current"], {
+  cwd: ROOT_DIR,
+  encoding: "utf8",
+});
+const devAppIdentity = devAppIdentityForBranch(branch.status === 0 ? branch.stdout : "");
+
+if (devAppIdentity.productName !== "June") {
+  console.error(
+    `Using development app identity ${devAppIdentity.productName} (${devAppIdentity.identifier}).`,
+  );
+}
 
 if (process.platform === "darwin") {
   const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-cua-driver.mjs")], {
@@ -128,7 +140,11 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const devConfigPath = resolve(scriptDir, "..", "src-tauri", ".tauri.dev.generated.json");
 writeFileSync(
   devConfigPath,
-  JSON.stringify({ build: { devUrl: `http://127.0.0.1:${frontendPort}` } }),
+  JSON.stringify({
+    productName: devAppIdentity.productName,
+    identifier: devAppIdentity.identifier,
+    build: { devUrl: `http://127.0.0.1:${frontendPort}` },
+  }),
 );
 // Merge a devUrl override last so it wins over the file configs, pointing the
 // native window at the Vite server that before-dev will start on this port.
@@ -147,6 +163,7 @@ const child = spawn(tauri.command, [...tauri.args, "dev", ...tauriArgs], {
           JUNE__SERVER__PORT: String(apiPort),
         }),
     ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
+    OS_JUNE_DEV_APP_NAME: devAppIdentity.productName,
     ...(replayOnboarding ? { VITE_JUNE_REPLAY_ONBOARDING: "1" } : {}),
   },
   shell: false,

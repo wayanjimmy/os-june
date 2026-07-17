@@ -63,8 +63,13 @@ else
 fi
 
 binary="$bin_dir/os-june"
-launcher="$bin_dir/June"
-tmp_launcher="$bin_dir/.June.tmp"
+launcher_name="${OS_JUNE_DEV_APP_NAME:-June}"
+if [[ -z "$launcher_name" || "$launcher_name" == */* || "$launcher_name" == *:* || "$launcher_name" == *$'\n'* || ${#launcher_name} -gt 80 ]]; then
+  echo "Invalid development app name: $launcher_name" >&2
+  exit 2
+fi
+launcher="$bin_dir/$launcher_name"
+tmp_launcher="$bin_dir/.June-launcher.tmp"
 
 rm -f "$tmp_launcher"
 cp "$binary" "$tmp_launcher"
