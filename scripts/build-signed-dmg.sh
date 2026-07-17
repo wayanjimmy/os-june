@@ -144,9 +144,24 @@ cd "$ROOT_DIR"
 ./scripts/bundle-hermes-runtime.sh
 # Trailing args after `--` reach the cargo runner; --locked keeps the
 # signed build from re-resolving past Cargo.lock (spec/package-install-security.md).
-pnpm tauri build --bundles dmg "$@" -- --locked
+pnpm tauri build --bundles app,dmg --target universal-apple-darwin "$@" -- --locked
 
 shopt -s nullglob
+apps=(
+  "$ROOT_DIR"/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+  "$ROOT_DIR"/src-tauri/target/release/bundle/macos/*.app
+)
+if [[ "${#apps[@]}" -ne 1 ]]; then
+  echo "Expected exactly one universal app bundle after build, found ${#apps[@]}." >&2
+  exit 1
+fi
+app="${apps[0]}"
+"$ROOT_DIR/scripts/audit-hermes-runtime.sh" \
+  "$app/Contents/Resources/native/hermes" --require-signed
+codesign --verify --deep --strict --verbose=2 "$app"
+xcrun stapler validate "$app"
+spctl --assess --type execute --verbose "$app"
+
 dmgs=(
   "$ROOT_DIR"/src-tauri/target/*-apple-darwin/release/bundle/dmg/*.dmg
   "$ROOT_DIR"/src-tauri/target/release/bundle/dmg/*.dmg
