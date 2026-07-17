@@ -18,6 +18,7 @@ const HERMES_ENV_PROJECTION_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 #[serde(rename_all = "camelCase")]
 pub struct ObsidianStatus {
     pub connected: bool,
+    pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +73,7 @@ pub fn obsidian_disconnect(app: AppHandle) -> Result<ObsidianStatus, AppError> {
     }
     Ok(ObsidianStatus {
         connected: false,
+        available: false,
         vault_path: None,
         vault_name: None,
     })
@@ -146,23 +148,42 @@ fn status_for_app(app: &AppHandle) -> Result<ObsidianStatus, AppError> {
     let Some(config) = read_config_optional(app)? else {
         return Ok(ObsidianStatus {
             connected: false,
+            available: false,
             vault_path: None,
             vault_name: None,
         });
     };
-    let vault_path = validate_vault_path(Path::new(&config.vault_path))?;
-    Ok(status_from_path(vault_path))
+    Ok(status_from_config(&config))
+}
+
+fn status_from_config(config: &ObsidianConfig) -> ObsidianStatus {
+    match validate_vault_path(Path::new(&config.vault_path)) {
+        Ok(path) => status_from_path(path),
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                vault_path = %config.vault_path,
+                "configured Obsidian vault is unavailable in Settings"
+            );
+            status_from_saved_path(&config.vault_path, false)
+        }
+    }
 }
 
 fn status_from_path(path: PathBuf) -> ObsidianStatus {
-    let vault_name = path
+    status_from_saved_path(&path.to_string_lossy(), true)
+}
+
+fn status_from_saved_path(path: &str, available: bool) -> ObsidianStatus {
+    let vault_name = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(str::to_string);
     ObsidianStatus {
         connected: true,
-        vault_path: Some(path.to_string_lossy().into_owned()),
+        available,
+        vault_path: Some(path.to_string()),
         vault_name,
     }
 }
@@ -449,7 +470,7 @@ mod tests {
     use super::{
         acquire_hermes_env_projection_lock, dotenv_single_quote, is_active_obsidian_assignment,
         reject_dotenv_unsafe_path, render_hermes_env_projection, runtime_vault_path,
-        sync_hermes_env_projection, validate_vault_path, ObsidianConfig,
+        status_from_config, sync_hermes_env_projection, validate_vault_path, ObsidianConfig,
         HERMES_ENV_PROJECTION_LOCK_FILE,
     };
 
@@ -479,6 +500,25 @@ mod tests {
 
         std::fs::remove_dir_all(&vault).expect("unmount vault");
         assert_eq!(runtime_vault_path(&config), None);
+    }
+
+    #[test]
+    fn status_keeps_an_unavailable_configured_vault_disconnectable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let vault = temp.path().join("Moved Vault");
+        let config = ObsidianConfig {
+            vault_path: vault.to_string_lossy().into_owned(),
+        };
+
+        let status = status_from_config(&config);
+
+        assert!(status.connected);
+        assert!(!status.available);
+        assert_eq!(
+            status.vault_path.as_deref(),
+            Some(config.vault_path.as_str())
+        );
+        assert_eq!(status.vault_name.as_deref(), Some("Moved Vault"));
     }
 
     #[test]

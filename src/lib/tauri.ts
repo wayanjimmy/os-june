@@ -2218,6 +2218,9 @@ export async function connectorsSetSelectedTeams(input: {
  * teams. */
 export type ObsidianStatus = {
   connected: boolean;
+  /** False when a saved vault is currently missing or cannot be validated.
+   * Optional so older desktop responses remain compatible. */
+  available?: boolean;
   vaultPath?: string;
   vaultName?: string;
 };

@@ -107,6 +107,19 @@ function featureSummary(account: ConnectorAccount): string {
   return features.length > 0 ? `Can ${features.join(", ").toLowerCase()}.` : "";
 }
 
+function obsidianSubtitle(status: ObsidianStatus | null): string {
+  if (!status?.connected) return "Local vault read and update capability.";
+  const vault = status.vaultName ?? "Vault";
+  if (status.available === false) return `${vault} · Vault unavailable at ${status.vaultPath}`;
+  return `${vault} · ${status.vaultPath}`;
+}
+
+function obsidianStatusMeta(status: ObsidianStatus | null) {
+  if (!status?.connected) return null;
+  if (status.available === false) return { label: "Vault unavailable", tone: "warning" } as const;
+  return { label: "Connected", tone: "ok" } as const;
+}
+
 /** The connected row's one-liner: who is connected, then what June may do,
  * then (Linear only) how many teams are selected. */
 function accountSubtitle(account: ConnectorAccount): string {
@@ -208,6 +221,7 @@ export function ConnectorsSection() {
   const teamsPayload = [...availableTeams, ...missingSelectedTeams].filter((team) =>
     selectedTeamIds.has(team.id),
   );
+  const obsidianMeta = obsidianStatusMeta(obsidian);
 
   const refresh = useCallback(async () => {
     try {
@@ -413,7 +427,10 @@ export function ConnectorsSection() {
     setObsidianError(null);
     setObsidianBusy(true);
     try {
-      setObsidian(await obsidianDisconnect());
+      // Keep the configured row visible until the live runtime has dropped
+      // the vault capability. Persistence removal is idempotent, so a failed
+      // runtime apply leaves Disconnect as a safe retry action.
+      await obsidianDisconnect();
       await obsidianApplyRuntime();
       await refresh();
       toast.success("Obsidian disconnected");
@@ -522,15 +539,13 @@ export function ConnectorsSection() {
             <div className="connector-main">
               <span className="connector-name">Obsidian</span>
               <p className="connector-subtitle" title={obsidian?.vaultPath}>
-                {obsidian?.connected
-                  ? `${obsidian.vaultName ?? "Vault"} · ${obsidian.vaultPath}`
-                  : "Local vault read and update capability."}
+                {obsidianSubtitle(obsidian)}
               </p>
             </div>
             <div className="connector-actions">
-              {obsidian?.connected ? (
-                <span className="status-pill" data-tone="ok">
-                  Connected
+              {obsidianMeta ? (
+                <span className="status-pill" data-tone={obsidianMeta.tone}>
+                  {obsidianMeta.label}
                 </span>
               ) : null}
               <button

@@ -141,7 +141,12 @@ describe("ConnectorsSection", () => {
     mocks.openFileDialog.mockResolvedValue("/vaults/work");
     mocks.obsidianStatus
       .mockResolvedValueOnce({ connected: false })
-      .mockResolvedValue({ connected: true, vaultPath: "/vaults/work", vaultName: "work" });
+      .mockResolvedValue({
+        connected: true,
+        available: true,
+        vaultPath: "/vaults/work",
+        vaultName: "work",
+      });
 
     render(<ConnectorsSection />);
     await userEvent.click(await findEnabledConnect("Connect Obsidian"));
@@ -149,6 +154,49 @@ describe("ConnectorsSection", () => {
     await waitFor(() => expect(mocks.obsidianConfigure).toHaveBeenCalledWith("/vaults/work"));
     await waitFor(() => expect(mocks.obsidianApplyRuntime).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("button", { name: "Change Obsidian vault" })).toBeEnabled();
+  });
+
+  it("keeps a configured unavailable Obsidian vault visible and disconnectable", async () => {
+    mocks.obsidianStatus.mockResolvedValue({
+      connected: true,
+      available: false,
+      vaultPath: "/Volumes/External/Work",
+      vaultName: "Work",
+    });
+
+    render(<ConnectorsSection />);
+
+    expect(await screen.findByText("Vault unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/vault unavailable at \/Volumes\/External\/Work/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change Obsidian vault" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Disconnect Obsidian" })).toBeEnabled();
+  });
+
+  it("keeps Obsidian disconnect retryable until the runtime apply succeeds", async () => {
+    const connected = {
+      connected: true,
+      available: true,
+      vaultPath: "/vaults/work",
+      vaultName: "work",
+    };
+    mocks.obsidianStatus.mockResolvedValueOnce(connected).mockResolvedValue({ connected: false });
+    mocks.obsidianApplyRuntime
+      .mockRejectedValueOnce({ message: "Runtime apply failed" })
+      .mockResolvedValueOnce(undefined);
+
+    render(<ConnectorsSection />);
+    const disconnect = await screen.findByRole("button", { name: "Disconnect Obsidian" });
+
+    await userEvent.click(disconnect);
+    expect(await screen.findByText("Runtime apply failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect Obsidian" })).toBeEnabled();
+    expect(mocks.obsidianDisconnect).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Disconnect Obsidian" }));
+
+    await waitFor(() => expect(mocks.obsidianDisconnect).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mocks.obsidianApplyRuntime).toHaveBeenCalledTimes(2));
+    expect(await findEnabledConnect("Connect Obsidian")).toBeInTheDocument();
   });
 
   it("lists Google with a capability blurb", async () => {
