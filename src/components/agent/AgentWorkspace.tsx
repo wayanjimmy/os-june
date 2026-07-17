@@ -161,7 +161,13 @@ import {
 import {
   getActiveHermesProfileName,
   refreshActiveHermesProfile,
+  useActiveHermesProfile,
 } from "../../lib/active-hermes-profile";
+import {
+  filterAgentSessionsForProfile,
+  sessionMatchesProfile,
+  sessionProfileMap,
+} from "../../lib/session-profile-filter";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_GALLERY_EVENT,
@@ -2365,6 +2371,7 @@ export function AgentWorkspace({
   testOnlySlashCommandEntriesRef,
 }: AgentWorkspaceProps = {}) {
   const initialSessionId = initialSession?.id ?? initialSessionIdProp;
+  const activeHermesProfile = useActiveHermesProfile();
   // Read once per mount (lazy initializer): the continuity snapshot the
   // previous mount captured on unmount, if any session was still mid-run.
   const [continuity] = useState(() => sessionContinuity);
@@ -2467,8 +2474,15 @@ export function AgentWorkspace({
   const [startInNewSessionMode] = useState(
     () => !initialSessionId && shouldOpenNewSessionOnMount(),
   );
+  // A last-open id is only a restore candidate until the first profile-scoped
+  // session load proves that it belongs to the active profile. Keeping it out
+  // of selected state prevents the message loader from reading another
+  // profile's conversation during that validation window.
+  const restoredHermesSessionIdRef = useRef<string | undefined>(
+    initialSessionId || startInNewSessionMode ? undefined : readLastOpenSessionId(),
+  );
   const [selectedHermesSessionId, setSelectedHermesSessionId] = useState<string | undefined>(
-    () => initialSessionId ?? (startInNewSessionMode ? undefined : readLastOpenSessionId()),
+    initialSessionId,
   );
   const selectedHermesSessionIdRef = useRef<string | undefined>(selectedHermesSessionId);
   const lastAutoSubmittedRef = useRef<{ prompt: string; at: number }>();
@@ -3761,43 +3775,79 @@ export function AgentWorkspace({
     async (
       options: { suppressStartupRequestError?: boolean; suppressSessionGoneError?: boolean } = {},
     ) => {
-      if (!bridge.running) return "skipped";
+      if (!bridge.running || !activeHermesProfile.confirmed) return "skipped";
       let keepLoading = false;
       setHermesSessionsLoading(true);
       try {
-        const sessions = applySessionTitleOverrides(await listHermesSessions());
+        const [listedSessions, assignments] = await Promise.all([
+          listHermesSessions(),
+          listSessionProfiles(),
+        ]);
+        const profiles = sessionProfileMap(assignments);
+        const activeProfile = activeHermesProfile.name;
+        const sessions = applySessionTitleOverrides(
+          filterAgentSessionsForProfile(listedSessions, profiles, activeProfile),
+        );
+        profileOwnedSessionIdsRef.current = new Set(
+          activeProfile === "default"
+            ? []
+            : assignments
+                .filter((assignment) => assignment.profile === activeProfile)
+                .map((assignment) => assignment.sessionId),
+        );
         hermesSessionsHydratedRef.current = true;
         setHermesSessionsHydrated(true);
         const pendingMessages = pendingHermesMessagesRef.current;
         const selectedSessionId = selectedHermesSessionIdRef.current;
+        const selectedProfileSessionId =
+          selectedSessionId &&
+          sessionMatchesProfile({ id: selectedSessionId }, profiles, activeProfile)
+            ? selectedSessionId
+            : undefined;
         const workingSessions = workingSessionIdsRef.current;
         const waitingSessions = waitingSessionIdsRef.current;
-        setHermesSessionItems((current) =>
-          mergeActiveHermesSessions(sessions, current, {
-            selectedSessionId,
-            workingSessionIds: workingSessions,
-            waitingSessionIds: waitingSessions,
-            pendingMessages,
-            defaultModelId: defaultGenerationModelIdRef.current,
-          }),
+        const currentProfileSessionIds = new Set(
+          hermesSessionItemsRef.current
+            .filter((session) => sessionMatchesProfile(session, profiles, activeProfile))
+            .map((session) => session.id),
         );
+        setHermesSessionItems((current) =>
+          mergeActiveHermesSessions(
+            sessions,
+            current.filter((session) => sessionMatchesProfile(session, profiles, activeProfile)),
+            {
+              selectedSessionId: selectedProfileSessionId,
+              workingSessionIds: workingSessions,
+              waitingSessionIds: waitingSessions,
+              pendingMessages,
+              defaultModelId: defaultGenerationModelIdRef.current,
+            },
+          ),
+        );
+        const restoredSessionId = restoredHermesSessionIdRef.current;
+        restoredHermesSessionIdRef.current = undefined;
         setSelectedHermesSessionId((current) => {
           if (newSessionModeRef.current) {
             selectedHermesSessionIdRef.current = undefined;
             return undefined;
           }
+          let candidate = current ?? restoredSessionId;
+          const candidateIsCurrent = candidate !== undefined && candidate === current;
+          if (candidate && !sessionMatchesProfile({ id: candidate }, profiles, activeProfile)) {
+            forgetLastOpenSessionId(candidate);
+            candidate = undefined;
+          }
           if (
-            current &&
-            (sessions.some((session) => session.id === current) ||
-              shouldRetainHermesSessionId(current, {
-                selectedSessionId: current,
-                workingSessionIds: workingSessions,
-                waitingSessionIds: waitingSessions,
-                pendingMessages,
-              }))
+            candidate &&
+            (sessions.some((session) => session.id === candidate) ||
+              candidateIsCurrent ||
+              currentProfileSessionIds.has(candidate))
           ) {
-            selectedHermesSessionIdRef.current = current;
-            return current;
+            selectedHermesSessionIdRef.current = candidate;
+            return candidate;
+          }
+          if (restoredSessionId && candidate === restoredSessionId) {
+            forgetLastOpenSessionId(restoredSessionId);
           }
           const taskSession = selectedTask?.hermesSessionId;
           if (taskSession && sessions.some((session) => session.id === taskSession)) {
@@ -3833,7 +3883,12 @@ export function AgentWorkspace({
         }
       }
     },
-    [bridge.running, selectedTask?.hermesSessionId],
+    [
+      activeHermesProfile.confirmed,
+      activeHermesProfile.name,
+      bridge.running,
+      selectedTask?.hermesSessionId,
+    ],
   );
 
   useEffect(() => {
@@ -4374,7 +4429,7 @@ export function AgentWorkspace({
   }, []);
 
   useEffect(() => {
-    if (!bridge.running || !selectedHermesSessionId) return;
+    if (!bridge.running || !hermesSessionsHydrated || !selectedHermesSessionId) return;
     if (isProvisionalHermesSessionId(selectedHermesSessionId)) return;
     let cancelled = false;
     listSessionMessagesOrdered(selectedHermesSessionId)
@@ -4459,13 +4514,18 @@ export function AgentWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [bridge.running, selectedHermesSessionId]);
+  }, [bridge.running, hermesSessionsHydrated, selectedHermesSessionId]);
 
   useEffect(() => {
-    if (!bridge.running || !selectedHermesSessionId) return;
+    if (!bridge.running || !hermesSessionsHydrated || !selectedHermesSessionId) return;
     if (isProvisionalHermesSessionId(selectedHermesSessionId)) return;
     void loadFilesystemSnapshot();
-  }, [bridge.running, selectedHermesSessionId, selectedHermesMessages.length]);
+  }, [
+    bridge.running,
+    hermesSessionsHydrated,
+    selectedHermesSessionId,
+    selectedHermesMessages.length,
+  ]);
 
   useEffect(() => {
     if (!selectedTaskId) return;

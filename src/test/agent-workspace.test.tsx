@@ -102,6 +102,7 @@ const mocks = vi.hoisted(() => ({
   hermesAgentCliAccess: vi.fn(),
   setHermesAgentCliAccess: vi.fn(),
   listHermesSessions: vi.fn(),
+  listSessionProfiles: vi.fn(),
   gatewayRequest: vi.fn(),
   markAgentRunSucceeded: vi.fn(),
   releaseAgentRunSettlement: vi.fn(),
@@ -166,6 +167,7 @@ vi.mock("../lib/tauri", () => ({
   importHermesBridgeFileBytes: mocks.importHermesBridgeFileBytes,
   listVeniceModels: mocks.listVeniceModels,
   listAgentTasks: mocks.listAgentTasks,
+  listSessionProfiles: mocks.listSessionProfiles,
   downloadHermesBridgeFile: mocks.downloadHermesBridgeFile,
   osAccountsUpgrade: mocks.osAccountsUpgrade,
   providerModelSettings: mocks.providerModelSettings,
@@ -591,6 +593,7 @@ describe("AgentWorkspace", () => {
       return { running: true, connection, connections: [connection] };
     });
     mocks.listHermesSessions.mockResolvedValue([existingSession]);
+    mocks.listSessionProfiles.mockResolvedValue([]);
     mocks.listHermesSessionMessages.mockResolvedValue([]);
     mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
     mocks.hermesBridgeSkills.mockResolvedValue([]);
@@ -4528,6 +4531,33 @@ describe("AgentWorkspace", () => {
     await waitFor(() => expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith("session-1"));
     expect(mocks.listHermesSessionMessages).not.toHaveBeenCalledWith("session-2");
     expect(screen.queryByText("Newer session")).toBeNull();
+  });
+
+  it("discards a restored session that belongs to another profile", async () => {
+    setActiveHermesProfileName("profile-b");
+    window.localStorage.setItem("june:agent:last-open-session", "session-1");
+    mocks.listHermesSessions.mockResolvedValue([
+      existingSession,
+      {
+        id: "session-2",
+        title: "Profile B session",
+        preview: "Private profile B work",
+        last_active: "2026-06-05T12:00:00Z",
+      },
+    ]);
+    mocks.listSessionProfiles.mockResolvedValue([
+      { sessionId: "session-1", profile: "profile-a" },
+      { sessionId: "session-2", profile: "profile-b" },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Profile B session")).toBeInTheDocument();
+    await waitFor(() => expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith("session-2"));
+    expect(mocks.listHermesSessionMessages).not.toHaveBeenCalledWith("session-1");
+    await waitFor(() =>
+      expect(window.localStorage.getItem("june:agent:last-open-session")).toBe("session-2"),
+    );
   });
 
   it("starts the runtime and restores messages after a full app relaunch", async () => {
@@ -9286,6 +9316,11 @@ describe("AgentWorkspace", () => {
       connections: [connection],
     });
     mocks.invoke.mockResolvedValue({ active: "research", current: "default" });
+    setActiveHermesProfileName("research");
+    mocks.listSessionProfiles.mockResolvedValue([
+      { sessionId: "session-1", profile: "research" },
+      { sessionId: "session-2", profile: "research" },
+    ]);
 
     render(<AgentWorkspace initialSession={existingSession} />);
 
