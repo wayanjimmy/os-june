@@ -58,6 +58,7 @@ const NOTION_READ_TOOL_ALLOWLIST: &[&str] = &[
     "notion-get-view-configuration-dsl",
 ];
 const NOTION_ACTION_TOOL_ALLOWLIST: &[&str] = &["notion-create-pages", "notion-update-page"];
+const NOTION_DESTRUCTIVE_UPDATE_FIELDS: &[&str] = &["erase_content", "in_trash", "is_archived"];
 const NOTION_ACTIONS_SERVER_NAME: &str = "june_notion_actions";
 
 static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
@@ -1274,6 +1275,14 @@ fn preflight_update_page_arguments(arguments: &serde_json::Value) -> Result<(), 
             "Notion page updates require a top-level page_id target.",
         ));
     }
+    if object.iter().any(|(key, value)| {
+        NOTION_DESTRUCTIVE_UPDATE_FIELDS.contains(&key.as_str()) && !value.is_null()
+    }) {
+        return Err(AppError::new(
+            "notion_update_page_destructive_fields",
+            "Notion page updates cannot archive, trash, or erase content in this preview.",
+        ));
+    }
     let has_change = object
         .iter()
         .any(|(key, value)| key.as_str() != "page_id" && !value.is_null());
@@ -1845,6 +1854,24 @@ mod tests {
         assert_eq!(update_page_target(&arguments).as_deref(), Some("page-123"));
         assert!(preflight_update_page_arguments(&arguments).is_ok());
         assert!(preview_update_page_action(&arguments).contains("Target: page-123"));
+    }
+
+    #[test]
+    fn update_page_rejects_destructive_fields() {
+        for field in NOTION_DESTRUCTIVE_UPDATE_FIELDS {
+            let arguments = serde_json::json!({
+                "page_id": "page-123",
+                (*field): true,
+                "title": "Updated title"
+            });
+
+            assert_eq!(
+                preflight_update_page_arguments(&arguments)
+                    .unwrap_err()
+                    .code,
+                "notion_update_page_destructive_fields"
+            );
+        }
     }
 
     #[test]
