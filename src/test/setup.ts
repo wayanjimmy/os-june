@@ -48,9 +48,12 @@ if (!window.matchMedia) {
 // and emits an ExperimentalWarning). Vitest's populateGlobal skips window keys
 // that already exist on the Node global, so jsdom's real Storage is shadowed
 // and unrecoverable there; this shim is the only storage the suite gets. It
-// must therefore be spec-faithful: stored keys live as own enumerable
-// properties (so `Object.keys(localStorage)` returns stored keys, like a real
-// Storage) and methods live on a prototype (so enumeration never sees them).
+// must therefore be spec-faithful: an internal Map is the source of truth,
+// and stored keys are mirrored as own enumerable properties (so
+// `Object.keys(localStorage)` returns stored keys, like a real Storage) -
+// except keys that collide with an interface member (e.g. "getItem"), which
+// per WebIDL named-property semantics never shadow the method and stay hidden
+// from enumeration while remaining retrievable via getItem.
 // Note it is still not `instanceof Storage`; tests that spy on storage keep
 // the `instanceof Storage ? Storage.prototype : window.localStorage` branch.
 if (
@@ -58,26 +61,34 @@ if (
   !globalThis.localStorage ||
   typeof globalThis.localStorage.clear !== "function"
 ) {
+  const values = new Map<string, string>();
   const storageProto = {
     clear(this: Record<string, string>) {
+      values.clear();
       for (const key of Object.keys(this)) {
         delete this[key];
       }
     },
-    getItem(this: Record<string, string>, key: string) {
-      return Object.hasOwn(this, key) ? String(this[key]) : null;
+    getItem(key: string) {
+      return values.get(String(key)) ?? null;
     },
-    key(this: Record<string, string>, index: number) {
-      return Object.keys(this)[index] ?? null;
+    key(index: number) {
+      return Array.from(values.keys())[index] ?? null;
     },
     get length() {
-      return Object.keys(this).length;
+      return values.size;
     },
     removeItem(this: Record<string, string>, key: string) {
-      delete this[key];
+      values.delete(String(key));
+      if (!(key in storageProto)) {
+        delete this[key];
+      }
     },
     setItem(this: Record<string, string>, key: string, value: string) {
-      this[key] = String(value);
+      values.set(String(key), String(value));
+      if (!(key in storageProto)) {
+        this[key] = String(value);
+      }
     },
   };
   Object.defineProperty(globalThis, "localStorage", {

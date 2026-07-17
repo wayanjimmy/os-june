@@ -37,6 +37,19 @@ describe("test-global localStorage is spec-faithful", () => {
     expect(localStorage.key(2)).toBeNull();
   });
 
+  it("never lets a method-named key shadow the interface member", () => {
+    localStorage.setItem("getItem", "x");
+
+    // WebIDL named-property semantics: the method stays callable, the value
+    // is retrievable via getItem, and the key is hidden from enumeration.
+    expect(typeof localStorage.getItem).toBe("function");
+    expect(localStorage.getItem("getItem")).toBe("x");
+    expect(Object.keys(localStorage)).not.toContain("getItem");
+
+    localStorage.removeItem("getItem");
+    expect(localStorage.getItem("getItem")).toBeNull();
+  });
+
   it("round-trips items and clears", () => {
     localStorage.setItem("june.spec-probe.alpha", "value");
     expect(localStorage.getItem("june.spec-probe.alpha")).toBe("value");
