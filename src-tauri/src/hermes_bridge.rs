@@ -656,6 +656,10 @@ pub struct HermesBridge {
     /// per-process proxy would rewrite the file under the other process.
     /// Started lazily on the first spawn, lives until app shutdown.
     provider_proxy: Mutex<Option<SharedProviderProxy>>,
+    /// Last connection June used to supervise the launchd routine Gateway.
+    /// The gateway may outlive both interactive bridge modes, but its
+    /// lifecycle CLI still needs the isolated Hermes home and command.
+    routine_gateway_connection: Mutex<Option<HermesBridgeConnection>>,
     recorder_requests: Arc<Mutex<HashMap<String, oneshot::Sender<AgentRecorderResolution>>>>,
     /// Recently delivered recorder request ids (see
     /// `recorder_request_recently_completed`).
@@ -1288,6 +1292,8 @@ pub fn start_on_app_start(app: &tauri::App) {
                     "failed to start Hermes messaging gateway during app startup: {}",
                     error.message
                 );
+            } else if let Ok(mut gateway_connection) = bridge.routine_gateway_connection.lock() {
+                *gateway_connection = Some(connection.clone());
             }
         }
     });
@@ -1302,7 +1308,15 @@ pub async fn ensure_hermes_bridge_gateway(bridge: State<'_, HermesBridge>) -> Re
             "Hermes bridge is not running.",
         ));
     };
-    ensure_hermes_gateway_running(connection).await
+    ensure_hermes_gateway_running(connection).await?;
+    let mut gateway_connection = bridge.routine_gateway_connection.lock().map_err(|_| {
+        AppError::new(
+            "hermes_gateway_state_failed",
+            "June could not retain the routine gateway state.",
+        )
+    })?;
+    *gateway_connection = Some(connection.clone());
+    Ok(())
 }
 
 #[tauri::command]
@@ -2004,9 +2018,10 @@ fn runtime_apply_command_error(error: AppError) -> AppError {
 }
 
 /// Re-render June-owned MCP policy for every live mode while preserving each
-/// process's project directory. Computer use uses the same restart seam as
-/// connectors, but its broker independently fails closed immediately on grant
-/// revocation even if a runtime restart later fails.
+/// process's project directory and restart the known routine Gateway. Computer
+/// use uses the same restart seam as connectors, but its broker independently
+/// fails closed immediately on grant revocation even if a runtime restart later
+/// fails.
 pub(crate) async fn apply_runtime_config_change(
     app: &AppHandle,
     bridge: &HermesBridge,
@@ -2042,7 +2057,18 @@ pub(crate) async fn reapply_hermes_runtime(
     bridge: &HermesBridge,
 ) -> Result<(), AppError> {
     let _reapply_guard = REAPPLY_RUNTIME_LOCK.lock().await;
-    let connections: Vec<(bool, Option<String>)> = live_connections(bridge)?
+    let live_connections = live_connections(bridge)?;
+    // The launchd routine Gateway is a separate long-lived process. Retain a
+    // bridge connection before restarting dashboard modes so June can invoke
+    // its lifecycle command from the unsandboxed app process afterwards.
+    let gateway_connection = live_connections.first().cloned().or_else(|| {
+        bridge
+            .routine_gateway_connection
+            .lock()
+            .ok()
+            .and_then(|connection| connection.clone())
+    });
+    let connections: Vec<(bool, Option<String>)> = live_connections
         .iter()
         .map(|connection| (connection.full_mode, connection.cwd.clone()))
         .collect();
@@ -2075,13 +2101,15 @@ pub(crate) async fn reapply_hermes_runtime(
             first_error.get_or_insert(error);
         }
     }
-    // The long-lived routine Gateway is deliberately not restarted here. Both
-    // known Hermes restart paths are unsafe for a Settings apply: the CLI can
-    // enter an interactive service-install flow when its service state drifts,
-    // while `/api/gateway/restart` launches an unsupervised replacement from
-    // the dying dashboard process. Keep interactive Hermes stable by limiting
-    // this operation to June-supervised Bridge modes; routine configuration is
-    // picked up on the Gateway's next normal lifecycle.
+    if let Some(connection) = gateway_connection {
+        if let Err(error) = restart_hermes_gateway(&connection).await {
+            tracing::warn!(
+                ?error,
+                "reapply: restarting the routine gateway failed after config changed"
+            );
+            first_error.get_or_insert(error);
+        }
+    }
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -6002,6 +6030,16 @@ async fn ensure_hermes_gateway_running(
     wait_for_hermes_gateway(connection).await
 }
 
+/// Restarts the known routine Gateway from June's unsandboxed parent process.
+/// Unlike the dashboard API restart endpoint, this direct non-interactive CLI
+/// invocation is supervised by June and preserves launchd ownership. Its
+/// command must not query the dashboard: reapply has already replaced that
+/// dashboard connection by the time the routine service is restarted.
+async fn restart_hermes_gateway(connection: &HermesBridgeConnection) -> Result<(), AppError> {
+    let cmd = hermes_gateway_lifecycle_command(connection, "restart");
+    run_hermes_gateway_lifecycle_command(cmd, "restart").await
+}
+
 async fn hermes_gateway_running(connection: &HermesBridgeConnection) -> Result<bool, AppError> {
     let status =
         hermes_connection_json(connection, reqwest::Method::GET, "/api/status", None).await?;
@@ -6100,8 +6138,15 @@ async fn run_hermes_gateway_lifecycle_command(
 }
 
 fn hermes_gateway_start_command(connection: &HermesBridgeConnection) -> Command {
+    hermes_gateway_lifecycle_command(connection, "start")
+}
+
+fn hermes_gateway_lifecycle_command(
+    connection: &HermesBridgeConnection,
+    action: &'static str,
+) -> Command {
     let hermes_home = PathBuf::from(&connection.hermes_home);
-    let mut cmd = build_hermes_gateway_start_command(connection, &hermes_home);
+    let mut cmd = build_hermes_gateway_lifecycle_command(connection, &hermes_home, action);
     attach_gateway_lifecycle_log(&mut cmd, &hermes_home);
     cmd
 }
@@ -8633,8 +8678,9 @@ fn sync_hermes_config_with_external_dirs(
     let mut merged =
         serde_yaml::from_str::<serde_yaml::Value>(&merge_hermes_config(&config_path, &config))
             .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
-    let repaired_invalid_shape = apply_memory_toolset_policy(&mut merged, memory_enabled);
-    apply_obsidian_skill_policy(&mut merged);
+    let repaired_memory_shape = apply_memory_toolset_policy(&mut merged, memory_enabled);
+    let repaired_obsidian_shape = apply_obsidian_skill_policy(&mut merged);
+    let repaired_invalid_shape = repaired_memory_shape || repaired_obsidian_shape;
     if repaired_invalid_shape && !source_backup_created {
         match fs::read(&config_path) {
             Ok(existing) => {
@@ -8740,26 +8786,36 @@ fn apply_memory_toolset_policy(config: &mut serde_yaml::Value, memory_enabled: b
 /// The pinned upstream `obsidian` skill guesses an ambient vault path. June
 /// owns the replacement under a distinct name, so disable only that upstream
 /// identity while preserving every unrelated user skill preference.
-fn apply_obsidian_skill_policy(config: &mut serde_yaml::Value) {
+fn apply_obsidian_skill_policy(config: &mut serde_yaml::Value) -> bool {
     let serde_yaml::Value::Mapping(root) = config else {
-        return;
+        return false;
     };
     let skills_key = serde_yaml::Value::String("skills".to_string());
     let disabled_key = serde_yaml::Value::String("disabled".to_string());
     let skills = root
         .entry(skills_key)
         .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
-    let Some(skills) = skills.as_mapping_mut() else {
-        return;
-    };
+    let mut repaired_invalid_shape = false;
+    if !skills.is_mapping() {
+        *skills = serde_yaml::Value::Mapping(Default::default());
+        repaired_invalid_shape = true;
+    }
+    let skills = skills
+        .as_mapping_mut()
+        .expect("skills was normalized to a mapping");
     let disabled = skills
         .entry(disabled_key)
         .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
-    let Some(disabled) = disabled.as_sequence_mut() else {
-        return;
-    };
+    if !disabled.is_sequence() {
+        *disabled = serde_yaml::Value::Sequence(Vec::new());
+        repaired_invalid_shape = true;
+    }
+    let disabled = disabled
+        .as_sequence_mut()
+        .expect("skills.disabled was normalized to a sequence");
     disabled.retain(|item| item.as_str() != Some("obsidian"));
     disabled.push(serde_yaml::Value::String("obsidian".to_string()));
+    repaired_invalid_shape
 }
 
 fn hermes_config_has_invalid_root(config: &serde_yaml::Value) -> bool {
@@ -8775,6 +8831,18 @@ fn memory_policy_has_invalid_shape(config: &serde_yaml::Value) -> bool {
     };
     agent
         .get(serde_yaml::Value::String("disabled_toolsets".to_string()))
+        .is_some_and(|disabled| !disabled.is_sequence())
+}
+
+fn obsidian_skill_policy_has_invalid_shape(config: &serde_yaml::Value) -> bool {
+    let Some(skills) = config.get("skills") else {
+        return false;
+    };
+    let Some(skills) = skills.as_mapping() else {
+        return true;
+    };
+    skills
+        .get(serde_yaml::Value::String("disabled".to_string()))
         .is_some_and(|disabled| !disabled.is_sequence())
 }
 
@@ -8801,6 +8869,7 @@ fn preserve_replaced_hermes_config_if_needed(
         Ok(ref config) => {
             hermes_config_has_invalid_root(config)
                 || (!memory_enabled && memory_policy_has_invalid_shape(config))
+                || obsidian_skill_policy_has_invalid_shape(config)
         }
         Err(_) => true,
     };
@@ -10537,17 +10606,10 @@ async fn handle_june_provider_connection(
             write_json_response(&mut stream, 200, result).await?;
         }
         ("GET", "/v1/obsidian/vault") => {
-            let body = match state.app.as_ref() {
-                Some(app) => serde_json::to_value(
-                    crate::obsidian::discovery_for_app(app)
-                        .map_err(|error| io::Error::other(error.message))?,
-                )
-                .map_err(io::Error::other)?,
-                None => {
-                    serde_json::json!({ "connected": false, "available": false, "vault": null })
-                }
-            };
-            write_json_response(&mut stream, 200, body).await?;
+            let (status, body) = obsidian_discovery_response(
+                state.app.as_ref().map(crate::obsidian::discovery_for_app),
+            );
+            write_json_response(&mut stream, status, body).await?;
         }
         ("POST", path) if matches!(path, "/v1/memory/save" | "/v1/memory/forget") => {
             handle_memory_route(&mut stream, &state, path, &request.body).await?;
@@ -10567,6 +10629,53 @@ async fn handle_june_provider_connection(
         }
     }
     Ok(())
+}
+
+/// Keeps loopback clients on the HTTP contract even when native vault state
+/// cannot be read. The adapter can distinguish a normal disconnected result
+/// (200) from a temporary June failure (503) without handling a dropped TCP
+/// connection as malformed MCP output.
+fn obsidian_discovery_response(
+    discovery: Option<Result<crate::obsidian::ObsidianDiscovery, AppError>>,
+) -> (u16, serde_json::Value) {
+    let discovery = match discovery {
+        Some(Ok(discovery)) => discovery,
+        Some(Err(error)) => {
+            return (
+                503,
+                serde_json::json!({
+                    "error": {
+                        "message": "Obsidian vault discovery is unavailable.",
+                        "type": error.code,
+                    }
+                }),
+            );
+        }
+        None => {
+            return (
+                200,
+                serde_json::json!({ "connected": false, "available": false, "vault": null }),
+            );
+        }
+    };
+    // `ObsidianDiscovery` is only Strings, booleans, and options, so this
+    // conversion is infallible in practice. Keep an explicit JSON error if a
+    // future response shape becomes non-serializable rather than dropping the
+    // loopback connection.
+    serde_json::to_value(discovery).map_or_else(
+        |_| {
+            (
+                500,
+                serde_json::json!({
+                    "error": {
+                        "message": "Obsidian vault discovery could not be encoded.",
+                        "type": "obsidian_discovery_serialization_failed",
+                    }
+                }),
+            )
+        },
+        |body| (200, body),
+    )
 }
 
 async fn write_not_found_response(stream: &mut tokio::net::TcpStream) -> io::Result<()> {
@@ -14686,8 +14795,13 @@ assert capped["has_more"] is True, capped
         let mut stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("connect proxy");
+        let token = if path == "/v1/obsidian/vault" {
+            "obsidian-token"
+        } else {
+            "proxy-token"
+        };
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer proxy-token\r\nContent-Length: {}\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         stream
@@ -16435,6 +16549,48 @@ mcp_servers:
     }
 
     #[test]
+    fn obsidian_skill_policy_repairs_invalid_shapes_and_preserves_source() {
+        for source in [
+            "skills: false\n",
+            "skills:\n  disabled: false\n  config:\n    user-skill:\n      enabled: true\n",
+        ] {
+            let mut config: serde_yaml::Value = serde_yaml::from_str(source).expect("valid yaml");
+            assert!(apply_obsidian_skill_policy(&mut config));
+            assert_eq!(
+                config["skills"]["disabled"],
+                serde_yaml::from_str::<serde_yaml::Value>("[obsidian]")
+                    .expect("expected disabled skill")
+            );
+            if source.contains("user-skill") {
+                assert_eq!(config["skills"]["config"]["user-skill"]["enabled"], true);
+            }
+
+            let home = tempfile::tempdir().expect("tempdir");
+            let config_path = home.path().join("config.yaml");
+            std::fs::write(&config_path, source).expect("seed malformed skill policy");
+            assert!(
+                preserve_replaced_hermes_config_if_needed(&config_path, true)
+                    .expect("preserve malformed skill policy")
+            );
+            let backups = std::fs::read_dir(home.path())
+                .expect("read config directory")
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with(HERMES_CONFIG_CORRUPT_BACKUP_PREFIX)
+                                && name.ends_with(".bak")
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(backups.len(), 1);
+            assert_eq!(std::fs::read(&backups[0]).expect("read backup"), source);
+        }
+    }
+
+    #[test]
     fn direct_memory_policy_update_preserves_gateway_only_config_state() {
         let home = tempfile::tempdir().expect("tempdir");
         let config_path = home.path().join("config.yaml");
@@ -17685,6 +17841,26 @@ mcp_servers:
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/hermes-home")));
     }
 
+    #[test]
+    fn gateway_restart_uses_the_same_june_supervised_lifecycle_command() {
+        let connection = test_gateway_connection();
+        let cmd = hermes_gateway_lifecycle_command(&connection, "restart");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(cmd.get_program(), "/opt/hermes/bin/hermes");
+        assert_eq!(args, ["gateway", "restart"]);
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(key, _)| key.to_string_lossy() == "HERMES_NONINTERACTIVE")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned()),
+            Some("1".to_string())
+        );
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn gateway_start_reports_nonzero_exit() {
@@ -18893,6 +19069,36 @@ mcp_servers:
             );
             assert!(response.contains("Not found"));
         }
+    }
+
+    #[tokio::test]
+    async fn obsidian_proxy_returns_json_for_disconnected_discovery() {
+        let response = provider_proxy_response("/v1/obsidian/vault", "GET", "", false).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(
+            response.contains("Content-Type: application/json"),
+            "{response}"
+        );
+        let body = response.split("\r\n\r\n").nth(1).expect("response body");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).expect("JSON response"),
+            serde_json::json!({ "connected": false, "available": false, "vault": null })
+        );
+    }
+
+    #[test]
+    fn obsidian_discovery_failure_is_a_json_service_response() {
+        let (status, body) = obsidian_discovery_response(Some(Err(AppError::new(
+            "obsidian_config_unavailable",
+            "read failed",
+        ))));
+
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["type"], "obsidian_config_unavailable");
+        assert_eq!(
+            body["error"]["message"],
+            "Obsidian vault discovery is unavailable."
+        );
     }
 
     #[test]
