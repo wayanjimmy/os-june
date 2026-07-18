@@ -310,7 +310,8 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: .tauri-hermes/hermes
-          key: hermes-bundle-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bundle-hermes-runtime.sh', 'src-tauri/src/hermes_bridge.rs') }}
+          # v2 is the dual-runtime layout. Never restore a host-only v1 cache.
+          key: hermes-bundle-macos-universal-v2-${{ runner.os }}-${{ hashFiles('scripts/bundle-hermes-runtime.sh', 'scripts/audit-hermes-runtime.sh', 'scripts/hermes-native-import-smoke.py', 'src-tauri/src/hermes_bridge.rs', 'src-tauri/src/hermes/apply_june_patches.py', 'src-tauri/src/hermes/sitecustomize.py') }}
 
       - name: Bundle Hermes runtime into app resources
         env:
@@ -370,6 +371,19 @@ jobs:
             fi
             exit 1
           fi
+
+          apps=(
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/release/bundle/macos/*.app
+          )
+          if [ "${#apps[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one rc app bundle, found ${#apps[@]}"
+            exit 1
+          fi
+          app="${apps[0]}"
+          ./scripts/audit-hermes-runtime.sh \
+            "$app/Contents/Resources/native/hermes" --require-signed
+          codesign --verify --deep --strict --verbose=2 "$app"
 
           dmg="${dmgs[0]}"
           xcrun notarytool submit "$dmg" \
