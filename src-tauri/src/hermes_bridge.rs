@@ -1759,6 +1759,7 @@ async fn ensure_provider_proxy(
                 recorder_token: proxy.recorder_token.clone(),
                 connector_token: proxy.connector_token.clone(),
                 computer_use_token: proxy.computer_use_token.clone(),
+                obsidian_token: proxy.obsidian_token.clone(),
             });
         }
     }
@@ -1823,6 +1824,7 @@ struct SharedProviderProxyInfo {
     recorder_token: String,
     connector_token: String,
     computer_use_token: String,
+    obsidian_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2029,7 +2031,6 @@ pub(crate) async fn apply_runtime_config_change(
     reapply_hermes_runtime(app, bridge).await
 }
 
-#[tauri::command]
 /// Serializes `reapply_hermes_runtime` so two rapid settings toggles cannot
 /// interleave their stop/restart cycles.
 static REAPPLY_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -16586,7 +16587,10 @@ mcp_servers:
                 })
                 .collect::<Vec<_>>();
             assert_eq!(backups.len(), 1);
-            assert_eq!(std::fs::read(&backups[0]).expect("read backup"), source);
+            assert_eq!(
+                std::fs::read(&backups[0]).expect("read backup"),
+                source.as_bytes()
+            );
         }
     }
 
