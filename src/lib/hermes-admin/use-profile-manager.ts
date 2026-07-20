@@ -278,6 +278,14 @@ export class ProfileManagerController {
     this.error = null;
     this.recompute();
     try {
+      // Re-check the sticky active profile at confirm time, not just when the
+      // dialog opened: an out-of-band switch (Hermes CLI, dashboard) can make
+      // the target active while the dialog sits open, and the data mutations
+      // below are irreversible. Fail closed on a failed read.
+      const active = await this.engine.client.profiles.active();
+      if (active.active === name || active.current === name) {
+        throw new Error(`"${name}" became the active profile. Switch profiles, then delete it.`);
+      }
       if (disposition === "move") {
         await moveProfileDataToDefault(name);
         dispatchProfileDataChanged("default");

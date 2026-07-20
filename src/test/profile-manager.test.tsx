@@ -314,6 +314,42 @@ describe("profile manager - hook flows", () => {
     controller.dispose();
   });
 
+  it("refuses to confirm removal when the target became active out of band", async () => {
+    mocks.profileDataSummary.mockResolvedValue({
+      notes: 1,
+      dictation: 0,
+      folders: 0,
+      sessions: 1,
+      memories: 0,
+    });
+    const harness = makeAdminHarness({
+      profiles: [
+        { name: "default", active: true },
+        { name: "research", active: false },
+      ],
+      activeProfile: "default",
+    });
+    const controller = new ProfileManagerController(harness as ProfileManagerEngine);
+    await controller.load();
+    await controller.beginRemove("research");
+    // Out-of-band switch (Hermes CLI / dashboard) while the dialog sits open.
+    await (harness as ProfileManagerEngine).client.profiles.activate("research");
+
+    const ok = await controller.confirmRemoval("delete");
+
+    expect(ok).toBe(false);
+    expect(mocks.moveProfileDataToDefault).not.toHaveBeenCalled();
+    expect(mocks.deleteProfileData).not.toHaveBeenCalled();
+    expect(mocks.deleteHermesSession).not.toHaveBeenCalled();
+    expect(
+      harness.server.requestLog.some(
+        (entry) => entry.method === "DELETE" && entry.path === "/api/profiles/research",
+      ),
+    ).toBe(false);
+    expect(controller.getSnapshot().error).toContain("active profile");
+    controller.dispose();
+  });
+
   it("confirm removal with delete deletes data before deleting the Hermes profile", async () => {
     mocks.profileDataSummary.mockResolvedValue({
       notes: 0,

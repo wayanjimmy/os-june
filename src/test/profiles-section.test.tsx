@@ -396,6 +396,25 @@ describe("profiles settings surface", () => {
     expect(mocks.setProfileModelOverrides).not.toHaveBeenCalled();
   });
 
+  it("never reads model overrides when copying from the default profile", async () => {
+    const user = userEvent.setup();
+    const createProfile = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProfilesSurfaceView
+        managerState={stubManager({ activeName: "default" })}
+        createProfile={createProfile}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy current settings" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(createProfile).toHaveBeenCalled());
+    expect(mocks.profileModelOverrides).not.toHaveBeenCalled();
+    expect(mocks.setProfileModelOverrides).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("bumps a colliding copy name", async () => {
     const user = userEvent.setup();
     render(

@@ -136,7 +136,7 @@ describe("HermesAdminClient — requests, auth, profile targeting", () => {
     const server = new FakeHermesServer();
     const client = createHermesAdminClient(targetForFake(server), { fetch: fetchMismatch });
     await expect(client.profiles.activate("research")).rejects.toMatchObject({
-      safeMessage: 'Hermes reports "default" as the active profile.',
+      safeMessage: '"default" is still the active profile.',
     });
     expect(fetchMismatch).toHaveBeenCalledTimes(2);
   });

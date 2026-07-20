@@ -25863,7 +25863,7 @@ button.memory-project:hover {
   gap: var(--sp-2);
   min-height: var(--control-sm);
   padding: 0 var(--sp-3);
-  border: 1px solid var(--border-subtle);
+  border: var(--border-width) solid var(--border-subtle);
   border-radius: var(--r-sm);
   background: var(--secondary);
   color: var(--secondary-foreground);
@@ -25889,7 +25889,7 @@ button.memory-project:hover {
 .profiles-footer {
   margin-top: var(--sp-2);
   padding: var(--sp-3);
-  border-top: 1px solid var(--border-subtle);
+  border-top: var(--border-width) solid var(--border-subtle);
 }
 
 .profiles-footer-actions,
@@ -25916,7 +25916,7 @@ button.memory-project:hover {
   height: var(--control-lg);
   min-width: 0;
   padding: 0 var(--sp-3);
-  border: 1px solid var(--input);
+  border: var(--border-width) solid var(--input);
   border-radius: var(--r-sm);
   background: var(--card);
   color: var(--foreground);
@@ -25943,7 +25943,7 @@ button.memory-project:hover {
 
 .profile-data-removal-warning {
   padding: var(--sp-3);
-  border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
+  border: var(--border-width) solid color-mix(in oklch, var(--destructive) 30%, transparent);
   border-radius: var(--r-md);
   background: color-mix(in oklch, var(--destructive) 12%, transparent);
   color: var(--destructive);

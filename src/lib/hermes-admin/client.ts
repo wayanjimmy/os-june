@@ -623,7 +623,7 @@ function makeProfiles(send: AdminTransport): HermesAdminClient["profiles"] {
         throw new HermesAdminError({
           endpoint: "POST /api/profiles/active",
           kind: "parse",
-          safeMessage: "Hermes could not activate that profile.",
+          safeMessage: "June could not activate that profile.",
           retryable: false,
         });
       }
@@ -640,7 +640,7 @@ function makeProfiles(send: AdminTransport): HermesAdminClient["profiles"] {
         throw new HermesAdminError({
           endpoint: "POST /api/profiles/active",
           kind: "parse",
-          safeMessage: `Hermes reports "${authoritative.active}" as the active profile.`,
+          safeMessage: `"${authoritative.active}" is still the active profile.`,
           retryable: false,
         });
       }
@@ -658,7 +658,7 @@ function makeProfiles(send: AdminTransport): HermesAdminClient["profiles"] {
         throw new HermesAdminError({
           endpoint: `DELETE /api/profiles/${name}`,
           kind: "parse",
-          safeMessage: "Hermes could not delete that profile.",
+          safeMessage: "June could not delete that profile.",
           retryable: false,
         });
       }

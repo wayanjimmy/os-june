@@ -157,7 +157,10 @@ function ProfilesListView({
       state.refresh();
       setCreateMode(null);
 
-      if (createMode === "copy") {
+      // The default profile has no per-profile overrides to copy (it uses the
+      // global model settings, which a fresh clone already follows), and the
+      // overrides command rejects "default".
+      if (createMode === "copy" && state.activeName !== "default") {
         try {
           const overrides = await profileModelOverrides(state.activeName);
           if (overrides) await setProfileModelOverrides(slug, overrides);
@@ -215,7 +218,7 @@ function ProfilesListView({
 
         {isErrored && !hasProfiles ? (
           <ErrorState
-            message={state.error ?? "Could not load profiles from Hermes."}
+            message={state.error ?? "Could not load profiles."}
             retryable
             onRetry={state.refresh}
           />
