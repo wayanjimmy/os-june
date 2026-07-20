@@ -22,7 +22,7 @@ runs under":
    consult it.
 2. **Per-session targeting** — `session.create` accepts an optional
    `profile` param; the session's agent is built and persisted against that
-   profile's home and state db, re-bound per turn. Absent the param, the
+   profile's home and state db, re-bound per agent run. Absent the param, the
    session runs under the gateway's launch profile (June's default).
 
 June keeps exactly one Hermes runtime per mode (sandboxed / unrestricted),
@@ -50,7 +50,7 @@ inside the single gateway per mode.
 ## Consequences
 
 - Two chats can run under different profiles concurrently; a switch never
-  yanks a live session to another profile. This is the behavior the per-turn
+  yanks a live session to another profile. This is the behavior the per-agent-run
   `HERMES_HOME` re-binding in the gateway is built for.
 - The sticky file and June's threaded value can only drift if something
   outside June writes the file mid-session; June re-reads it on gateway
@@ -71,15 +71,15 @@ inside the single gateway per mode.
 
 A profile's text (agent) model is Hermes state (`ProfileCreate.model`,
 `PUT /api/profiles/{name}/model`). Hermes has no concept of June's
-transcription (voice) or image models, so those are June-side per-profile
+voice (note transcription and dictation) or image models, so those are June-side per-profile
 overrides: `profile_overrides` in `provider-settings.json`, written through
 the `set_profile_model_overrides` Tauri command and resolved by the model
 accessor functions (`transcription_model()`, `image_model()`) that every
 real call already goes through.
 
 Resolution is **call-time against the sticky active profile** (the
-`active_profile` file June's switcher writes), not per-session: transcription
-is not session-bound at all, and the image tool's requests do not carry a
+`active_profile` file June's switcher writes), not per-session: note transcription and dictation
+are not session-bound at all, and the image tool's requests do not carry a
 session's profile. A profile with no override follows June's global model
 settings. The `default` profile never carries overrides. Deleting a profile
 best-effort removes its overrides.
@@ -96,7 +96,7 @@ The frontend's active-profile store confirmed only through
 start under a named profile the server is not up yet, the one
 subscribe-triggered refresh short-circuited, and the store sat unconfirmed at
 `default` — so every session-list surface filtered against the wrong profile
-until the first new session forced a re-read (meeting notes were unaffected:
+until the first new session forced a re-read (notes were unaffected:
 Rust reads the sticky file per query). Since the endpoint itself just reads
 the sticky `active_profile` file, June now exposes that read as the
 `sticky_active_profile` Tauri command and the store falls back to it whenever
@@ -104,3 +104,19 @@ the admin target is unavailable or the request fails. The REST path stays
 preferred when the server is up (it normalizes and reflects gateway state);
 the file read is the bridge-independent equivalent, not a second source of
 truth.
+
+## Addendum (2026-07-20): browser-style instant create replaces the wizard
+
+The guided create wizard (and its "Create and make active" flow above) was
+removed. Profiles now create like browser profiles: "New profile" expands
+into a single prefilled name input and creates immediately with
+`clone_from_default: true` and nothing else; "Copy current settings" creates
+with the active profile's generation provider/model and copies its June-side
+model overrides (never its data; hub skills and MCP attachments are not
+copied). Creation no longer auto-activates - the user clicks "Use". The
+default profile is skipped for the overrides copy: it has none to copy (it
+follows the global model settings, which a fresh clone already does) and the
+overrides command rejects it. Configuring a profile happens after creation by
+switching to it and using the profile-scoped settings surfaces. Hermes has no
+profile rename endpoint (the name is the slug every scoped store keys on), so
+rename stays a potential Hermes-side follow-up.

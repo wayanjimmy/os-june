@@ -3341,9 +3341,9 @@ async fn transcribe_recording_ready(app: AppHandle, recording: RecordingReadyInf
         .as_deref()
         .map(|bundle_id| is_email_app_bundle(bundle_id).then(|| APP_CONTEXT_EMAIL.to_string()))
         .unwrap_or_else(frontmost_app_context);
-    // Pin the owning profile now, like the paste target above: transcription
-    // can take seconds, and a profile switch mid-flight must not relabel this
-    // dictation's history row to the new profile.
+    // Pin the owning profile now, like the paste target above: dictation
+    // processing can take seconds, and a profile switch mid-flight must not
+    // relabel this dictation's history row to the new profile.
     let history_profile = crate::commands::active_profile(&app);
     let low_speech_evidence = recording_has_low_speech_evidence(&recording);
     if low_speech_evidence {

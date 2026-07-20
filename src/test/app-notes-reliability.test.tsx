@@ -376,7 +376,7 @@ describe("notes recording reliability", () => {
     });
   }
 
-  it("swaps meeting notes to the new profile's list when the active profile switches", async () => {
+  it("swaps notes to the new profile's list when the active profile switches", async () => {
     render(<App />);
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
 
@@ -433,7 +433,7 @@ describe("notes recording reliability", () => {
     expect(screen.queryByText("First note")).toBeNull();
   });
 
-  it("stays on meeting notes after deleting the last note", async () => {
+  it("stays on notes after deleting the last note", async () => {
     mocks.bootstrapApp.mockResolvedValue({
       folders: [],
       notes: [first],
@@ -457,7 +457,7 @@ describe("notes recording reliability", () => {
     expect(screen.getByRole("heading", { name: "Capture your first meeting" })).toBeInTheDocument();
   });
 
-  it("stays on meeting notes after bulk deleting every note", async () => {
+  it("stays on notes after bulk deleting every note", async () => {
     mocks.listNotes.mockResolvedValue({ items: [] });
 
     render(<App />);

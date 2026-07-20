@@ -9,7 +9,7 @@ ADR 0030 made a profile switch retarget the *agent runtime* (which Hermes
 profile new sessions run under, plus per-profile voice/image model overrides).
 But every piece of *user data* June stores still lives in one app-global
 SQLite database (`<app_data>/notes.sqlite3`) with **no partition key at all**:
-meeting notes, dictation history, projects/folders, and the local
+notes, dictation history, projects/folders, and the local
 agent-task mirror are shared across every profile. Switching profiles changes
 who the agent is, not what data you see. Users expect profiles to behave like
 **browser profiles** — switching to a profile shows only that profile's
@@ -17,8 +17,10 @@ notes, chats, dictation, and projects.
 
 Two ownership regimes complicate this:
 
-1. **June-DB-owned data** — notes, dictation, folders/projects, the
-   `agent_tasks` mirror. June owns the rows, so scoping is an additive column.
+1. **June-DB-owned data** — notes, dictation, folders/projects. June owns the
+   rows, so scoping is an additive column. (The local `agent_tasks` mirror
+   remains app-global for now — scoping it is a follow-up, not part of this
+   change.)
 2. **Hermes-owned chat sessions** — the real conversation lives in Hermes's
    own store inside the Hermes home; June only talks to it over REST and has
    no column to add. June already stamps `profile` on `session.create`
@@ -52,12 +54,12 @@ is likewise keyed directly on the Hermes session id, with no local sessions
 table to reference). June stamps it at session-create time — but only when the
 active profile is **confirmed** (not during the `active-hermes-profile`
 unconfirmed window) and the provisional `pending:new-session:` id has
-reconciled to the real stored session id. The chat list LEFT JOINs against the
-map and filters by the active profile; a session with no mapping row resolves
-to `default`.
+reconciled to the real stored session id. The chat list loads the mapping rows
+and filters by the active profile client-side; a session with no mapping row
+resolves to `default`.
 
 **Profile deletion prompts the user.** Deleting a profile that owns data opens
-a dialog reporting the counts (notes · chats · dictation · projects) and
+a dialog reporting the counts (notes · sessions · dictation · projects) and
 offering: **Move to default** (re-tag its rows `profile = 'default'`) or
 **Delete permanently** (remove them, behind a hard confirm), or Cancel. There
 is no silent fixed policy; the user chooses per deletion. (June still refuses
