@@ -20,6 +20,13 @@ const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
 }));
 
+// Pin BROWSER_USE_ENABLED on so the Browser use capability row stays testable
+// regardless of the committed flag value.
+vi.mock("../lib/feature-flags", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/feature-flags")>()),
+  BROWSER_USE_ENABLED: true,
+}));
+
 vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
   connectorsList: mocks.connectorsList,

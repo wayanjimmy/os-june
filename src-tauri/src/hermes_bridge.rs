@@ -3397,6 +3397,12 @@ pub async fn set_hermes_browser_access(
     bridge: State<'_, HermesBridge>,
     request: SetBrowserAccessRequest,
 ) -> Result<BrowserAccessStatus, AppError> {
+    if request.enabled && !crate::feature_flags::BROWSER_USE_ENABLED {
+        return Err(AppError::new(
+            "browser_use_disabled",
+            "Browser use is not available in this build.",
+        ));
+    }
     let path = browser_access_flag_path(&app).ok_or_else(|| {
         AppError::new(
             "browser_access_unavailable",
@@ -3489,6 +3495,12 @@ pub async fn routine_browser_access_set(
     let repos = crate::commands::repositories(&app).await?;
     let previous = repos.routine_browser_grant(job_id).await?;
     if request.enabled {
+        if !crate::feature_flags::BROWSER_USE_ENABLED {
+            return Err(AppError::new(
+                "browser_use_disabled",
+                "Browser use is not available in this build.",
+            ));
+        }
         let grant = previous.clone().unwrap_or_else(|| {
             let digest = Sha256::digest(job_id.as_bytes());
             let suffix = digest[..8]
@@ -8416,8 +8428,12 @@ fn browser_access_flag_path(app: &AppHandle) -> Option<PathBuf> {
 /// Whether the user granted Browser use (the stored Browser access grant). The
 /// flag is outside every jailed Hermes write root, but an unrestricted runtime
 /// can write it; integrity-binding both this and Agent CLI access is deferred.
+/// While the `BROWSER_USE_ENABLED` feature flag is off the grant reads as
+/// disabled regardless of the flag file, so a grant persisted by an earlier
+/// build cannot resurface a hidden capability.
 pub(crate) fn browser_access_enabled(app: &AppHandle) -> bool {
-    browser_access_flag_path(app).is_some_and(|path| path.exists())
+    crate::feature_flags::BROWSER_USE_ENABLED
+        && browser_access_flag_path(app).is_some_and(|path| path.exists())
 }
 
 /// Whether a *sandboxed* spawn on this machine would actually engage the
@@ -8911,18 +8927,25 @@ async fn sync_june_browser_mcp(
     fs::write(&script_path, JUNE_BROWSER_MCP_SCRIPT)
         .map_err(|error| AppError::new("june_browser_mcp_failed", error.to_string()))?;
 
-    let routine_grants = crate::commands::repositories(app)
-        .await?
-        .list_routine_browser_grants()
-        .await?
-        .into_iter()
-        .map(|grant| RoutineBrowserGrant {
-            job_id: grant.job_id,
-            server_name: grant.server_name,
-            token: grant.token,
-            enabled: grant.enabled,
-        })
-        .collect();
+    // While the Browser use feature flag is off, persisted routine opt-ins
+    // stay dormant: no per-routine server is rendered and the broker's grant
+    // table is replaced with nothing, so a dev-build opt-in cannot resurface.
+    let routine_grants = if crate::feature_flags::BROWSER_USE_ENABLED {
+        crate::commands::repositories(app)
+            .await?
+            .list_routine_browser_grants()
+            .await?
+            .into_iter()
+            .map(|grant| RoutineBrowserGrant {
+                job_id: grant.job_id,
+                server_name: grant.server_name,
+                token: grant.token,
+                enabled: grant.enabled,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(JuneBrowserMcpConfig {
         command: hermes_python_command(hermes_command),
@@ -10708,8 +10731,13 @@ fn sync_june_soul(
     };
     // The Browser access grant is independent of the sandbox: the broker
     // enforces it for every mode, so browser guidance rides along in both
-    // states — request-the-grant when off, use-the-tools when on.
-    let browser_section = if browser_access {
+    // states — request-the-grant when off, use-the-tools when on. While the
+    // feature flag hides Browser use entirely, neither section is rendered:
+    // the blocked variant would teach the agent to raise a request card for
+    // a setting the UI does not show.
+    let browser_section = if !crate::feature_flags::BROWSER_USE_ENABLED {
+        ""
+    } else if browser_access {
         JUNE_SOUL_BROWSER_ENABLED_MD
     } else {
         JUNE_SOUL_BROWSER_BLOCKED_MD

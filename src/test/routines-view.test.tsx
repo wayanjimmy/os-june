@@ -17,6 +17,13 @@ const mocks = vi.hoisted(() => ({
   routineDetailOnRunNow: undefined as (() => Promise<void>) | undefined,
 }));
 
+// Pin BROWSER_USE_ENABLED on so the routine Browser use opt-in stays testable
+// regardless of the committed flag value.
+vi.mock("../lib/feature-flags", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/feature-flags")>()),
+  BROWSER_USE_ENABLED: true,
+}));
+
 vi.mock("../lib/hermes-routines", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/hermes-routines")>()),
   ...mocks,

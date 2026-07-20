@@ -213,11 +213,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: mocks.openFileDialog,
 }));
 
-// Pin VIDEO_GENERATION_ENABLED on so the /video surfaces stay testable
-// regardless of the committed flag value.
+// Pin VIDEO_GENERATION_ENABLED and BROWSER_USE_ENABLED on so the /video and
+// Browser use surfaces stay testable regardless of the committed flag values.
 vi.mock("../lib/feature-flags", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/feature-flags")>()),
   VIDEO_GENERATION_ENABLED: true,
+  BROWSER_USE_ENABLED: true,
 }));
 
 vi.mock("../lib/hermes-adapter", async (importOriginal) => ({

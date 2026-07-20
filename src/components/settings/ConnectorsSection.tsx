@@ -29,6 +29,7 @@ import { Dialog } from "../ui/Dialog";
 import { InlineNotice } from "../ui/InlineNotice";
 import { toast } from "../ui/Toaster";
 import { SettingsPageHeader } from "./AppSettings";
+import { BROWSER_USE_ENABLED } from "../../lib/feature-flags";
 import { BrowserUseCapabilityRow } from "./BrowserExtensionSettings";
 
 // Read-only by default: Google gets mail read and calendar read, Linear gets
@@ -449,7 +450,11 @@ export function ConnectorsSection() {
       <SettingsPageHeader
         id="connectors-heading"
         title="Connectors"
-        blurb="Set up Browser use and connect Google and Linear in local mode. Connector tokens stay in your Mac's Keychain, and provider calls go straight from this device. When an AI feature uses connector content, that content goes to your chosen model provider. Choose a local model to keep inference on this device."
+        blurb={
+          BROWSER_USE_ENABLED
+            ? "Set up Browser use and connect Google and Linear in local mode. Connector tokens stay in your Mac's Keychain, and provider calls go straight from this device. When an AI feature uses connector content, that content goes to your chosen model provider. Choose a local model to keep inference on this device."
+            : "Connect Google and Linear in local mode. Connector tokens stay in your Mac's Keychain, and provider calls go straight from this device. When an AI feature uses connector content, that content goes to your chosen model provider. Choose a local model to keep inference on this device."
+        }
       />
 
       {notConfigured ? (
@@ -465,7 +470,7 @@ export function ConnectorsSection() {
 
       <div className="settings-card connectors-card">
         <ul className="connectors-list">
-          <BrowserUseCapabilityRow />
+          {BROWSER_USE_ENABLED ? <BrowserUseCapabilityRow /> : null}
           {PROVIDER_ORDER.map((provider) => {
             const account = accounts?.find((entry) => entry.provider === provider) ?? null;
             const name = PROVIDER_NAMES[provider];

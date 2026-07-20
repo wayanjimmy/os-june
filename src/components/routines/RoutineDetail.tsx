@@ -16,6 +16,7 @@ import {
   triggerScopeWarning,
   type TriggerDraft,
 } from "../../lib/connectors";
+import { BROWSER_USE_ENABLED } from "../../lib/feature-flags";
 import {
   pauseRoutine,
   resumeRoutine,
@@ -753,24 +754,26 @@ export function RoutineDetail({
               </h2>
               <div className="settings-card">
                 <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <div className="settings-row-title">Browser use</div>
-                    <div className="settings-row-description">
-                      {managedTransportEnabled
-                        ? "Allow this routine to browse public pages anonymously when Browser use is enabled. Consequential actions stay blocked."
-                        : "Browser use for routines is temporarily unavailable."}
+                {BROWSER_USE_ENABLED ? (
+                  <div className="settings-row">
+                    <div className="settings-row-info">
+                      <div className="settings-row-title">Browser use</div>
+                      <div className="settings-row-description">
+                        {managedTransportEnabled
+                          ? "Allow this routine to browse public pages anonymously when Browser use is enabled. Consequential actions stay blocked."
+                          : "Browser use for routines is temporarily unavailable."}
+                      </div>
+                    </div>
+                    <div className="settings-row-control">
+                      <Switch
+                        checked={browserAccess}
+                        disabled={storedBrowserAccess === null || !managedTransportEnabled}
+                        aria-label="Allow browser use for this routine"
+                        onCheckedChange={setBrowserAccess}
+                      />
                     </div>
                   </div>
-                  <div className="settings-row-control">
-                    <Switch
-                      checked={browserAccess}
-                      disabled={storedBrowserAccess === null || !managedTransportEnabled}
-                      aria-label="Allow browser use for this routine"
-                      onCheckedChange={setBrowserAccess}
-                    />
-                  </div>
-                </div>
+                ) : null}
                 {routine.script ? (
                   <p className="routine-detail-script-note">
                     This routine has an attached script ({routine.script}) that runs outside the
