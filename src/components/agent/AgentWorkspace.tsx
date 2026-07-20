@@ -16063,7 +16063,7 @@ function AgentArtifactPanel({
                   if (!query.trim()) setFilterOpen(false);
                 }}
                 onKeyDown={(event) => {
-                  if (artifact && event.key === "Enter") {
+                  if (artifact && event.key === "Enter" && !event.nativeEvent.isComposing) {
                     event.preventDefault();
                     event.stopPropagation();
                     navigateMatches(event.shiftKey ? -1 : 1);

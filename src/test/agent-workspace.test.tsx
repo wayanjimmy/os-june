@@ -10025,6 +10025,10 @@ describe("AgentWorkspace", () => {
     await waitFor(() => expect(within(panel).getByText("1 of 3")).toBeInTheDocument());
     expect(panel.querySelectorAll("mark")).toHaveLength(3);
 
+    // Enter commits an IME candidate before it becomes match navigation.
+    expect(fireEvent.keyDown(findInput, { key: "Enter", isComposing: true })).toBe(true);
+    expect(within(panel).getByText("1 of 3")).toBeInTheDocument();
+
     // Enter/Shift+Enter and the buttons wrap through matches while the input
     // keeps focus. The active class follows the stable document-wide ordinal.
     await user.keyboard("{Enter}");
