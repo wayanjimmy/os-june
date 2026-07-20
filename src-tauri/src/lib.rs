@@ -337,6 +337,11 @@ pub fn run() {
             connectors::commands::connectors_disconnect,
             connectors::commands::connectors_linear_teams,
             connectors::commands::connectors_selected_teams_set,
+            connectors::commands::notion_connector_status,
+            connectors::commands::notion_connector_connect,
+            connectors::commands::notion_connector_cancel_connect,
+            connectors::commands::notion_connector_disconnect,
+            connectors::commands::notion_connector_list_tools,
             connectors::commands::routine_trust_get,
             connectors::commands::routine_trust_set,
             connectors::commands::routine_trust_record_run,
@@ -367,6 +372,7 @@ pub fn run() {
         .manage(computer_use::ComputerUseState::default())
         .manage(os_accounts::LoginFlow::default())
         .manage(connectors::ConnectFlow::default())
+        .manage(connectors::NotionConnectFlow::default())
         .setup(|app| {
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
