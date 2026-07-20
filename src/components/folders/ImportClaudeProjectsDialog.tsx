@@ -122,11 +122,7 @@ export function ImportClaudeProjectsDialog({
           <div className="claude-projects-error" role="alert">
             <p>{error}</p>
             {candidates === null ? (
-              <button
-                type="button"
-                className="btn"
-                onClick={loadCandidates}
-              >
+              <button type="button" className="btn" onClick={loadCandidates}>
                 Try again
               </button>
             ) : null}
@@ -167,11 +163,7 @@ export function ImportClaudeProjectsDialog({
                 {selected.size === available.length ? "Clear selection" : "Select all"}
               </button>
             </div>
-            <ul
-              ref={listRef}
-              className="claude-projects-list scroll-fade-mask"
-              {...listFade.props}
-            >
+            <ul ref={listRef} className="claude-projects-list scroll-fade-mask" {...listFade.props}>
               {available.map((candidate) => (
                 <li key={candidate.path}>
                   <label className="claude-project-row">

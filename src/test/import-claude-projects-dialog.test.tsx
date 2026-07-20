@@ -88,7 +88,8 @@ describe("ImportClaudeProjectsDialog", () => {
   });
 
   it("ignores a retry result after the dialog closes and reopens", async () => {
-    let resolveRetry: (value: Awaited<ReturnType<typeof discoverClaudeProjects>>) => void = () => {};
+    let resolveRetry: (value: Awaited<ReturnType<typeof discoverClaudeProjects>>) => void =
+      () => {};
     const retry = new Promise<Awaited<ReturnType<typeof discoverClaudeProjects>>>((resolve) => {
       resolveRetry = resolve;
     });
