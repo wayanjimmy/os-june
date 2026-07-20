@@ -428,7 +428,13 @@ export function buildHermesSessionChatTurns(
   const sortedTurns = sortAgentChatTurns(turns);
   deduplicateGeneratedMediaWithinAgentRuns(sortedTurns);
   return sortedTurns.filter((turn) =>
-    turn.parts.some((part) => part.type === "tool" || partText(part).trim()),
+    turn.parts.some((part) => {
+      if (part.type === "tool") return true;
+      if (turn.role === "user" && part.type === "text") {
+        return Boolean(displayedComposerUserMessageText(part.text).trim());
+      }
+      return Boolean(partText(part).trim());
+    }),
   );
 }
 

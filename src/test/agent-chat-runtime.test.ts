@@ -901,6 +901,20 @@ describe("Agent chat runtime", () => {
     ).toEqual([{ type: "text", text: content, status: "complete" }]);
   });
 
+  it("drops a user turn containing only a synthetic image marker", () => {
+    expect(
+      buildHermesSessionChatTurns([
+        {
+          id: "synthetic-image-marker",
+          role: "user",
+          content:
+            "[Image attached at: /Users/alex/Library/Application Support/June/images/upload.png]",
+          timestamp: "2026-07-20T19:48:57.000Z",
+        },
+      ]),
+    ).toEqual([]);
+  });
+
   it("hides injected project context from persisted user turns", () => {
     const turns = buildHermesSessionChatTurns([
       {
