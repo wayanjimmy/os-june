@@ -1,4 +1,4 @@
-# Extension releases follow desktop RC promotion
+# ADR 0032: Extension releases follow desktop RC promotion
 
 ## Status
 
