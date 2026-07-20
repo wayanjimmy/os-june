@@ -177,7 +177,7 @@ function validateBundle() {
       readFileSync(path.join(rootDir, "src-tauri", "icons", "icon.icns")),
     ) !== 0
   ) {
-    throw new Error("Computer use helper is missing June's app icon.");
+    throw new Error("Computer use helper icon does not match June's app icon.");
   }
   const screenReason = run("/usr/bin/plutil", [
     "-extract",
