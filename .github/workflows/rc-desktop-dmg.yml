@@ -694,23 +694,58 @@ jobs:
               --dir "$prior/stable"
           fi
 
-      - name: Validate Web Store identity configuration
+      # Missing Web Store identity configuration is a clean skip, not a
+      # failure: the desktop RC is already published when this job runs, so
+      # failing here would leave a half-released RC. Until the one-time store
+      # bootstrap in docs/release-extension.md is complete, RCs are
+      # desktop-only by design.
+      - name: Detect Web Store identity configuration
+        id: store-config
         env:
           WORKLOAD_IDENTITY_PROVIDER: ${{ vars.CHROME_WEB_STORE_WORKLOAD_IDENTITY_PROVIDER }}
           SERVICE_ACCOUNT: ${{ vars.CHROME_WEB_STORE_SERVICE_ACCOUNT }}
           PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
         run: |
           set -euo pipefail
-          missing=0
+          configured=true
           for name in WORKLOAD_IDENTITY_PROVIDER SERVICE_ACCOUNT PUBLISHER_ID; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::${name} is required for Chrome Web Store publishing."
-              missing=1
+              echo "::notice::CHROME_WEB_STORE ${name} is not configured; skipping extension store submission for this RC."
+              configured=false
             fi
           done
-          exit "$missing"
+          echo "configured=$configured" >> "$GITHUB_OUTPUT"
+
+      # A skipped RC must not leave a previous RC's extension assets on the
+      # fixed rc release: stable promotion correlates those assets with the
+      # desktop RC being promoted, and stale metadata would either block the
+      # promotion or promote bytes this RC never built.
+      - name: Remove stale extension assets from the RC release
+        if: ${{ steps.store-config.outputs.configured != 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          assets="$(gh release view rc \
+            --repo open-software-network/os-june-releases \
+            --json assets --jq '.assets[].name')"
+          for asset in extension-build.json June-extension.zip; do
+            if grep -Fqx "$asset" <<< "$assets"; then
+              gh release delete-asset rc "$asset" \
+                --repo open-software-network/os-june-releases \
+                --yes
+              echo "::notice::Removed stale $asset from the rc release; this RC carries no extension."
+            fi
+          done
+          {
+            echo "### Extension release candidate"
+            echo "- Desktop RC: \`${{ steps.rc.outputs.version }}\`"
+            echo "- Result: skipped, Chrome Web Store identity is not configured."
+            echo "- This RC promotes desktop-only; see docs/release-extension.md for the store bootstrap."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Authenticate to Google Cloud
+        if: ${{ steps.store-config.outputs.configured == 'true' }}
         id: google-auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
@@ -720,6 +755,7 @@ jobs:
           access_token_scopes: https://www.googleapis.com/auth/chromewebstore
 
       - name: Inspect prior extension submission
+        if: ${{ steps.store-config.outputs.configured == 'true' }}
         id: prior-store
         env:
           CHROME_WEB_STORE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
@@ -734,6 +770,7 @@ jobs:
           echo "reusable=$reusable" >> "$GITHUB_OUTPUT"
 
       - name: Prepare correlated extension package
+        if: ${{ steps.store-config.outputs.configured == 'true' }}
         id: extension
         env:
           DESKTOP_VERSION: ${{ steps.rc.outputs.version }}
@@ -763,6 +800,7 @@ jobs:
           node scripts/extension-release.mjs "${args[@]}"
 
       - name: Submit extension for review or verify unchanged state
+        if: ${{ steps.store-config.outputs.configured == 'true' }}
         env:
           CHROME_WEB_STORE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
           CHROME_WEB_STORE_PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
@@ -775,6 +813,7 @@ jobs:
           node scripts/chrome-web-store.mjs "${args[@]}"
 
       - name: Publish extension RC assets
+        if: ${{ steps.store-config.outputs.configured == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_REQUIRED: ${{ steps.extension.outputs.release_required }}
@@ -799,6 +838,7 @@ jobs:
             --clobber
 
       - name: Summary
+        if: ${{ steps.store-config.outputs.configured == 'true' }}
         run: |
           {
             echo "### Extension release candidate"

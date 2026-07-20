@@ -41,6 +41,7 @@ jobs:
       contents: read
       id-token: write
     outputs:
+      extension_present: ${{ steps.rc.outputs.extension_present }}
       release_required: ${{ steps.rc.outputs.release_required }}
       store_version: ${{ steps.rc.outputs.store_version }}
       desktop_version: ${{ steps.rc.outputs.desktop_version }}
@@ -78,12 +79,9 @@ jobs:
             --dir "$dir"
 
           RC_DIR="$dir" node --input-type=module <<'NODE'
-          import { appendFileSync, readFileSync } from "node:fs";
+          import { appendFileSync, existsSync, readFileSync } from "node:fs";
           import { join } from "node:path";
           const desktop = JSON.parse(readFileSync(join(process.env.RC_DIR, "rc-build.json"), "utf8"));
-          const extension = JSON.parse(
-            readFileSync(join(process.env.RC_DIR, "extension-build.json"), "utf8"),
-          );
           if (desktop.version !== process.env.RC_VERSION_INPUT) {
             throw new Error(
               `Requested ${process.env.RC_VERSION_INPUT}, but the RC release holds ${desktop.version}.`,
@@ -92,35 +90,52 @@ jobs:
           if (!/^[0-9a-f]{40}$/.test(desktop.commit)) {
             throw new Error("rc-build.json has an invalid source commit.");
           }
+          // An RC cut before the Chrome Web Store bootstrap carries no
+          // extension metadata at all; that RC promotes desktop-only.
+          const extensionPath = join(process.env.RC_DIR, "extension-build.json");
+          const extension = existsSync(extensionPath)
+            ? JSON.parse(readFileSync(extensionPath, "utf8"))
+            : null;
           appendFileSync(
             process.env.GITHUB_OUTPUT,
             [
               `desktop_version=${desktop.version}`,
               `source_commit=${desktop.commit}`,
-              `release_required=${extension.release?.required === true}`,
-              `store_version=${extension.extension?.version ?? "unknown"}`,
+              `extension_present=${extension !== null}`,
+              `release_required=${extension?.release?.required === true}`,
+              `store_version=${extension?.extension?.version ?? "none"}`,
               "",
             ].join("\n"),
           );
           NODE
 
-          required="$(node -e 'const d=require(process.argv[1]);process.stdout.write(String(d.release.required))' "$dir/extension-build.json")"
-          args=(
-            verify-rc
-            --metadata "$dir/extension-build.json"
-            --desktop-version "$RC_VERSION_INPUT"
-            --source-commit "$(node -e 'const d=require(process.argv[1]);process.stdout.write(d.commit)' "$dir/rc-build.json")"
-          )
-          if [ "$required" = "true" ]; then
-            gh release download rc \
-              --repo open-software-network/os-june-releases \
-              --pattern "June-extension.zip" \
-              --dir "$dir"
-            args+=(--package "$dir/June-extension.zip")
+          if [ ! -f "$dir/extension-build.json" ]; then
+            echo "::notice::The RC release carries no extension metadata; promoting desktop-only."
+          else
+            required="$(node -e 'const d=require(process.argv[1]);process.stdout.write(String(d.release.required))' "$dir/extension-build.json")"
+            args=(
+              verify-rc
+              --metadata "$dir/extension-build.json"
+              --desktop-version "$RC_VERSION_INPUT"
+              --source-commit "$(node -e 'const d=require(process.argv[1]);process.stdout.write(d.commit)' "$dir/rc-build.json")"
+            )
+            if [ "$required" = "true" ]; then
+              gh release download rc \
+                --repo open-software-network/os-june-releases \
+                --pattern "June-extension.zip" \
+                --dir "$dir"
+              args+=(--package "$dir/June-extension.zip")
+            fi
+            node scripts/extension-release.mjs "${args[@]}"
           fi
-          node scripts/extension-release.mjs "${args[@]}"
 
+      # Configuration is required exactly when the RC froze extension work:
+      # promoting a correlated submission without store credentials would
+      # publish the desktop and strand the extension. An RC with no extension
+      # metadata (cut before the store bootstrap) promotes desktop-only and
+      # needs no Web Store identity at all.
       - name: Validate Web Store identity configuration
+        if: ${{ steps.rc.outputs.extension_present == 'true' }}
         env:
           WORKLOAD_IDENTITY_PROVIDER: ${{ vars.CHROME_WEB_STORE_WORKLOAD_IDENTITY_PROVIDER }}
           SERVICE_ACCOUNT: ${{ vars.CHROME_WEB_STORE_SERVICE_ACCOUNT }}
@@ -130,13 +145,14 @@ jobs:
           missing=0
           for name in WORKLOAD_IDENTITY_PROVIDER SERVICE_ACCOUNT PUBLISHER_ID; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::${name} is required for Chrome Web Store publishing."
+              echo "::error::${name} is required to promote an RC that carries an extension submission."
               missing=1
             fi
           done
           exit "$missing"
 
       - name: Authenticate to Google Cloud
+        if: ${{ steps.rc.outputs.extension_present == 'true' }}
         id: google-auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
@@ -146,6 +162,7 @@ jobs:
           access_token_scopes: https://www.googleapis.com/auth/chromewebstore
 
       - name: Require reviewed package or verify unchanged state
+        if: ${{ steps.rc.outputs.extension_present == 'true' }}
         env:
           CHROME_WEB_STORE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
           CHROME_WEB_STORE_PUBLISHER_ID: ${{ vars.CHROME_WEB_STORE_PUBLISHER_ID }}
@@ -696,6 +713,10 @@ jobs:
 
   extension-stable:
     name: Publish reviewed extension to stable
+    # Skipped by design when the promoted RC carries no extension metadata
+    # (cut before the Chrome Web Store bootstrap); post-release tells this
+    # apart from an upstream failure via extension_present.
+    if: ${{ success() && needs.extension-preflight.outputs.extension_present == 'true' }}
     needs: [extension-preflight, publish-desktop]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: production
@@ -788,7 +809,18 @@ jobs:
 
   post-release:
     name: Finish desktop release bookkeeping
-    needs: [extension-preflight, promote, extension-stable]
+    # Runs after a fully published release. extension-stable may be skipped,
+    # but only by design (the RC carried no extension); a skip caused by an
+    # upstream failure never satisfies this condition because publish-desktop
+    # success is required explicitly.
+    if: ${{ !cancelled()
+      && needs.extension-preflight.result == 'success'
+      && needs.promote.result == 'success'
+      && needs.publish-desktop.result == 'success'
+      && (needs.extension-stable.result == 'success'
+        || (needs.extension-stable.result == 'skipped'
+          && needs.extension-preflight.outputs.extension_present != 'true')) }}
+    needs: [extension-preflight, promote, publish-desktop, extension-stable]
     runs-on: ${{ fromJSON(inputs.macos-runner == 'mac-studio' && '["self-hosted","macOS","ARM64","desktop-release"]' || '["blacksmith-6vcpu-macos-15"]') }}
     environment: production
     steps:

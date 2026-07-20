@@ -7,6 +7,43 @@ exact package, then publishes it after the desktop release succeeds.
 
 The architecture and trade-offs are recorded in [ADR 0033](adr/0033-extension-releases-follow-desktop-rc-promotion.md).
 
+## Current bootstrap state (2026-07-20)
+
+- The publisher account is accessible; its publisher ID goes into the
+  `CHROME_WEB_STORE_PUBLISHER_ID` variable (Developer Dashboard -> Publisher
+  -> Settings).
+- The publisher has no extension items yet, so the manual `0.1.0` bootstrap
+  below is still required. The uploaded item must receive the pinned item ID
+  `adckhkfngpnenaapncoipkalcfpjbgcn`; stop if Google assigns a different one.
+- The Google Cloud project, the dedicated service account, and the Workload
+  Identity provider do not exist yet; the other two GitHub variables are
+  produced by those steps. The pipeline uses keyless GitHub OIDC, so no
+  long-lived secret is ever stored.
+- Until this setup is complete, the release workflows skip the extension
+  cleanly (see "Before the store bootstrap" below) and the app hides every
+  Browser use surface behind the `BROWSER_USE_ENABLED` feature flag
+  (`src/lib/feature-flags.ts` and `src-tauri/src/feature_flags.rs`).
+  Flipping those two flags on is part of the launch checklist, after the
+  store item is published and the identity variables are set.
+
+## Before the store bootstrap: releases without Web Store identity
+
+Both workflows treat missing `CHROME_WEB_STORE_*` variables as "extension
+releases are not enabled yet", never as a failure after the desktop is
+already out:
+
+- **RC**: `Submit extension release candidate` still builds and tests the
+  extension, then skips every store step with a notice. It also removes any
+  stale `extension-build.json` / `June-extension.zip` from the fixed `rc`
+  release so the RC promotes desktop-only instead of correlating another
+  RC's extension bytes.
+- **Stable**: the preflight promotes an RC that carries no extension
+  metadata desktop-only, without touching the store. The identity variables
+  are required exactly when the promoted RC froze extension work; promoting
+  such an RC without them fails before the desktop build starts.
+- `Publish reviewed extension to stable` is skipped by design for a
+  desktop-only RC, and release bookkeeping still runs.
+
 ## One-time Chrome Web Store setup
 
 1. Register the publisher, build the current extension, and upload its bootstrap
