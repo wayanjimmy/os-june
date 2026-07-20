@@ -206,18 +206,18 @@ const RECONNECT_BLURB: Readonly<Record<ConnectorProvider, string>> = Object.free
 });
 const UNAVAILABLE_BLURB = "June could not confirm the Notion connection. Try again in a moment.";
 
+function accountStatusBlurb(status: ConnectorAccountStatus, provider: ConnectorProvider): string {
+  if (status === "reconnect_required") return RECONNECT_BLURB[provider];
+  if (status === "unavailable") return UNAVAILABLE_BLURB;
+  return CONNECTED_BLURB;
+}
+
 export function accountStatusMeta(
   status: ConnectorAccountStatus,
   provider: ConnectorProvider,
 ): ConnectorStatusMeta {
   const { label, tone } = STATUS_LABELS[status];
-  const blurb =
-    status === "reconnect_required"
-      ? RECONNECT_BLURB[provider]
-      : status === "unavailable"
-        ? UNAVAILABLE_BLURB
-        : CONNECTED_BLURB;
-  return { label, tone, blurb };
+  return { label, tone, blurb: accountStatusBlurb(status, provider) };
 }
 
 /** True for the Rust "connector_not_configured" error: this build ships no
