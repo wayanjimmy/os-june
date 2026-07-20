@@ -1514,19 +1514,24 @@ fn preflight_create_pages_arguments(arguments: &serde_json::Value) -> Result<(),
             "Create one Notion page at a time so June can show and approve its exact destination and content.",
         ));
     }
-    if pages.len() != 1 || !pages[0].is_object() {
+    let Some(page) = pages.first().and_then(serde_json::Value::as_object) else {
         return Err(AppError::new(
             "notion_create_pages_invalid_pages",
             "Notion page creation requires a pages array containing exactly one page object.",
+        ));
+    };
+    if object.contains_key("parent") && page.contains_key("parent") {
+        return Err(AppError::new(
+            "notion_create_pages_ambiguous_parent",
+            "Specify the Notion page parent in exactly one location.",
         ));
     }
     if object
         .keys()
         .any(|key| !NOTION_CREATE_PAGES_ALLOWED_FIELDS.contains(&key.as_str()))
-        || pages[0].as_object().is_some_and(|page| {
-            page.keys()
-                .any(|key| !NOTION_CREATE_PAGE_ALLOWED_FIELDS.contains(&key.as_str()))
-        })
+        || page
+            .keys()
+            .any(|key| !NOTION_CREATE_PAGE_ALLOWED_FIELDS.contains(&key.as_str()))
     {
         return Err(AppError::new(
             "notion_create_pages_unsupported_fields",
@@ -1613,13 +1618,26 @@ fn preview_create_pages_action(arguments: &serde_json::Value) -> String {
     let title = find_first_string_by_key(arguments, &["title", "name"])
         .unwrap_or_else(|| "(title not specified)".to_string());
     let parent = create_pages_parent(arguments).unwrap_or_else(|| "Not specified".to_string());
-    let payload =
-        summarize_create_payload(arguments).unwrap_or_else(|| "Not specified".to_string());
+    let payload = summarize_create_payload(arguments);
+    let fields = payload
+        .as_ref()
+        .map(|payload| payload.fields.as_str())
+        .unwrap_or("None");
+    let omitted = payload
+        .as_ref()
+        .map(|payload| payload.omitted.as_str())
+        .unwrap_or("none");
+    let preview = payload
+        .as_ref()
+        .map(|payload| payload.preview.as_str())
+        .unwrap_or("Not specified");
     format!(
-        "Operation: create Notion page | Title: {} | Parent: {} | Content: {}",
+        "Operation: create Notion page | Title: {} | Parent: {} | Content fields: {} | Omitted content values: {} | Content preview: {}",
         truncate_approval_value(&title),
         truncate_approval_value(&parent),
-        truncate_approval_value(&payload)
+        fields,
+        omitted,
+        truncate_approval_value(preview)
     )
 }
 
@@ -1631,17 +1649,26 @@ fn preview_update_page_action(arguments: &serde_json::Value) -> String {
     let target = update_page_target(arguments).unwrap_or_else(|| "Unknown".to_string());
     let title = update_page_title(arguments).unwrap_or_else(|| "Not specified".to_string());
     let changes = summarize_update_change_keys(arguments);
-    let values = summarize_update_values(arguments).unwrap_or_else(|| "Not specified".to_string());
+    let values = summarize_update_values(arguments);
+    let omitted = values
+        .as_ref()
+        .map(|values| values.omitted.as_str())
+        .unwrap_or("none");
+    let value_preview = values
+        .as_ref()
+        .map(|values| values.preview.as_str())
+        .unwrap_or("Not specified");
     let destructive_disclosure = blank_replacement_disclosure(arguments)
         .map(|disclosure| format!(" | Effect: {disclosure}"))
         .unwrap_or_default();
     format!(
-        "Operation: update Notion page{} | Target: {} | Title: {} | Changes: {} | Values: {}",
+        "Operation: update Notion page{} | Target: {} | Title: {} | Changes: {} | Omitted change values: {} | Value preview: {}",
         destructive_disclosure,
         truncate_approval_value(&target),
         truncate_approval_value(&title),
         changes,
-        truncate_approval_value(&values)
+        omitted,
+        truncate_approval_value(value_preview)
     )
 }
 
@@ -1700,7 +1727,13 @@ fn summarize_update_change_keys(arguments: &serde_json::Value) -> String {
     }
 }
 
-fn summarize_create_payload(arguments: &serde_json::Value) -> Option<String> {
+struct ApprovalFieldSummary {
+    fields: String,
+    omitted: String,
+    preview: String,
+}
+
+fn summarize_create_payload(arguments: &serde_json::Value) -> Option<ApprovalFieldSummary> {
     let pages = arguments
         .get("pages")
         .and_then(serde_json::Value::as_array)
@@ -1712,7 +1745,7 @@ fn summarize_create_payload(arguments: &serde_json::Value) -> Option<String> {
     )
 }
 
-fn summarize_update_values(arguments: &serde_json::Value) -> Option<String> {
+fn summarize_update_values(arguments: &serde_json::Value) -> Option<ApprovalFieldSummary> {
     summarize_payload_fields(
         arguments,
         &[
@@ -1729,29 +1762,42 @@ fn summarize_update_values(arguments: &serde_json::Value) -> Option<String> {
             "markdown",
             "title",
             "name",
+            "allow_async",
         ],
     )
 }
 
-fn summarize_payload_fields(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+fn summarize_payload_fields(
+    value: &serde_json::Value,
+    keys: &[&str],
+) -> Option<ApprovalFieldSummary> {
     let object = value.as_object()?;
-    let mut parts = Vec::new();
+    let mut fields = Vec::new();
+    let mut preview = Vec::new();
+    let mut omitted = Vec::new();
     for key in keys {
-        let Some(field_value) = object
-            .get(*key)
-            .filter(|field_value| !field_value.is_null())
-        else {
+        let Some(field_value) = object.get(*key) else {
             continue;
         };
-        parts.push(format!("{key}: {}", summarize_approval_json(field_value)));
-        if parts.len() >= 3 {
-            break;
+        fields.push(*key);
+        if preview.len() < 3 {
+            preview.push(format!("{key}: {}", summarize_approval_json(field_value)));
+        } else {
+            omitted.push(*key);
         }
     }
-    if parts.is_empty() {
+    if fields.is_empty() {
         None
     } else {
-        Some(parts.join("; "))
+        Some(ApprovalFieldSummary {
+            fields: fields.join(", "),
+            omitted: if omitted.is_empty() {
+                "none".to_string()
+            } else {
+                omitted.join(", ")
+            },
+            preview: preview.join("; "),
+        })
     }
 }
 
@@ -2551,6 +2597,40 @@ mod tests {
     }
 
     #[test]
+    fn create_pages_preflight_rejects_dual_parent_locations() {
+        for arguments in [
+            serde_json::json!({
+                "parent": { "page_id": "top" },
+                "pages": [{
+                    "title": "Child",
+                    "parent": { "page_id": "nested" }
+                }]
+            }),
+            serde_json::json!({
+                "parent": { "page_id": "same" },
+                "pages": [{
+                    "title": "Child",
+                    "parent": { "page_id": "same" }
+                }]
+            }),
+            serde_json::json!({
+                "parent": null,
+                "pages": [{
+                    "title": "Child",
+                    "parent": { "page_id": "nested" }
+                }]
+            }),
+        ] {
+            assert_eq!(
+                preflight_create_pages_arguments(&arguments)
+                    .unwrap_err()
+                    .code,
+                "notion_create_pages_ambiguous_parent"
+            );
+        }
+    }
+
+    #[test]
     fn create_pages_preflight_rejects_unpreviewed_fields() {
         for arguments in [
             serde_json::json!({
@@ -2618,9 +2698,34 @@ mod tests {
         });
 
         let preview = preview_create_pages_action(&arguments);
-        assert!(preview.contains("Content: properties:"));
+        assert!(preview.contains("Content fields: properties, content"));
+        assert!(preview.contains("Omitted content values: none"));
+        assert!(preview.contains("Content preview: properties:"));
         assert!(preview.contains("Status"));
         assert!(preview.contains("Publish the Q3 decision summary"));
+    }
+
+    #[test]
+    fn create_pages_preview_discloses_omitted_content_values() {
+        let arguments = serde_json::json!({
+            "pages": [{
+                "title": "Decision log",
+                "properties": { "Status": "Draft" },
+                "content": "x".repeat(200),
+                "children": [{ "type": "paragraph" }],
+                "body": "Body",
+                "markdown": "Markdown"
+            }]
+        });
+
+        let preview = preview_create_pages_action(&arguments);
+        let fields = "Content fields: properties, content, children, body, markdown";
+        let omitted = "Omitted content values: body, markdown";
+        assert!(preview.contains(fields));
+        assert!(preview.contains(omitted));
+        assert!(preview.find(fields) < preview.find("Content preview:"));
+        assert!(preview.find(omitted) < preview.find("Content preview:"));
+        assert!(preview.ends_with("..."));
     }
 
     #[test]
@@ -2634,7 +2739,8 @@ mod tests {
 
         let preview = preview_update_page_action(&arguments);
         assert!(preview.contains("Changes: content, properties, title"));
-        assert!(preview.contains("Values: properties:"));
+        assert!(preview.contains("Omitted change values: none"));
+        assert!(preview.contains("Value preview: properties:"));
         assert!(preview.contains("Approved"));
         assert!(preview.contains("Update with approved launch notes"));
     }
@@ -2729,14 +2835,14 @@ mod tests {
             "new_str": "new",
             "properties": { "Status": "Done" },
             "content": "content",
-            "content_updates": [{ "old_str": "old", "new_str": "new" }],
+            "content_updates": [{ "old_str": "old", "new_str": "x".repeat(200) }],
             "position": { "type": "end" },
             "allow_deleting_content": false,
             "children": [],
             "body": "body",
             "markdown": "markdown",
             "title": "Title",
-            "name": "Name",
+            "name": null,
             "unknown_null_one": null,
             "unknown_null_two": null,
             "unknown_null_three": null
@@ -2761,7 +2867,22 @@ mod tests {
             assert!(changes.contains(key), "missing {key} from {changes}");
         }
         assert!(!changes.contains("unknown_null"));
-        assert!(preview_update_page_action(&arguments).contains(&format!("Changes: {changes}")));
+        let preview = preview_update_page_action(&arguments);
+        let value_preview = preview.find("| Value preview:").unwrap();
+        assert!(preview.contains(&format!("Changes: {changes}")));
+        for key in NOTION_UPDATE_PAGE_ALLOWED_FIELDS
+            .iter()
+            .filter(|key| **key != "page_id")
+        {
+            assert!(
+                preview[..value_preview].contains(key),
+                "missing {key} before the bounded value preview: {preview}"
+            );
+        }
+        assert!(preview.contains(
+            "Omitted change values: new_str, properties, content, position, allow_deleting_content, children, body, markdown, title, name, allow_async"
+        ));
+        assert!(preview.ends_with("..."));
     }
 
     #[test]
