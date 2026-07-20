@@ -30,6 +30,7 @@ import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDi
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import { NoteHeaderActions } from "../components/note-editor/NoteHeaderActions";
+import { toast } from "../components/ui/Toaster";
 import { exportNoteAsPdf } from "../lib/note-pdf";
 import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
 import { useNoteChat } from "../components/note-chat/useNoteChat";
@@ -75,6 +76,7 @@ import {
   deleteNote,
   deleteNotes,
   dictationHelperCommand,
+  downloadNoteAudio,
   ensureHermesBridgeSession,
   finishRecording,
   getRecordingStatus,
@@ -89,6 +91,7 @@ import {
   removeNoteFromFolder,
   removeSessionFromFolder,
   recoverRecording,
+  revealPath,
   renameFolder,
   resolveAgentRecorderRequest,
   resumeRecording,
@@ -268,6 +271,15 @@ const ROUTINE_FUNDING_DISABLED_REASON = "Add credits before running a routine.";
 // Floor for the note card so the sidebar can't be dragged wide enough to
 // crush it into a sliver — it always keeps a usable width plus its gutters.
 const MAIN_PANEL_MIN_WIDTH = 420;
+
+function noteHasDownloadableAudio(note: NoteDto): boolean {
+  const audioSources = note.audioSources?.length
+    ? note.audioSources
+    : note.audio
+      ? [note.audio]
+      : [];
+  return audioSources.some((audio) => audio.format === "wav" && audio.sizeBytes > 0);
+}
 
 // Largest the sidebar may grow given the live window width: never past its own
 // cap, and never so far that the main panel drops below its floor. Falls back
@@ -1068,6 +1080,24 @@ export function App() {
           : undefined,
     });
   }
+  async function handleDownloadNoteAudio() {
+    if (!selectedNote) return;
+    try {
+      const result = await downloadNoteAudio(selectedNote.id);
+      toast.success("Audio downloaded", {
+        action: {
+          label: "Show file",
+          onClick: () => {
+            void revealPath(result.path).catch((err: unknown) => {
+              toast.error(messageFromError(err));
+            });
+          },
+        },
+      });
+    } catch (err) {
+      toast.error(messageFromError(err));
+    }
+  }
   const noteToolbarActions = selectedNote ? (
     <NoteHeaderActions
       noteId={selectedNote.id}
@@ -1079,6 +1109,9 @@ export function App() {
         noteReadyToShare(selectedNote.processingStatus) ? () => setShareNoteOpen(true) : undefined
       }
       onExportPdf={() => void handleExportNotePdf()}
+      onDownloadAudio={
+        noteHasDownloadableAudio(selectedNote) ? () => void handleDownloadNoteAudio() : undefined
+      }
       onDelete={() => setConfirmDeleteNote(true)}
     />
   ) : null;

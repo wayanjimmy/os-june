@@ -387,11 +387,17 @@ export type RecordingSessionDto = {
 export type AudioArtifactDto = {
   id: string;
   source?: RecordingSource;
-  format: "wav";
+  format: string;
   durationMs: number;
   sizeBytes: number;
   checksum: string;
   createdAt: string;
+};
+
+export type DownloadNoteAudioResponse = {
+  path: string;
+  fileName: string;
+  sourceCount: number;
 };
 
 export type NoteDto = NoteListItemDto & {
@@ -1577,6 +1583,12 @@ export async function listNotes(folderId?: string, limit?: number) {
 
 export async function getNote(noteId: string) {
   return invoke<NoteDto>("get_note", { request: { noteId } });
+}
+
+export async function downloadNoteAudio(noteId: string) {
+  return invoke<DownloadNoteAudioResponse>("download_note_audio", {
+    request: { noteId },
+  });
 }
 
 export async function deleteNote(noteId: string) {
