@@ -2162,7 +2162,7 @@ export type ConnectorScopeBundle =
   | "linear_read"
   | "linear_write";
 
-export type ConnectorAccountStatus = "connected" | "reconnect_required";
+export type ConnectorAccountStatus = "connected" | "reconnect_required" | "unavailable";
 
 export type ConnectorProvider = "google" | "linear" | "notion";
 

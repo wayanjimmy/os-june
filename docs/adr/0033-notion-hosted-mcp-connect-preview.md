@@ -198,3 +198,27 @@ include Notion-connected sources. This disclosure is required alongside the
 existing selected-resource caveat until June either proves the provider boundary,
 adds a Rust-enforced filter before Hermes receives results, or replaces hosted
 search with a narrower page-only search path.
+
+## Addendum: 2026-07-20 approval preview clarifications
+
+The approved `notion-create-pages` path accepts exactly one page object per
+request. Empty, malformed, and multi-page requests fail before approval; callers
+must submit separate requests so each page has an exact parent, title, and
+content preview. The immutable original arguments remain the execution payload.
+
+For `notion-update-page`, a blank or whitespace `new_str` is intentionally valid
+for replacement commands. With `replace_content` it clears all page content;
+with `replace_content_range` it deletes the selected content. The approval
+preview must state that destructive effect explicitly. A request containing only
+`page_id` remains invalid, and every present allowlisted change key must remain
+visible in the bounded approval summary.
+
+Phase 0B is the promotion or preview-exit gate, not a reason to disable the
+privacy-accurate Connect flow. Interactive Notion actions remain approval-gated.
+Routines receive `june_notion_actions` only in approval trust mode; read-only
+routines receive only `june_notion`, and Notion has no earned-autonomy path.
+
+This addendum supersedes the earlier requirement for a literal preview label.
+The settings row instead uses persistent, privacy-accurate copy stating that
+selected-resource scope is unverified and may extend beyond selected pages. It
+must not imply selected-page-only access.

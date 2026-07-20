@@ -77,6 +77,8 @@ impl ConnectorProvider {
 pub enum ConnectorAccountStatus {
     Connected,
     ReconnectRequired,
+    /// Transient settings-list projection. Never persist this as account state.
+    Unavailable,
 }
 
 impl ConnectorAccountStatus {
@@ -84,6 +86,7 @@ impl ConnectorAccountStatus {
         match self {
             ConnectorAccountStatus::Connected => "connected",
             ConnectorAccountStatus::ReconnectRequired => "reconnect_required",
+            ConnectorAccountStatus::Unavailable => "unavailable",
         }
     }
 
@@ -641,8 +644,9 @@ pub async fn list_accounts(app: &tauri::AppHandle) -> Result<Vec<ConnectorAccoun
 /// Enumerate accounts for the Connectors settings UI.
 ///
 /// The settings provider directory owns disconnected rows, so an unreadable
-/// optional Notion preview is represented by omission here only. Shared API
-/// consumers should call [`list_accounts`] and receive the Notion read error.
+/// optional Notion preview is represented by a transient unavailable row.
+/// Shared API consumers should call [`list_accounts`] and receive the original
+/// Notion read error.
 pub async fn list_accounts_resilient(
     app: &tauri::AppHandle,
 ) -> Result<Vec<ConnectorAccount>, AppError> {
@@ -678,8 +682,18 @@ fn append_notion_account(
         Err(error) if suppress_error => {
             tracing::warn!(
                 error_code = %error.code,
-                "failed to read optional Notion connector status; omitting Notion from settings account listing"
+                "failed to read optional Notion connector status"
             );
+            accounts.push(ConnectorAccount {
+                account_id: notion::notion_account_id().to_string(),
+                provider: ConnectorProvider::Notion,
+                email: notion::notion_account_email().to_string(),
+                scopes: Vec::new(),
+                status: ConnectorAccountStatus::Unavailable,
+                workspace_name: None,
+                workspace_url_key: None,
+                selected_teams: Vec::new(),
+            });
         }
         Err(error) => return Err(error),
     }
@@ -1325,6 +1339,10 @@ mod tests {
             "\"reconnect_required\""
         );
         assert_eq!(
+            serde_json::to_string(&ConnectorAccountStatus::Unavailable).unwrap(),
+            "\"unavailable\""
+        );
+        assert_eq!(
             serde_json::from_str::<ConnectorAccountStatus>("\"connected\"").unwrap(),
             ConnectorAccountStatus::Connected
         );
@@ -1416,12 +1434,21 @@ mod tests {
     fn append_notion_account_preserves_errors_unless_resilient() {
         let mut strict = Vec::new();
         let error = AppError::new("notion_keychain_read_failed", "failed");
-        assert!(append_notion_account(&mut strict, Err(error.clone()), false).is_err());
+        let strict_error =
+            append_notion_account(&mut strict, Err(error.clone()), false).unwrap_err();
+        assert_eq!(strict_error.code, error.code);
+        assert_eq!(strict_error.message, error.message);
         assert!(strict.is_empty());
 
         let mut resilient = Vec::new();
         append_notion_account(&mut resilient, Err(error), true).unwrap();
-        assert!(resilient.is_empty());
+        assert_eq!(resilient.len(), 1);
+        assert_eq!(resilient[0].provider, ConnectorProvider::Notion);
+        assert_eq!(resilient[0].status, ConnectorAccountStatus::Unavailable);
+
+        let mut disconnected = Vec::new();
+        append_notion_account(&mut disconnected, Ok(None), true).unwrap();
+        assert!(disconnected.is_empty());
     }
 
     #[test]
@@ -1475,6 +1502,10 @@ mod tests {
         );
         assert_eq!(
             ConnectorAccountStatus::from_db("unexpected"),
+            ConnectorAccountStatus::Connected
+        );
+        assert_eq!(
+            ConnectorAccountStatus::from_db("unavailable"),
             ConnectorAccountStatus::Connected
         );
     }

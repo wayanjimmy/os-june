@@ -209,6 +209,32 @@ describe("ConnectorsSection", () => {
     await waitFor(() => expect(mocks.notionConnectorConnect).toHaveBeenCalled());
   });
 
+  it("shows unavailable Notion status without credential mutation actions", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      {
+        accountId: "notion-hosted-mcp",
+        provider: "notion",
+        email: "Notion",
+        scopes: [],
+        status: "unavailable",
+        workspaceName: null,
+        workspaceUrlKey: null,
+        selectedTeams: [],
+      },
+    ]);
+    render(<ConnectorsSection />);
+
+    expect(await screen.findByText("Status unavailable")).toBeInTheDocument();
+    expect(
+      screen.getByText("June could not confirm the Notion connection. Try again in a moment."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect Notion" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect Notion" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disconnect Notion" })).toBeNull();
+    expect(mocks.notionConnectorConnect).not.toHaveBeenCalled();
+    expect(mocks.notionConnectorDisconnect).not.toHaveBeenCalled();
+  });
+
   it("disables Notion disconnect while reconnect waits for the browser", async () => {
     mocks.connectorsList.mockResolvedValue([
       {

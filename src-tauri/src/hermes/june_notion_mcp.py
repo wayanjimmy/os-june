@@ -134,18 +134,25 @@ def call_tool(base_url: str, token: str, request_id: Any, params: dict[str, Any]
             },
         )
 
-    return response(
-        request_id,
-        {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(result, ensure_ascii=False, indent=2),
-                }
-            ],
-            "structuredContent": result,
-        },
-    )
+    hosted_result = result.get("result")
+    if not isinstance(hosted_result, dict):
+        return response(
+            request_id,
+            {
+                "isError": True,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {"error": "The June connector proxy returned a malformed Notion result."},
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                    }
+                ],
+            },
+        )
+    return response(request_id, hosted_result)
 
 
 def call_proxy(base_url: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:

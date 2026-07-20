@@ -191,6 +191,7 @@ const STATUS_LABELS: Readonly<
 > = Object.freeze({
   connected: { label: "Connected", tone: "ok" },
   reconnect_required: { label: "Reconnect needed", tone: "attention" },
+  unavailable: { label: "Status unavailable", tone: "attention" },
 });
 
 /** Connected blurb is shared across providers; reconnect names the provider
@@ -203,13 +204,19 @@ const RECONNECT_BLURB: Readonly<Record<ConnectorProvider, string>> = Object.free
   linear: "Linear needs you to sign in again before June can use this workspace.",
   notion: "Notion needs you to connect again before June can use its hosted MCP tools.",
 });
+const UNAVAILABLE_BLURB = "June could not confirm the Notion connection. Try again in a moment.";
 
 export function accountStatusMeta(
   status: ConnectorAccountStatus,
   provider: ConnectorProvider,
 ): ConnectorStatusMeta {
   const { label, tone } = STATUS_LABELS[status];
-  const blurb = status === "reconnect_required" ? RECONNECT_BLURB[provider] : CONNECTED_BLURB;
+  const blurb =
+    status === "reconnect_required"
+      ? RECONNECT_BLURB[provider]
+      : status === "unavailable"
+        ? UNAVAILABLE_BLURB
+        : CONNECTED_BLURB;
   return { label, tone, blurb };
 }
 

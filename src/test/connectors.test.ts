@@ -185,6 +185,11 @@ describe("account status", () => {
       label: "Reconnect needed",
       tone: "attention",
     });
+    expect(accountStatusMeta("unavailable", "notion")).toEqual({
+      label: "Status unavailable",
+      tone: "attention",
+      blurb: "June could not confirm the Notion connection. Try again in a moment.",
+    });
   });
 
   it("names the provider in the reconnect blurb, sharing the connected blurb", () => {

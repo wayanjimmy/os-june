@@ -11,10 +11,10 @@
 Ship a Notion hosted MCP connector preview. Clicking **Connect** opens Notion's
 hosted MCP OAuth flow in the default browser, stores the returned OAuth material
 in the OS Keychain, and lets the user disconnect locally. When connected, June
-registers a read-only `june_notion` MCP bridge with Hermes so the agent can
-discover the hosted MCP read tools. This slice also registers a narrow
-`june_notion_actions` bridge for approved page creation through Notion's hosted
-MCP `notion-create-pages` tool and approved page updates through
+registers the read-only `june_notion` MCP server/toolset with Hermes so June can
+discover the hosted MCP read tools. This slice also registers the narrow
+`june_notion_actions` MCP server/toolset for approved page creation through
+Notion's hosted MCP `notion-create-pages` tool and approved page updates through
 `notion-update-page`. This slice intentionally does not test or enforce
 selected-resource scoping and does not expose move, duplicate, comment,
 attachment, database, data-source, or view action tools.
@@ -69,9 +69,10 @@ Before promoting prototype code:
 4. Preserve tool schema fingerprints, tool classifications, byte caps, and
    endpoint metadata so later implementation reviews can compare drift.
 
-## Phase 0B: selected-resource scoping gate
+## Phase 0B: selected-resource promotion and exit gate
 
-Selected-resource scoping is the shipping gate. The prototype must add or reuse
+Selected-resource scoping is the gate for promoting or exiting the shipped
+preview, not for disabling Connect. The prototype must add or reuse
 a temporary, debug-only, read-only `tools/call` probe command with a strict
 allowlist:
 
@@ -108,8 +109,8 @@ Exit criteria:
 - **Pass:** hosted MCP enforces selected-resource access for search, fetch, and
   data-source reads. June may keep the selected-page privacy claim and promote
   the hosted transport into production code.
-- **Fail:** hosted MCP behaves like broad workspace access. Under the current
-  bounded-page PRD, production connect must stay disabled until June adds a
+- **Fail:** hosted MCP behaves like broad workspace access. Keep Connect with
+  explicit unverified-scope disclosure, but do not promote it until June adds a
   Rust-enforced authorized-root graph that filters or rejects every
   search/query/fetch response before Hermes sees any unselected id, title,
   snippet, metadata, or content, or chooses a different selected-resource access
@@ -117,8 +118,8 @@ Exit criteria:
   can leak metadata before a later fetch. Proceeding with broad workspace access
   requires an explicit product decision and PRD, threat-model, success-metric,
   non-goal, and UI-copy updates before implementation.
-- **Inconclusive:** keep the connector row in a blocked/planned state and do not
-  expose production connect.
+- **Inconclusive:** keep the connector's unverified scope explicit and do not
+  promote it.
 
 ## Phase 0C: lifecycle and privacy verification
 
@@ -158,7 +159,7 @@ The target boundary is selected-resource access, but the enforcement mechanism
 is contingent on Phase 0B. Notion's hosted OAuth/page-picker flow may not return
 a trustworthy list of authorized roots, and provider search/query tools may
 return metadata for resources outside the user's selection. Production read tools
-therefore need one of these proven boundaries before connect is enabled:
+therefore need one of these proven boundaries before the preview is promoted:
 
 1. The hosted MCP provider enforces selected-resource access for search, fetch,
    comments, and data-source queries.
@@ -197,7 +198,7 @@ graph.
    Connectors with privacy-accurate copy. The primary Connect action opens the
    hosted MCP OAuth flow, stores credentials only in the Notion Keychain
    service, reports local connection state, supports local disconnect, registers
-   a read-only `june_notion` MCP bridge with Hermes, and registers
+   the read-only `june_notion` MCP server/toolset with Hermes, and registers
    `june_notion_actions` for approved page creation and approved page updates.
    It does not run selected-resource scoping probes or expose move, duplicate,
    comment, attachment, database, data-source, or view action tools.
@@ -214,7 +215,9 @@ graph.
    state transitions.
 4. **Read path (2 weeks):** search, page/block read, data-source query, comments,
    limits and pagination.
-5. **Approved create (1 week):** create page with exact-parent approval.
+5. **Approved create and update (shipped in preview):** create one page with
+   exact-parent approval and update one explicit page target with bounded,
+   destructive-effect disclosure.
 6. **Targeted update (1-2 weeks):** properties and bounded block operations with
    conflict preflight.
 7. **Skills and rc (1 week):** decision/project templates, metrics, runbook.
@@ -238,7 +241,8 @@ implementation slice so users and reviewers can see the intended account path.
   auth, with unverified-access copy. The copy must also disclose that hosted
   Notion search may include Notion-connected sources when the user's workspace
   enables them. Apply the runtime so Hermes can discover the read-only
-  `june_notion` bridge and the approved-create `june_notion_actions` bridge. Do
+  `june_notion` MCP server/toolset and the approved create/update
+  `june_notion_actions` MCP server/toolset. Do
   not show workspace/account content or a selected-resource privacy claim in
   this slice.
 - **Connected verified:** show workspace/account metadata and the exact

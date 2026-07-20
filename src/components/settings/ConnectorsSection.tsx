@@ -76,7 +76,7 @@ type NotionConnectorRowProps = {
   onDisconnect: () => void;
 };
 
-type NotionConnectorState = "disconnected" | "connected" | "reconnect_required";
+type NotionConnectorState = "disconnected" | "connected" | "reconnect_required" | "unavailable";
 
 type NotionConnectorActionsProps = Pick<
   NotionConnectorRowProps,
@@ -86,6 +86,7 @@ type NotionConnectorActionsProps = Pick<
 };
 
 function notionConnectorState(account: ConnectorAccount | null): NotionConnectorState {
+  if (account?.status === "unavailable") return "unavailable";
   if (account?.status === "reconnect_required") return "reconnect_required";
   if (account?.status === "connected") return "connected";
   return "disconnected";
@@ -100,6 +101,7 @@ function NotionConnectorActions({
   onDisconnect,
 }: NotionConnectorActionsProps) {
   const busy = connecting || disconnecting;
+  if (state === "unavailable") return null;
   const disconnectButton = (
     <button
       type="button"
@@ -164,6 +166,11 @@ function NotionConnectorRow({
     reconnect_required: {
       subtitle: NOTION_RECONNECT_BLURB,
       statusLabel: "Reconnect needed",
+      statusTone: "warning",
+    },
+    unavailable: {
+      subtitle: "June could not confirm the Notion connection. Try again in a moment.",
+      statusLabel: "Status unavailable",
       statusTone: "warning",
     },
   } as const;

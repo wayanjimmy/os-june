@@ -1,8 +1,8 @@
 //! Notion hosted MCP connector preview.
 //!
-//! This module owns Notion's hosted MCP OAuth flow, a read-only hosted MCP
-//! bridge for the `june_notion` Hermes toolset, and a narrow approved action
-//! bridge for Notion page creation. Other write/action tools stay denied;
+//! This module owns Notion's hosted MCP OAuth flow, the `june_notion` MCP
+//! server and read toolset, and the `june_notion_actions` MCP server with the
+//! approved page-create and page-update toolset. All other actions are denied;
 //! selected-resource scoping is not verified in this preview. See ADR 0033.
 
 use crate::{
@@ -294,7 +294,7 @@ enum RefreshFailureKind {
 pub async fn status(app: &AppHandle) -> Result<NotionConnectionStatus, AppError> {
     let stored = store::load().await?;
     let health = notion_health(app).await?;
-    let connected = stored.is_some() && health != ConnectorAccountStatus::ReconnectRequired;
+    let connected = stored.is_some() && health == ConnectorAccountStatus::Connected;
     Ok(NotionConnectionStatus {
         connected,
         account_id: NOTION_ACCOUNT_ID.to_string(),
@@ -1448,13 +1448,31 @@ fn preview_action(tool_name: &str, arguments: &serde_json::Value) -> String {
 }
 
 fn preflight_create_pages_arguments(arguments: &serde_json::Value) -> Result<(), AppError> {
-    if !arguments.is_object() {
+    let Some(object) = arguments.as_object() else {
         return Err(AppError::new(
             "notion_create_pages_invalid_args",
             "Notion page creation requires object arguments.",
         ));
-    }
+    };
     reject_async_action(arguments)?;
+    let Some(pages) = object.get("pages").and_then(serde_json::Value::as_array) else {
+        return Err(AppError::new(
+            "notion_create_pages_invalid_pages",
+            "Notion page creation requires a pages array containing exactly one page object.",
+        ));
+    };
+    if pages.len() > 1 {
+        return Err(AppError::new(
+            "notion_create_pages_batching_unsupported",
+            "Create one Notion page at a time so June can show and approve its exact destination and content.",
+        ));
+    }
+    if pages.len() != 1 || !pages[0].is_object() {
+        return Err(AppError::new(
+            "notion_create_pages_invalid_pages",
+            "Notion page creation requires a pages array containing exactly one page object.",
+        ));
+    }
     Ok(())
 }
 
@@ -1516,23 +1534,18 @@ fn preflight_update_page_arguments(arguments: &serde_json::Value) -> Result<(), 
 }
 
 fn summarize_create_pages_action(arguments: &serde_json::Value) -> String {
-    let count = create_pages_count(arguments).unwrap_or(1);
-    if count == 1 {
-        "Create a Notion page".to_string()
-    } else {
-        format!("Create {count} Notion pages")
-    }
+    let _ = arguments;
+    "Create a Notion page".to_string()
 }
 
 fn preview_create_pages_action(arguments: &serde_json::Value) -> String {
     let title = find_first_string_by_key(arguments, &["title", "name"])
         .unwrap_or_else(|| "(title not specified)".to_string());
     let parent = create_pages_parent(arguments).unwrap_or_else(|| "Not specified".to_string());
-    let count = create_pages_count(arguments).unwrap_or(1);
     let payload =
         summarize_create_payload(arguments).unwrap_or_else(|| "Not specified".to_string());
     format!(
-        "Operation: create Notion page | Pages: {count} | Title: {} | Parent: {} | Content: {}",
+        "Operation: create Notion page | Title: {} | Parent: {} | Content: {}",
         truncate_approval_value(&title),
         truncate_approval_value(&parent),
         truncate_approval_value(&payload)
@@ -1548,13 +1561,31 @@ fn preview_update_page_action(arguments: &serde_json::Value) -> String {
     let title = update_page_title(arguments).unwrap_or_else(|| "Not specified".to_string());
     let changes = summarize_update_change_keys(arguments);
     let values = summarize_update_values(arguments).unwrap_or_else(|| "Not specified".to_string());
+    let destructive_disclosure = blank_replacement_disclosure(arguments)
+        .map(|disclosure| format!(" | Effect: {disclosure}"))
+        .unwrap_or_default();
     format!(
-        "Operation: update Notion page | Target: {} | Title: {} | Changes: {} | Values: {}",
+        "Operation: update Notion page{} | Target: {} | Title: {} | Changes: {} | Values: {}",
+        destructive_disclosure,
         truncate_approval_value(&target),
         truncate_approval_value(&title),
-        truncate_approval_value(&changes),
+        changes,
         truncate_approval_value(&values)
     )
+}
+
+fn blank_replacement_disclosure(arguments: &serde_json::Value) -> Option<&'static str> {
+    let object = arguments.as_object()?;
+    let command = object.get("command")?.as_str()?;
+    let replacement = object.get("new_str")?.as_str()?;
+    if !replacement.trim().is_empty() {
+        return None;
+    }
+    match command {
+        "replace_content" => Some("Blank replacement clears all page content"),
+        "replace_content_range" => Some("Blank replacement deletes the selected content"),
+        _ => None,
+    }
 }
 
 fn summarize_update_change_keys(arguments: &serde_json::Value) -> String {
@@ -1564,8 +1595,7 @@ fn summarize_update_change_keys(arguments: &serde_json::Value) -> String {
     let keys: Vec<&str> = object
         .keys()
         .map(String::as_str)
-        .filter(|key| *key != "page_id")
-        .take(6)
+        .filter(|key| *key != "page_id" && NOTION_UPDATE_PAGE_ALLOWED_FIELDS.contains(key))
         .collect();
     if keys.is_empty() {
         "None".to_string()
@@ -1668,13 +1698,6 @@ fn update_page_title(arguments: &serde_json::Value) -> Option<String> {
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn create_pages_count(arguments: &serde_json::Value) -> Option<usize> {
-    arguments
-        .get("pages")
-        .and_then(serde_json::Value::as_array)
-        .map(|pages| pages.len().max(1))
 }
 
 fn create_pages_parent(arguments: &serde_json::Value) -> Option<String> {
@@ -2364,6 +2387,34 @@ mod tests {
     }
 
     #[test]
+    fn create_pages_preflight_requires_exactly_one_object() {
+        for arguments in [
+            serde_json::json!({}),
+            serde_json::json!({ "pages": [] }),
+            serde_json::json!({ "pages": ["not an object"] }),
+        ] {
+            assert_eq!(
+                preflight_create_pages_arguments(&arguments)
+                    .unwrap_err()
+                    .code,
+                "notion_create_pages_invalid_pages"
+            );
+        }
+        assert_eq!(
+            preflight_create_pages_arguments(&serde_json::json!({
+                "pages": [{ "title": "One" }, { "title": "Two" }]
+            }))
+            .unwrap_err()
+            .code,
+            "notion_create_pages_batching_unsupported"
+        );
+        assert!(preflight_create_pages_arguments(&serde_json::json!({
+            "pages": [{ "title": "One" }]
+        }))
+        .is_ok());
+    }
+
+    #[test]
     fn create_pages_preview_shows_nested_parent() {
         let arguments = serde_json::json!({
             "pages": [{
@@ -2433,6 +2484,70 @@ mod tests {
         let preview = preview_update_page_action(&arguments);
         assert!(preview.contains("selection_with_ellipsis: Old intro...old ending"));
         assert!(preview.contains("new_str: Replacement range markdown"));
+    }
+
+    #[test]
+    fn update_page_preview_discloses_blank_replacement_effects() {
+        for (command, expected) in [
+            (
+                "replace_content",
+                "Blank replacement clears all page content",
+            ),
+            (
+                "replace_content_range",
+                "Blank replacement deletes the selected content",
+            ),
+        ] {
+            let arguments = serde_json::json!({
+                "page_id": "page-123",
+                "command": command,
+                "selection_with_ellipsis": "Old intro...old ending",
+                "new_str": "  "
+            });
+            assert!(preflight_update_page_arguments(&arguments).is_ok());
+            let preview = preview_update_page_action(&arguments);
+            assert!(preview.contains(expected));
+            assert!(preview.find(expected).unwrap() < preview.find("Target:").unwrap());
+        }
+    }
+
+    #[test]
+    fn update_page_change_summary_includes_every_present_allowlisted_key() {
+        let arguments = serde_json::json!({
+            "page_id": "page-123",
+            "allow_async": false,
+            "command": "replace_content_range",
+            "selection_with_ellipsis": "old...text",
+            "new_str": "new",
+            "properties": { "Status": "Done" },
+            "content": "content",
+            "children": [],
+            "body": "body",
+            "markdown": "markdown",
+            "title": "Title",
+            "name": "Name",
+            "unknown_null_one": null,
+            "unknown_null_two": null,
+            "unknown_null_three": null
+        });
+        let changes = summarize_update_change_keys(&arguments);
+        for key in [
+            "allow_async",
+            "command",
+            "selection_with_ellipsis",
+            "new_str",
+            "properties",
+            "content",
+            "children",
+            "body",
+            "markdown",
+            "title",
+            "name",
+        ] {
+            assert!(changes.contains(key), "missing {key} from {changes}");
+        }
+        assert!(!changes.contains("unknown_null"));
+        assert!(preview_update_page_action(&arguments).contains(&format!("Changes: {changes}")));
     }
 
     #[test]
