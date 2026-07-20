@@ -12,6 +12,13 @@ vi.mock("../lib/hermes-adapter", () => ({
     session.last_active ?? session.started_at ?? "",
 }));
 
+// The sidebar refreshes the session→profile map before applying a session list,
+// and only commits the sessions once that resolves.
+vi.mock("../lib/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/tauri")>()),
+  listSessionProfiles: vi.fn(async () => []),
+}));
+
 const sessions: HermesSessionInfo[] = [
   {
     id: "session-completed",
@@ -29,7 +36,7 @@ const sessions: HermesSessionInfo[] = [
 
 const notes: NoteListItemDto[] = [];
 
-function renderSidebar(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
+async function renderSidebar(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
   render(
     <Sidebar
       notes={notes}
@@ -46,7 +53,9 @@ function renderSidebar(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     />,
   );
 
-  act(() => {
+  // The sidebar commits the list only after its session→profile refresh
+  // resolves, so flush that microtask before asserting.
+  await act(async () => {
     window.dispatchEvent(
       new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
         detail: {
@@ -56,6 +65,7 @@ function renderSidebar(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
         },
       }),
     );
+    await Promise.resolve();
   });
 }
 
@@ -67,7 +77,7 @@ describe("Sidebar agent session completion actions", () => {
 
   it("files completed sessions outside the active list", async () => {
     const user = userEvent.setup();
-    renderSidebar({
+    await renderSidebar({
       completedSessionIds: { "session-completed": "2026-06-04T14:00:00Z" },
     });
 
@@ -85,7 +95,7 @@ describe("Sidebar agent session completion actions", () => {
   it("marks an active session as complete", async () => {
     const user = userEvent.setup();
     const onToggleSessionCompleted = vi.fn();
-    renderSidebar({ onToggleSessionCompleted });
+    await renderSidebar({ onToggleSessionCompleted });
 
     await user.click(await screen.findByRole("button", { name: "Actions for Active session" }));
     await user.click(screen.getByRole("menuitem", { name: "Mark as complete" }));
@@ -96,7 +106,7 @@ describe("Sidebar agent session completion actions", () => {
   it("marks a completed session as active", async () => {
     const user = userEvent.setup();
     const onToggleSessionCompleted = vi.fn();
-    renderSidebar({
+    await renderSidebar({
       completedSessionIds: { "session-completed": "2026-06-04T14:00:00Z" },
       onToggleSessionCompleted,
     });
