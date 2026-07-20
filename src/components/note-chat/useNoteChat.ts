@@ -619,7 +619,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
           }
           rememberNoteChatSession(noteId, activeStoredSessionId);
           if (activeProfile !== "default") {
-            // The chat list scopes by the session→profile map (ADR 0029): an
+            // The chat list scopes by the session→profile map (ADR 0031): an
             // unstamped named-profile chat would surface under default.
             await assignSessionToProfile(activeStoredSessionId, activeProfile);
           }

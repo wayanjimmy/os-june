@@ -225,7 +225,7 @@ _Avoid_: permission, profile.
 A named Hermes configuration (its own home subtree, SOUL, model default,
 skills, MCP servers) a session runs under; `default` always exists. The
 **active profile** is the sticky default new sessions pick up — June writes
-it on switch and also threads it explicitly on `session.create` (ADR 0028).
+it on switch and also threads it explicitly on `session.create` (ADR 0030).
 Managed in Settings under Profiles. A profile may specialize June, but the
 agent still presents as June.
 _Avoid_: "profile" for Runtime mode, the Seatbelt sandbox profile, or the
@@ -245,7 +245,10 @@ _Avoid_: web browsing (that is `june_web` search/fetch), browser toolset
 The consent-gated capability (JUN-278 phase 2) that lets the agent operate
 Mac apps in the background - no cursor, focus, or Space theft - via the
 pinned runtime's computer-use toolset and a June-bundled pinned cua-driver.
-Every mutating action requires approval; requires a vision-capable model.
+The first access to each verified target app requires one authorization for
+the current attended task; requires a vision-capable model. Bringing a parked
+window into June's current Stage Manager group is part of that authorized app
+use and does not ask again.
 _Avoid_: desktop automation (vague), computer_use toolset (that is the
 upstream mechanism, not the June capability).
 

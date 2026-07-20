@@ -440,7 +440,7 @@ export function Sidebar({
   const newSessionShortcut = primaryShortcutLabel("N");
   const inSettings = activeView === "settings";
   const [allAgentSessions, setAgentSessions] = useState<HermesSessionInfo[]>([]);
-  // Chats belong to the profile they were created under (ADR 0029): the
+  // Chats belong to the profile they were created under (ADR 0031): the
   // sidebar filters its list through the session→profile map and re-filters
   // live when the active profile switches, without waiting for a re-fetch.
   const [sessionProfiles, setSessionProfiles] = useState<SessionProfileMap | null>(null);
@@ -711,6 +711,16 @@ export function Sidebar({
         icon: <IconZap size={15} />,
         searchText: normalizeCommandQuery("routines go to"),
         action: () => onChangeView("routines"),
+      },
+      {
+        id: "quick:connectors",
+        label: "Go to connectors",
+        icon: <IconPlugin1 size={15} />,
+        searchText: normalizeCommandQuery("connectors plugins computer use google linear go to"),
+        action: () => {
+          onSettingsTabChange?.("connectors");
+          onChangeView("settings");
+        },
       },
       {
         id: "quick:settings",

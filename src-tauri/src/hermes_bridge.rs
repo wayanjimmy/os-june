@@ -41,8 +41,12 @@ const JUNE_HERMES_DISABLE_SANDBOX_ENV: &str = "JUNE_HERMES_DISABLE_SANDBOX";
 const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
 // v2026.6.19 - see the bump PR for the audited pin-to-tag compatibility delta.
 const HERMES_AGENT_INSTALL_COMMIT: &str = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3";
-const HERMES_RUNTIME_PATCH_SET: &str = "june-approval-v1";
+const HERMES_RUNTIME_PATCH_SET: &str = "june-approval-memory-v13";
 const HERMES_RUNTIME_PATCHED_SOURCE_HASHES: &[(&str, &str)] = &[
+    (
+        "agent/agent_init.py",
+        "58e0f7294cea8d778b15827af4e0a1d5c2d9e0a2db27b2a6697f30811053629e",
+    ),
     (
         "tools/approval.py",
         "56e88034ebcac8cff8c579c56345e4cb3fe2fe597360687d40b68daefd402e3d",
@@ -53,7 +57,23 @@ const HERMES_RUNTIME_PATCHED_SOURCE_HASHES: &[(&str, &str)] = &[
     ),
     (
         "tui_gateway/server.py",
-        "41197c75c3aee760a05a8ecdce4daa3d0ca7f62b34486f29a21f097086a4ef4e",
+        "f375627e61af5e61434592d4d17d39c20e7ba1a7e1280715b0e5a7387a0f26a1",
+    ),
+    (
+        "cron/scheduler.py",
+        "2d82e4958494b52bcae27527e8ad64f0b730d22906e725609fda7725b410abfa",
+    ),
+    (
+        "model_tools.py",
+        "d7628473ee72f7ac1395f9f2fe43dc2956523b186545bf6abece1b834ac6892d",
+    ),
+    (
+        "utils.py",
+        "08a0a0203bdee74eb8bc4f8bc31e97eb7621913deca2d087fb56c722b1304ef5",
+    ),
+    (
+        "gateway/platforms/telegram.py",
+        "fd996e2deaebe3ca2856167876f8ff498735744ff7c884eedd85736a7fd2c318",
     ),
 ];
 const HERMES_SOURCE_TARBALL_URL: &str =
@@ -96,6 +116,7 @@ const JUNE_PROVIDER_PROXY_MAX_HEADER_BYTES: usize = 32 * 1024;
 // pinned-value assert on each side; change BOTH or an in-window agent chat
 // request is rejected by the stricter gate again.
 const JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES: usize = 12 * 1024 * 1024;
+const JUNE_PROVIDER_PROXY_MAX_COMPUTER_USE_BODY_BYTES: usize = 64 * 1024;
 // Compile-time half of that cross-workspace invariant: the june-api side mirrors
 // it against `DEFAULT_MAX_AGENT_CHAT_BYTES`.
 const _: () = assert!(JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES == 12 * 1024 * 1024);
@@ -159,6 +180,10 @@ const JUNE_RECORDER_MCP_SCRIPT: &str = include_str!("hermes/june_recorder_mcp.py
 /// Environment variable the `june_recorder` MCP reads its loopback proxy token
 /// from. Kept out of argv so it does not appear in process listings.
 const JUNE_RECORDER_MCP_TOKEN_ENV: &str = "JUNE_RECORDER_PROXY_TOKEN";
+/// Interactive-dashboard-only Computer use capability. Config stores an env
+/// placeholder rather than the secret, so launchd routine gateways cannot opt
+/// into the registered server by naming its toolset.
+const JUNE_COMPUTER_USE_MCP_TOKEN_ENV: &str = "JUNE_COMPUTER_USE_PROXY_TOKEN";
 /// Hermes-side per-tool-call timeout for `june_recorder`; the top of the
 /// timeout stack (proxy lease < python client < this), pinned by
 /// `recorder_timeout_stack_ordering_holds`.
@@ -435,9 +460,109 @@ const HERMES_CONFIG_FILE: &str = "config.yaml";
 /// target and the temp, and the temp is named with a random suffix
 /// (`.config_<random>.tmp`), so it must be granted via a prefix regex rather
 /// than a literal — exactly like `AGENT_CLI_STATE_FILE_PREFIXES` does for
-/// Claude Code's `.claude.json.<hash>` atomic writes. The prefix is relative to
-/// `$HERMES_HOME`; the trailing wildcard covers the random suffix.
+/// Claude Code's `.claude.json.<hash>` atomic writes. The profile joins this
+/// basename beside the resolved config target; its wildcard covers the random
+/// suffix without granting the target's whole directory.
 const HERMES_CONFIG_ATOMIC_TEMP_PREFIX: &str = ".config_";
+const HERMES_CONFIG_CORRUPT_BACKUP_PREFIX: &str = "config.yaml.corrupt-";
+const HERMES_CONFIG_WRITER_LOCK_FILE: &str = ".june-config.lock";
+
+/// Cross-process advisory lock shared with June's sealed Hermes
+/// `utils.atomic_yaml_write` patch. The Rust host and every pinned Hermes
+/// config writer take this lock around config.yaml replacement. The Hermes
+/// patch also reconciles Memory's deny from the file while holding this lock,
+/// so a stale snapshot cannot erase that policy. OS locks are released
+/// automatically if either process crashes.
+struct HermesConfigWriterLock {
+    file: fs::File,
+    #[cfg(target_os = "windows")]
+    overlapped: Box<windows::Win32::System::IO::OVERLAPPED>,
+}
+
+impl HermesConfigWriterLock {
+    fn acquire(config_path: &Path) -> Result<Self, AppError> {
+        let parent = config_path.parent().ok_or_else(|| {
+            AppError::new(
+                "hermes_bridge_config_failed",
+                "Hermes config path has no parent directory.",
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+        let lock_path = parent.join(HERMES_CONFIG_WRITER_LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(AppError::new(
+                    "hermes_bridge_config_failed",
+                    io::Error::last_os_error().to_string(),
+                ));
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows::Win32::{
+                Foundation::HANDLE,
+                Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK},
+                System::IO::OVERLAPPED,
+            };
+            // LockFileEx and Python's msvcrt.locking both allow a range beyond
+            // EOF. Keep the coordination file data-free: initializing a byte
+            // before taking the first lock would itself create a race.
+            let mut overlapped = Box::<OVERLAPPED>::default();
+            unsafe {
+                LockFileEx(
+                    HANDLE(file.as_raw_handle()),
+                    LOCKFILE_EXCLUSIVE_LOCK,
+                    None,
+                    1,
+                    0,
+                    overlapped.as_mut(),
+                )
+            }
+            .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+            return Ok(Self { file, overlapped });
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        Ok(Self { file })
+    }
+}
+
+impl Drop for HermesConfigWriterLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::UnlockFileEx};
+            let _ = unsafe {
+                UnlockFileEx(
+                    HANDLE(self.file.as_raw_handle()),
+                    None,
+                    1,
+                    0,
+                    self.overlapped.as_mut(),
+                )
+            };
+        }
+    }
+}
 
 const ISOLATED_HERMES_ENV_VARS: &[&str] = &[
     "HERMES_HOME",
@@ -448,6 +573,15 @@ const ISOLATED_HERMES_ENV_VARS: &[&str] = &[
     "HERMES_TUI_TOOLSETS",
     "HERMES_MODEL",
     "HERMES_PROVIDER",
+    "HERMES_CUA_DRIVER_CMD",
+    "HERMES_CUA_DRIVER_VERSION",
+    "HERMES_COMPUTER_USE_BACKEND",
+    "JUNE_COMPUTER_USE_PROXY_TOKEN",
+    "CUA_DRIVER_RS_MCP_FORCE_PROXY",
+    "CUA_DRIVER_RS_MCP_NO_RELAUNCH",
+    "CUA_DRIVER_RS_PERMISSIONS_GATE",
+    "CUA_DRIVER_RS_TELEMETRY_ENABLED",
+    "CUA_DRIVER_RS_UPDATE_CHECK",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "VENICE_API_KEY",
@@ -465,6 +599,29 @@ const ISOLATED_HERMES_ENV_VARS: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
 ];
 
+/// The pinned runtime's `hermes-cli` composite includes its own browser and
+/// direct cua-driver tool. June owns both trust boundaries, so interactive
+/// sessions expand that composite into the same native capabilities minus
+/// `browser` and `computer_use`; app-owned MCP servers are appended later.
+const JUNE_INTERACTIVE_NATIVE_TOOLSETS: &[&str] = &[
+    "web",
+    "terminal",
+    "file",
+    "vision",
+    "image_gen",
+    "skills",
+    "tts",
+    "todo",
+    "memory",
+    "session_search",
+    "clarify",
+    "code_execution",
+    "delegation",
+    "cronjob",
+    "homeassistant",
+    "kanban",
+];
+
 #[derive(Default)]
 pub struct HermesBridge {
     /// Up to one runtime process per write-access mode, keyed by `full_mode`.
@@ -475,11 +632,12 @@ pub struct HermesBridge {
     /// multi-process access). Starting one mode never disturbs the other.
     processes: Mutex<HashMap<bool, HermesProcess>>,
     /// Serializes the whole start sequence (config sync, runtime install,
-    /// spawn, readiness wait). Concurrent starts would otherwise write
-    /// `config.yaml` concurrently and could run two installers at once.
-    /// This must be an async mutex because it is held across awaits; the
-    /// `processes` mutex above is std::sync and must never be held across
-    /// an await.
+    /// spawn, readiness wait) and every June-mediated `config.yaml` writer:
+    /// direct policy edits plus mutating dashboard requests. Concurrent starts
+    /// would otherwise run two installers, while uncoordinated whole-file
+    /// config writes could erase each other. This must be an async mutex
+    /// because it is held across awaits; the `processes` mutex above is
+    /// std::sync and must never be held across an await.
     start_lock: tokio::sync::Mutex<()>,
     /// Monotonic id assigned to each spawned Hermes process so a start
     /// attempt only tears down the exact process it launched (and not a
@@ -592,6 +750,7 @@ struct SharedProviderProxy {
     memory_token: String,
     recorder_token: String,
     connector_token: String,
+    computer_use_token: String,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -609,6 +768,10 @@ struct ProviderProxyState {
     /// secret, handed only to the four connector MCP servers: a user's mail and
     /// calendar must not be reachable with the general provider token.
     connector_token: String,
+    /// Computer use gets a dedicated capability token. The MCP transport can
+    /// reach exactly the Rust policy broker and cannot use the provider,
+    /// recorder, or connector routes with this credential.
+    computer_use_token: String,
     image_sources: ImageSourceCapabilities,
     videos_dir: PathBuf,
     video_generation_enabled: bool,
@@ -1283,6 +1446,13 @@ async fn start_hermes_bridge_inner(
         None
     };
     let june_recorder_mcp = sync_june_recorder_mcp(app, &command)?;
+    // Resolved from the live catalog so Hermes' vision tools attach an image
+    // straight to a vision-capable model's context instead of falling back to
+    // the (unconfigured) auxiliary vision LLM. `provider: custom` hides the
+    // capability from Hermes, so June has to declare it via config.
+    let supports_vision = crate::providers::generation_model_supports_vision().await;
+    let computer_use_ready = crate::computer_use::runtime_ready(app, supports_vision).await;
+    let june_computer_use_mcp = sync_june_computer_use_mcp(app, &command, computer_use_ready)?;
     // The private-connector MCP servers are registered only when there is
     // something for them to serve: the four Google servers need a connected
     // Google account (v1: the first connected account), and the Linear read
@@ -1293,11 +1463,6 @@ async fn start_hermes_bridge_inner(
     let connectors_registered = june_connector_mcp
         .as_ref()
         .is_some_and(|configs| configs.base.is_some());
-    // Resolved from the live catalog so Hermes' vision tools attach an image
-    // straight to a vision-capable model's context instead of falling back to
-    // the (unconfigured) auxiliary vision LLM. `provider: custom` hides the
-    // capability from Hermes, so June has to declare it via config.
-    let supports_vision = crate::providers::generation_model_supports_vision().await;
     sync_hermes_config(
         app,
         &hermes_home,
@@ -1306,12 +1471,14 @@ async fn start_hermes_bridge_inner(
         &provider_proxy.memory_token,
         &provider_proxy.recorder_token,
         &provider_proxy.connector_token,
+        &provider_proxy.computer_use_token,
         supports_vision,
         &june_context_mcp,
         &june_web_mcp,
         &june_image_mcp,
         june_video_mcp.as_ref(),
         &june_recorder_mcp,
+        &june_computer_use_mcp,
         june_connector_mcp.as_ref(),
     )?;
 
@@ -1416,6 +1583,15 @@ async fn start_hermes_bridge_inner(
         &token,
         environment_hint_for_spawn(full_mode, sandbox_available),
     );
+    if computer_use_ready {
+        // Only the visible interactive dashboard gets this capability. The
+        // separately launched routine gateway sees the same config placeholder
+        // but this variable is scrubbed from its environment.
+        cmd.env(
+            JUNE_COMPUTER_USE_MCP_TOKEN_ENV,
+            &provider_proxy.computer_use_token,
+        );
+    }
     // The pinned runtime otherwise auto-includes every enabled MCP server in
     // interactive chat. Per-routine autonomy servers carry bypass grants, so
     // normal chat must never inherit them; it uses the base action servers,
@@ -1556,6 +1732,7 @@ async fn ensure_provider_proxy(
                 memory_token: proxy.memory_token.clone(),
                 recorder_token: proxy.recorder_token.clone(),
                 connector_token: proxy.connector_token.clone(),
+                computer_use_token: proxy.computer_use_token.clone(),
             });
         }
     }
@@ -1563,6 +1740,7 @@ async fn ensure_provider_proxy(
     let memory_token = random_token();
     let recorder_token = random_token();
     let connector_token = random_token();
+    let computer_use_token = random_token();
     let app_data_dir = crate::app_paths::app_data_dir(app)
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
     let image_sources = ImageSourceCapabilities {
@@ -1575,6 +1753,7 @@ async fn ensure_provider_proxy(
         memory_token.clone(),
         recorder_token.clone(),
         connector_token.clone(),
+        computer_use_token.clone(),
         image_sources,
         videos_dir,
         crate::feature_flags::VIDEO_GENERATION_ENABLED,
@@ -1594,6 +1773,7 @@ async fn ensure_provider_proxy(
         memory_token: memory_token.clone(),
         recorder_token: recorder_token.clone(),
         connector_token: connector_token.clone(),
+        computer_use_token: computer_use_token.clone(),
         shutdown: Some(started.shutdown),
     });
     Ok(SharedProviderProxyInfo {
@@ -1602,6 +1782,7 @@ async fn ensure_provider_proxy(
         memory_token,
         recorder_token,
         connector_token,
+        computer_use_token,
     })
 }
 
@@ -1611,6 +1792,7 @@ struct SharedProviderProxyInfo {
     memory_token: String,
     recorder_token: String,
     connector_token: String,
+    computer_use_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1646,6 +1828,13 @@ struct JuneVideoMcpConfig {
 struct JuneRecorderMcpConfig {
     command: String,
     script_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct JuneComputerUseMcpConfig {
+    command: String,
+    script_path: PathBuf,
+    enabled: bool,
 }
 
 /// One private-connector MCP server (gmail/gcal read/action, linear read).
@@ -1777,7 +1966,31 @@ pub async fn connectors_apply_runtime(
     app: AppHandle,
     bridge: State<'_, HermesBridge>,
 ) -> Result<(), AppError> {
-    reapply_hermes_runtime(&app, &bridge).await
+    reapply_hermes_runtime(&app, &bridge)
+        .await
+        .map_err(runtime_apply_command_error)
+}
+
+fn runtime_apply_command_error(error: AppError) -> AppError {
+    tracing::warn!(
+        ?error,
+        "runtime apply command failed; returning June-owned user-facing copy",
+    );
+    AppError::new(
+        "runtime_apply_failed",
+        "June could not finish applying this change. Try again or restart June.",
+    )
+}
+
+/// Re-render June-owned MCP policy for every live mode while preserving each
+/// process's project directory. Computer use uses the same restart seam as
+/// connectors, but its broker independently fails closed immediately on grant
+/// revocation even if a runtime restart later fails.
+pub(crate) async fn apply_runtime_config_change(
+    app: &AppHandle,
+    bridge: &HermesBridge,
+) -> Result<(), AppError> {
+    reapply_hermes_runtime(app, bridge).await
 }
 
 /// Serializes `reapply_hermes_runtime` so two rapid settings toggles cannot
@@ -1788,6 +2001,24 @@ pub async fn connectors_apply_runtime(
 /// `config.yaml` from the persisted settings file, serializing also guarantees
 /// the last reapply to run reads the last-persisted value.
 static REAPPLY_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Apply June's native-memory toolset policy without requiring a live bridge
+/// connection. The launchd routine gateway can remain alive after both bridge
+/// modes stop, but it reloads config.yaml before every cron run, so this direct
+/// shared-config mutation closes the gateway-only window immediately.
+pub(crate) async fn apply_memory_runtime_policy(
+    app: &AppHandle,
+    bridge: &HermesBridge,
+) -> Result<(), AppError> {
+    // Serialize against spawn-time config rendering and every June-mediated
+    // dashboard mutation. Read the authoritative setting only after acquiring
+    // the writer lock: a caller that persisted an older toggle can never apply
+    // its stale argument after a newer toggle has won.
+    let _start_guard = bridge.start_lock.lock().await;
+    let hermes_home = resolve_june_hermes_home(app)?;
+    let settings_path = crate::commands::memory_settings_path(app)?;
+    apply_persisted_memory_policy_file(&hermes_home.join(HERMES_CONFIG_FILE), &settings_path)
+}
 
 /// Re-render `config.yaml` for every live runtime and restart the routine
 /// gateway so a settings change that feeds the rendered config (connector MCP
@@ -2653,19 +2884,38 @@ fn write_managed_skill_file(
 
 #[cfg(windows)]
 pub(crate) fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
-    match fs::rename(temp_path, path) {
-        Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            fs::remove_file(path)?;
-            fs::rename(temp_path, path)
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let temp_wide: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // ReplaceFileW keeps the destination's ACL and other security metadata.
+    // A missing destination has no metadata to preserve, so fall back to the
+    // replace-existing move used for first creation. Both are same-volume,
+    // write-through swaps with no visibility gap.
+    unsafe {
+        if path.exists() {
+            ReplaceFileW(
+                PCWSTR(path_wide.as_ptr()),
+                PCWSTR(temp_wide.as_ptr()),
+                PCWSTR::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                None,
+                None,
+            )
+        } else {
+            MoveFileExW(
+                PCWSTR(temp_wide.as_ptr()),
+                PCWSTR(path_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
         }
-        Err(error) => Err(error),
     }
+    .map_err(|_| io::Error::last_os_error())
 }
 
 #[cfg(not(windows))]
@@ -3777,6 +4027,19 @@ async fn hermes_api_json(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, AppError> {
+    // Hermes dashboard mutations may rewrite the same config.yaml that June
+    // renders at spawn and edits for Memory. The app-side lock avoids overlap
+    // with other June requests while the pinned Hermes writer's file lock and
+    // stale-snapshot reconciliation preserve the current Memory deny across
+    // the separate dashboard process. One HTTP round-trip holds this guard for
+    // at most HERMES_API_REQUEST_TIMEOUT; FIFO wait can still include earlier
+    // queued mutations, so increasing that bound also increases Memory-toggle
+    // latency and must be reviewed as part of this serialization contract.
+    let _config_write_guard = if hermes_request_may_write(&method) {
+        Some(bridge.start_lock.lock().await)
+    } else {
+        None
+    };
     let connections = live_connections(bridge)?;
     let Some(connection) = connections.first() else {
         return Err(AppError::new(
@@ -3822,6 +4085,19 @@ pub async fn hermes_admin_request(
     let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
         .map_err(|_| AppError::new("hermes_admin_invalid_method", "Unsupported HTTP method."))?;
 
+    // Every foundation admin mutation reaches the separate dashboard process
+    // here. Avoid overlapping it with other June mutations; the pinned Hermes
+    // writer separately locks the file and reconciles the current Memory deny
+    // before replacing config.yaml. Each request holds this guard for at most
+    // HERMES_API_REQUEST_TIMEOUT, but FIFO wait can include earlier queued
+    // mutations; keep that aggregate delay in mind for settings operations
+    // that need the same lock.
+    let _config_write_guard = if hermes_request_may_write(&method) {
+        Some(bridge.start_lock.lock().await)
+    } else {
+        None
+    };
+
     let connections = live_connections(&bridge)?;
     let Some(connection) = connections
         .iter()
@@ -3833,6 +4109,10 @@ pub async fn hermes_admin_request(
         ));
     };
     hermes_connection_json(connection, method, &path, body).await
+}
+
+fn hermes_request_may_write(method: &reqwest::Method) -> bool {
+    !matches!(method.as_str(), "GET" | "HEAD")
 }
 
 /// How long June waits for the `hermes mcp login` CLI to finish before
@@ -6106,7 +6386,7 @@ async fn hermes_connection_json(
         // source-search timeout) so a slow but successful response — partial
         // results included — wins over a proxy-level timeout that would
         // otherwise surface as a misleading "could not reach Hermes" error.
-        .timeout(Duration::from_secs(45))
+        .timeout(HERMES_API_REQUEST_TIMEOUT)
         .build()
         .map_err(|error| AppError::new("hermes_bridge_api_failed", error.to_string()))?;
     let mut request = client
@@ -6137,6 +6417,11 @@ async fn hermes_connection_json(
     serde_json::from_str(&text)
         .map_err(|error| AppError::new("hermes_bridge_api_failed", error.to_string()))
 }
+
+/// Total request budget for one Hermes dashboard round-trip. Mutating requests
+/// hold `HermesBridge::start_lock` for this interval to serialize whole-tree
+/// config writes with spawn and direct Memory-policy changes.
+const HERMES_API_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Stops every runtime process. The shared provider proxy stays up — it is
 /// process-independent and the next start reuses it; `shutdown()` is the
@@ -6812,10 +7097,12 @@ fn managed_hermes_runtime_current(app: &AppHandle) -> Result<bool, AppError> {
     let Ok(metadata) = fs::read_to_string(metadata_path) else {
         return Ok(false);
     };
-    Ok(
-        metadata.contains(&format!(r#""commit":"{HERMES_AGENT_INSTALL_COMMIT}""#))
-            && metadata.contains(&format!(r#""patchSet":"{HERMES_RUNTIME_PATCH_SET}""#)),
-    )
+    Ok(hermes_runtime_metadata_is_current(&metadata))
+}
+
+fn hermes_runtime_metadata_is_current(metadata: &str) -> bool {
+    metadata.contains(&format!(r#""commit":"{HERMES_AGENT_INSTALL_COMMIT}""#))
+        && metadata.contains(&format!(r#""patchSet":"{HERMES_RUNTIME_PATCH_SET}""#))
 }
 
 fn hermes_venv_command(venv_dir: &Path) -> PathBuf {
@@ -7411,6 +7698,15 @@ fn apply_isolated_hermes_env(
     for name in ISOLATED_HERMES_ENV_VARS {
         cmd.env_remove(name);
     }
+    // Future driver releases may add new override variables. Strip the whole
+    // namespaces as well as today's explicit list so a hostile inherited env
+    // cannot point Hermes at a driver or broker outside June's Rust boundary.
+    for (name, _) in std::env::vars_os() {
+        let name_text = name.to_string_lossy();
+        if name_text.starts_with("HERMES_CUA_DRIVER") || name_text.starts_with("CUA_DRIVER_RS_") {
+            cmd.env_remove(name);
+        }
+    }
     cmd.env("HERMES_HOME", hermes_home)
         .env("HERMES_DASHBOARD_SESSION_TOKEN", token)
         .env("NO_PROXY", "127.0.0.1,localhost,::1")
@@ -7445,7 +7741,7 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
     let image_source_key_path = image_source_capability_secret_path(&app_data_dir);
     let write_roots = sandbox_write_roots(hermes_home, &runtime_dir);
     let config_write_path = sandbox_config_write_path(hermes_home);
-    let config_temp_prefix = sandbox_config_temp_prefix(hermes_home);
+    let config_temp_prefix = sandbox_config_temp_prefix(&config_write_path);
     // Block the jailed agent from reading the connector token stores: the
     // Keychain is already denied above; add the dev plaintext connector token
     // files (debug builds' fallback custody, one per provider) explicitly.
@@ -7573,20 +7869,25 @@ fn sandbox_write_roots(hermes_home: &Path, runtime_dir: &Path) -> Vec<PathBuf> {
     canonical
 }
 
-/// The Hermes config file the jailed runtime persists through `save_config`,
-/// as an absolute path under `$HERMES_HOME`. Returned separately from the broad
-/// write roots so the grant is auditable and scoped to exactly this one file.
+/// The Hermes config target the jailed runtime persists through `save_config`.
+/// Resolve an existing symlink exactly as both atomic writers do so a target
+/// outside `$HERMES_HOME` receives the narrow file grant instead of failing
+/// inside Seatbelt or replacing the symlink itself.
 #[cfg(target_os = "macos")]
 fn sandbox_config_write_path(hermes_home: &Path) -> PathBuf {
-    hermes_home.join(HERMES_CONFIG_FILE)
+    let path = hermes_home.join(HERMES_CONFIG_FILE);
+    hermes_config_replacement_target(&path).unwrap_or(path)
 }
 
-/// Absolute atomic-temp prefix for `config.yaml` writes under `$HERMES_HOME`
-/// (e.g. `…/hermes/.config_`). Granted as a regex prefix so the random suffix
-/// in `.config_<random>.tmp` is covered.
+/// Absolute atomic-temp prefix beside the resolved config target (for example,
+/// `…/.config_`). Granted as a regex prefix so the random suffix in
+/// `.config_<random>.tmp` is covered without widening the target directory.
 #[cfg(target_os = "macos")]
-fn sandbox_config_temp_prefix(hermes_home: &Path) -> PathBuf {
-    hermes_home.join(HERMES_CONFIG_ATOMIC_TEMP_PREFIX)
+fn sandbox_config_temp_prefix(config_write_path: &Path) -> PathBuf {
+    config_write_path
+        .parent()
+        .unwrap_or(config_write_path)
+        .join(HERMES_CONFIG_ATOMIC_TEMP_PREFIX)
 }
 
 /// Renders the Seatbelt (SBPL) profile text. Strategy: allow broadly, because
@@ -7628,10 +7929,10 @@ fn build_sandbox_profile(
     // through Hermes' `save_config` whenever an admin surface mutates skills,
     // toolsets, or MCP servers. That write is atomic: a `.config_<random>.tmp`
     // is streamed then `os.replace`d onto config.yaml, which needs write+unlink
-    // on the target and the temp. The temp already lives under a write root
-    // ($HERMES_HOME), but spell out both the config file and its random-suffixed
-    // temp prefix explicitly so the grant is auditable and survives any future
-    // tightening of the broad roots. Nothing outside $HERMES_HOME is widened.
+    // on the target and the temp. Spell out both the resolved config file and
+    // its random-suffixed temp prefix so an external symlink target works
+    // without granting its whole directory. The explicit grants also stay
+    // auditable if the broad roots are tightened later.
     out.push_str(";; Hermes' own config.yaml: the jailed runtime persists admin changes\n");
     out.push_str(";; through save_config (atomic temp + os.replace). Grant the file and its\n");
     out.push_str(";; random-suffixed atomic temp; everything else stays under the write jail.\n");
@@ -7947,6 +8248,27 @@ fn sync_june_recorder_mcp(
     })
 }
 
+fn sync_june_computer_use_mcp(
+    app: &AppHandle,
+    hermes_command: &str,
+    enabled: bool,
+) -> Result<JuneComputerUseMcpConfig, AppError> {
+    let data_dir = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("june_computer_use_mcp_failed", error.to_string()))?;
+    let mcp_dir = data_dir.join(JUNE_CONTEXT_MCP_DIR_NAME);
+    fs::create_dir_all(&mcp_dir)
+        .map_err(|error| AppError::new("june_computer_use_mcp_failed", error.to_string()))?;
+    let script_path = mcp_dir.join(crate::computer_use::MCP_SCRIPT_NAME);
+    fs::write(&script_path, crate::computer_use::MCP_SCRIPT)
+        .map_err(|error| AppError::new("june_computer_use_mcp_failed", error.to_string()))?;
+
+    Ok(JuneComputerUseMcpConfig {
+        command: hermes_python_command(hermes_command),
+        script_path,
+        enabled,
+    })
+}
+
 /// True when this connected account should back the `june_linear` read
 /// server: a CONNECTED Linear workspace with at least one selected team. The
 /// team gate is the registration counterpart of the fail-closed grant checks
@@ -8179,12 +8501,14 @@ fn sync_hermes_config(
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
+    computer_use_proxy_token: &str,
     supports_vision: bool,
     june_context_mcp: &JuneContextMcpConfig,
     june_web_mcp: &JuneWebMcpConfig,
     june_image_mcp: &JuneImageMcpConfig,
     june_video_mcp: Option<&JuneVideoMcpConfig>,
     june_recorder_mcp: &JuneRecorderMcpConfig,
+    june_computer_use_mcp: &JuneComputerUseMcpConfig,
     june_connector_mcp: Option<&ConnectorMcpConfigs>,
 ) -> Result<(), AppError> {
     sync_hermes_config_with_external_dirs(
@@ -8194,12 +8518,14 @@ fn sync_hermes_config(
         memory_proxy_token,
         recorder_proxy_token,
         connector_proxy_token,
+        computer_use_proxy_token,
         supports_vision,
         june_context_mcp,
         june_web_mcp,
         june_image_mcp,
         june_video_mcp,
         june_recorder_mcp,
+        june_computer_use_mcp,
         june_connector_mcp,
         &builtin_external_skill_dirs(app),
     )
@@ -8213,18 +8539,21 @@ fn sync_hermes_config_with_external_dirs(
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
+    computer_use_proxy_token: &str,
     supports_vision: bool,
     june_context_mcp: &JuneContextMcpConfig,
     june_web_mcp: &JuneWebMcpConfig,
     june_image_mcp: &JuneImageMcpConfig,
     june_video_mcp: Option<&JuneVideoMcpConfig>,
     june_recorder_mcp: &JuneRecorderMcpConfig,
+    june_computer_use_mcp: &JuneComputerUseMcpConfig,
     june_connector_mcp: Option<&ConnectorMcpConfigs>,
     default_external_skill_dirs: &[PathBuf],
 ) -> Result<(), AppError> {
     let model = crate::providers::generation_model();
     let base_url = format!("http://127.0.0.1:{provider_proxy_port}/v1");
     let config_path = hermes_home.join("config.yaml");
+    let _config_lock = HermesConfigWriterLock::acquire(&config_path)?;
     let external_skill_dirs =
         effective_external_skill_dirs_from_config(&config_path, default_external_skill_dirs);
     let connector_base = june_connector_mcp.and_then(|configs| configs.base.as_ref());
@@ -8234,6 +8563,7 @@ fn sync_hermes_config_with_external_dirs(
         image: Some(june_image_mcp),
         video: june_video_mcp,
         recorder: Some(june_recorder_mcp),
+        computer_use: Some(june_computer_use_mcp),
         gmail: connector_base.and_then(|base| base.gmail.as_ref()),
         gmail_actions: connector_base.and_then(|base| base.gmail_actions.as_ref()),
         gcal: connector_base.and_then(|base| base.gcal.as_ref()),
@@ -8244,6 +8574,9 @@ fn sync_hermes_config_with_external_dirs(
             .map(|configs| configs.autos.as_slice())
             .unwrap_or(&[]),
     };
+    let memory_enabled = mcp_configs.context.map_or(true, |context| {
+        june_memory_enabled(&context.memory_settings_path)
+    });
     let cron_toolsets = cron_platform_toolsets(&mcp_configs);
     let config = render_hermes_config(
         &model,
@@ -8253,6 +8586,7 @@ fn sync_hermes_config_with_external_dirs(
         memory_proxy_token,
         recorder_proxy_token,
         connector_proxy_token,
+        computer_use_proxy_token,
         &cron_toolsets,
         &external_skill_dirs,
         mcp_configs,
@@ -8263,9 +8597,29 @@ fn sync_hermes_config_with_external_dirs(
     // wiped them on every June spawn. June's rendered keys still win — the
     // provider proxy port/token legitimately change per spawn — but every key
     // June does not render survives.
-    let merged = merge_hermes_config(&config_path, &config);
-    std::fs::write(config_path, merged)
-        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))
+    let source_backup_created =
+        preserve_replaced_hermes_config_if_needed(&config_path, memory_enabled)?;
+    let mut merged =
+        serde_yaml::from_str::<serde_yaml::Value>(&merge_hermes_config(&config_path, &config))
+            .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    let repaired_invalid_shape = apply_memory_toolset_policy(&mut merged, memory_enabled);
+    if repaired_invalid_shape && !source_backup_created {
+        match fs::read(&config_path) {
+            Ok(existing) => {
+                backup_corrupt_hermes_config(&config_path, &existing)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::new(
+                    "hermes_bridge_config_failed",
+                    error.to_string(),
+                ))
+            }
+        }
+    }
+    let merged = serde_yaml::to_string(&merged)
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    write_hermes_config_atomic(&config_path, &merged)
 }
 
 /// Deep-merges June's freshly rendered config over the existing `config.yaml`,
@@ -8294,6 +8648,291 @@ fn merge_hermes_config(existing_path: &std::path::Path, rendered: &str) -> Strin
     prune_connector_mcp_servers(&mut existing);
     let merged = deep_merge_yaml(existing, overlay);
     serde_yaml::to_string(&merged).unwrap_or_else(|_| rendered.to_string())
+}
+
+/// Mutates only June's global native-memory policy. Every other agent setting,
+/// user-added MCP server, skill setting, and unrelated disabled toolset stays
+/// intact. `memory` is normalized to at most one entry while disabled and is
+/// the only entry removed when memory is re-enabled.
+fn apply_memory_toolset_policy(config: &mut serde_yaml::Value, memory_enabled: bool) -> bool {
+    let serde_yaml::Value::Mapping(root) = config else {
+        return false;
+    };
+    let agent_key = serde_yaml::Value::String("agent".to_string());
+    let disabled_key = serde_yaml::Value::String("disabled_toolsets".to_string());
+
+    if memory_enabled {
+        let Some(agent) = root.get_mut(&agent_key) else {
+            return false;
+        };
+        let Some(agent) = agent.as_mapping_mut() else {
+            return false;
+        };
+        let Some(disabled) = agent.get_mut(&disabled_key) else {
+            return false;
+        };
+        let Some(disabled) = disabled.as_sequence_mut() else {
+            return false;
+        };
+        disabled.retain(|item| item.as_str() != Some("memory"));
+        if disabled.is_empty() {
+            agent.remove(&disabled_key);
+        }
+        return false;
+    }
+
+    let mut repaired_invalid_shape = false;
+    let agent = root
+        .entry(agent_key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    if !agent.is_mapping() {
+        *agent = serde_yaml::Value::Mapping(Default::default());
+        repaired_invalid_shape = true;
+    }
+    let agent = agent
+        .as_mapping_mut()
+        .expect("agent was normalized to a mapping");
+    let disabled = agent.entry(disabled_key).or_insert_with(|| {
+        serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("memory".to_string())])
+    });
+    let Some(disabled) = disabled.as_sequence_mut() else {
+        *disabled =
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("memory".to_string())]);
+        return true;
+    };
+    disabled.retain(|item| item.as_str() != Some("memory"));
+    disabled.push(serde_yaml::Value::String("memory".to_string()));
+    repaired_invalid_shape
+}
+
+fn hermes_config_has_invalid_root(config: &serde_yaml::Value) -> bool {
+    !config.is_mapping()
+}
+
+fn memory_policy_has_invalid_shape(config: &serde_yaml::Value) -> bool {
+    let Some(agent) = config.get("agent") else {
+        return false;
+    };
+    let Some(agent) = agent.as_mapping() else {
+        return true;
+    };
+    agent
+        .get(serde_yaml::Value::String("disabled_toolsets".to_string()))
+        .is_some_and(|disabled| !disabled.is_sequence())
+}
+
+/// Preserve config text before a normal spawn replaces YAML that cannot be
+/// safely merged or must repair a malformed disabled-toolset shape. This is
+/// especially important while Memory is off: fail closed with a valid global
+/// denylist, but retain the original bytes beside config.yaml for diagnosis.
+fn preserve_replaced_hermes_config_if_needed(
+    config_path: &Path,
+    memory_enabled: bool,
+) -> Result<bool, AppError> {
+    let existing = match fs::read_to_string(config_path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(AppError::new(
+                "hermes_bridge_config_failed",
+                error.to_string(),
+            ))
+        }
+    };
+    let parsed = serde_yaml::from_str::<serde_yaml::Value>(&existing);
+    let needs_backup = match parsed {
+        Ok(ref config) => {
+            hermes_config_has_invalid_root(config)
+                || (!memory_enabled && memory_policy_has_invalid_shape(config))
+        }
+        Err(_) => true,
+    };
+    if needs_backup {
+        backup_corrupt_hermes_config(config_path, existing.as_bytes())?;
+    }
+    Ok(needs_backup)
+}
+
+/// Narrow, connection-independent config mutation used by the Memory toggle.
+/// Missing and corrupt files fail closed while disabling: June writes a valid
+/// minimal policy, preserving corrupt bytes first. Enabling against corrupt
+/// YAML leaves it untouched; no deny can be safely identified or removed, and
+/// the setting permits memory in that state anyway.
+fn update_hermes_memory_policy_file(
+    config_path: &Path,
+    memory_enabled: bool,
+) -> Result<(), AppError> {
+    let _config_lock = HermesConfigWriterLock::acquire(config_path)?;
+    let existing = match fs::read_to_string(config_path) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(AppError::new(
+                "hermes_bridge_config_failed",
+                error.to_string(),
+            ))
+        }
+    };
+    if memory_enabled && existing.is_none() {
+        return Ok(());
+    }
+
+    let mut config = match existing.as_deref() {
+        Some(raw) => match serde_yaml::from_str::<serde_yaml::Value>(raw) {
+            Ok(config) if config.is_mapping() => config,
+            Ok(_) | Err(_) if memory_enabled => return Ok(()),
+            Ok(_) | Err(_) => {
+                backup_corrupt_hermes_config(config_path, raw.as_bytes())?;
+                serde_yaml::Value::Mapping(Default::default())
+            }
+        },
+        None => serde_yaml::Value::Mapping(Default::default()),
+    };
+    let repaired_invalid_shape = apply_memory_toolset_policy(&mut config, memory_enabled);
+    if repaired_invalid_shape {
+        if let Some(raw) = existing.as_deref() {
+            backup_corrupt_hermes_config(config_path, raw.as_bytes())?;
+        }
+    }
+    let serialized = serde_yaml::to_string(&config)
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    write_hermes_config_atomic(config_path, &serialized)
+}
+
+/// Re-read the fail-closed authoritative setting at the point of mutation.
+/// Keeping the setting out of the caller's arguments prevents an older toggle
+/// from overwriting a newer one after waiting for the shared config writer lock.
+fn apply_persisted_memory_policy_file(
+    config_path: &Path,
+    settings_path: &Path,
+) -> Result<(), AppError> {
+    update_hermes_memory_policy_file(config_path, june_memory_enabled(settings_path))
+}
+
+fn backup_corrupt_hermes_config(config_path: &Path, contents: &[u8]) -> Result<PathBuf, AppError> {
+    let parent = config_path.parent().ok_or_else(|| {
+        AppError::new(
+            "hermes_bridge_config_failed",
+            "Hermes config path has no parent directory.",
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    let backup_path = parent.join(format!(
+        "{HERMES_CONFIG_CORRUPT_BACKUP_PREFIX}{}.bak",
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut backup = options
+        .open(&backup_path)
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    backup
+        .write_all(contents)
+        .and_then(|_| backup.sync_all())
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    Ok(backup_path)
+}
+
+fn write_hermes_config_atomic(config_path: &Path, contents: &str) -> Result<(), AppError> {
+    let target_path = hermes_config_replacement_target(config_path)
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    let parent = target_path.parent().ok_or_else(|| {
+        AppError::new(
+            "hermes_bridge_config_failed",
+            "Hermes config path has no parent directory.",
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
+    let temporary_path = parent.join(format!(
+        "{HERMES_CONFIG_ATOMIC_TEMP_PREFIX}{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    let write_result = (|| -> io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // config.yaml contains on-device provider proxy and connector
+            // credentials. Match Hermes' mkstemp writer so a new file is never
+            // briefly broader than owner-only before final metadata is applied.
+            options.mode(0o600);
+        }
+        let mut temporary = options.open(&temporary_path)?;
+        preserve_hermes_config_metadata(&target_path, &temporary)?;
+        temporary.write_all(contents.as_bytes())?;
+        temporary.sync_all()?;
+        drop(temporary);
+        replace_file(&temporary_path, &target_path)
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(AppError::new(
+            "hermes_bridge_config_failed",
+            error.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve an existing symlink before replacing config.yaml. Replacing the link
+/// itself would detach managed/dotfile-backed Hermes homes and leave the real
+/// config unchanged. A dangling link fails closed instead of being destroyed.
+fn hermes_config_replacement_target(config_path: &Path) -> io::Result<PathBuf> {
+    match fs::symlink_metadata(config_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(config_path),
+        Ok(_) => Ok(config_path.to_path_buf()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(config_path.to_path_buf()),
+        Err(error) => Err(error),
+    }
+}
+
+fn preserve_hermes_config_metadata(target_path: &Path, temporary: &fs::File) -> io::Result<()> {
+    let metadata = match fs::metadata(target_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    temporary.set_permissions(metadata.permissions())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+
+        // Preserve the existing file's ACL in addition to its POSIX mode. The
+        // content is deliberately excluded; only COPYFILE_SECURITY metadata is
+        // copied onto the still-empty temporary file before secret bytes land.
+        const COPYFILE_SECURITY: u32 = (1 << 0) | (1 << 1);
+        extern "C" {
+            fn fcopyfile(
+                from: libc::c_int,
+                to: libc::c_int,
+                state: *mut libc::c_void,
+                flags: u32,
+            ) -> libc::c_int;
+        }
+        let source = fs::File::open(target_path)?;
+        let result = unsafe {
+            fcopyfile(
+                source.as_raw_fd(),
+                temporary.as_raw_fd(),
+                std::ptr::null_mut(),
+                COPYFILE_SECURITY,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
 }
 
 /// Removes June's connector MCP server entries (`june_gmail`, `june_gcal`,
@@ -8338,7 +8977,10 @@ fn hermes_interactive_toolsets(config_path: &Path) -> Vec<String> {
     let Some(config) = config else {
         // Fail closed for MCP access: a malformed config gets the native
         // interactive default but no globally registered MCP server.
-        return vec!["hermes-cli".to_string()];
+        return JUNE_INTERACTIVE_NATIVE_TOOLSETS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
     };
 
     let mut selected: Vec<String> = config
@@ -8353,6 +8995,39 @@ fn hermes_interactive_toolsets(config_path: &Path) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_else(|| vec!["hermes-cli".to_string()]);
+
+    // The upstream composite contains its direct browser and computer-use
+    // implementations. Expand it before handing the list to the TUI gateway,
+    // which accepts only an allowlist and does not apply agent.disabled_toolsets.
+    // Direct selections are filtered too. This keeps the app-owned brokers as
+    // the only way either capability can enter an interactive June session.
+    let had_cli_composite = selected.iter().any(|name| {
+        name == "hermes-cli"
+            || name == "coding"
+            || name == "hermes-acp"
+            || name == "hermes-api-server"
+            || name == "hermes-gateway"
+    });
+    selected.retain(|name| {
+        !matches!(
+            name.as_str(),
+            "hermes-cli"
+                | "coding"
+                | "hermes-acp"
+                | "hermes-api-server"
+                | "hermes-gateway"
+                | "browser"
+                | "browser_tools"
+                | "computer_use"
+        )
+    });
+    if had_cli_composite {
+        selected.extend(
+            JUNE_INTERACTIVE_NATIVE_TOOLSETS
+                .iter()
+                .map(|name| (*name).to_string()),
+        );
+    }
 
     let enabled_mcp: Vec<String> = config
         .get("mcp_servers")
@@ -8405,6 +9080,9 @@ struct BuiltinMcpConfigs<'a> {
     image: Option<&'a JuneImageMcpConfig>,
     video: Option<&'a JuneVideoMcpConfig>,
     recorder: Option<&'a JuneRecorderMcpConfig>,
+    /// Always rendered so a revoked or not-yet-ready grant overwrites any
+    /// stale enabled value left in the merged Hermes config.
+    computer_use: Option<&'a JuneComputerUseMcpConfig>,
     gmail: Option<&'a JuneConnectorMcpConfig>,
     gmail_actions: Option<&'a JuneConnectorMcpConfig>,
     gcal: Option<&'a JuneConnectorMcpConfig>,
@@ -8591,6 +9269,7 @@ fn render_hermes_config(
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
+    computer_use_proxy_token: &str,
     cron_toolsets: &str,
     external_skill_dirs: &[PathBuf],
     mcp_configs: BuiltinMcpConfigs<'_>,
@@ -8611,6 +9290,7 @@ fn render_hermes_config(
         memory_proxy_token,
         recorder_proxy_token,
         connector_proxy_token,
+        computer_use_proxy_token,
     );
     format!(
         r#"model:
@@ -8622,6 +9302,7 @@ fn render_hermes_config(
   supports_vision: {supports_vision}
 agent:
   max_turns: 90
+  disabled_toolsets: [browser, computer_use]
 display:
   skin: mono
 platform_toolsets:
@@ -8643,6 +9324,7 @@ fn render_mcp_servers_config(
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
+    computer_use_proxy_token: &str,
 ) -> String {
     let mut entries = String::new();
     if let Some(config) = configs.context {
@@ -8666,6 +9348,13 @@ fn render_mcp_servers_config(
             config,
             base_url,
             recorder_proxy_token,
+        ));
+    }
+    if let Some(config) = configs.computer_use {
+        entries.push_str(&render_computer_use_mcp_entry(
+            config,
+            base_url,
+            computer_use_proxy_token,
         ));
     }
     // Read connector servers get the read timeout; action servers get a longer
@@ -8890,6 +9579,38 @@ fn render_recorder_mcp_entry(
         base_url = yaml_string(base_url),
         token_env = JUNE_RECORDER_MCP_TOKEN_ENV,
         token = yaml_string(proxy_token),
+    )
+}
+
+fn render_computer_use_mcp_entry(
+    config: &JuneComputerUseMcpConfig,
+    base_url: &str,
+    _proxy_token: &str,
+) -> String {
+    let proxy_url = format!(
+        "{}{}",
+        base_url.trim_end_matches("/v1"),
+        crate::computer_use::PROXY_PATH
+    );
+    format!(
+        r#"  {server_name}:
+    enabled: {enabled}
+    command: {command}
+    args:
+      - {script_path}
+    env:
+      PYTHONUNBUFFERED: "1"
+      JUNE_COMPUTER_USE_PROXY_URL: {proxy_url}
+      JUNE_COMPUTER_USE_PROXY_TOKEN: {token}
+    timeout: 660
+    connect_timeout: 10
+"#,
+        server_name = crate::computer_use::MCP_SERVER_NAME,
+        enabled = config.enabled,
+        command = yaml_string(&config.command),
+        script_path = yaml_string(&config.script_path.to_string_lossy()),
+        proxy_url = yaml_string(&proxy_url),
+        token = yaml_string(&format!("${{{JUNE_COMPUTER_USE_MCP_TOKEN_ENV}}}")),
     )
 }
 
@@ -9382,6 +10103,7 @@ async fn start_june_provider_proxy(
     memory_token: String,
     recorder_token: String,
     connector_token: String,
+    computer_use_token: String,
     image_sources: ImageSourceCapabilities,
     videos_dir: PathBuf,
     video_generation_enabled: bool,
@@ -9415,6 +10137,7 @@ async fn start_june_provider_proxy(
             memory_token,
             recorder_token,
             connector_token,
+            computer_use_token,
             image_sources,
             videos_dir,
             video_generation_enabled,
@@ -9486,6 +10209,7 @@ async fn handle_june_provider_connection(
         &state.memory_token,
         &state.recorder_token,
         &state.connector_token,
+        &state.computer_use_token,
     );
     // Authenticate on the parsed headers BEFORE reading the body, so an
     // unauthenticated local process cannot force the loopback proxy to buffer a
@@ -9696,6 +10420,24 @@ async fn handle_june_provider_connection(
         }
         ("GET", "/v1/recorder/status") => {
             write_json_response(&mut stream, 200, recorder_status_body()).await?;
+        }
+        ("POST", crate::computer_use::PROXY_PATH) => {
+            let body = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let Some(app) = state.app.as_ref() else {
+                write_json_response(
+                    &mut stream,
+                    503,
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": "Computer use is unavailable." }],
+                        "isError": true,
+                    }),
+                )
+                .await?;
+                return Ok(());
+            };
+            let result = crate::computer_use::handle_proxy_action(app, body).await;
+            write_json_response(&mut stream, 200, result).await?;
         }
         ("POST", path) if matches!(path, "/v1/memory/save" | "/v1/memory/forget") => {
             handle_memory_route(&mut stream, &state, path, &request.body).await?;
@@ -11576,6 +12318,7 @@ async fn read_http_body(
 
 fn provider_proxy_max_body_bytes(path: &str) -> usize {
     match path {
+        crate::computer_use::PROXY_PATH => JUNE_PROVIDER_PROXY_MAX_COMPUTER_USE_BODY_BYTES,
         "/v1/image/generate" | "/v1/image/edit" => JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES,
         "/v1/video/animate" => JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES,
         "/v1/video/generate" => JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES,
@@ -11585,6 +12328,9 @@ fn provider_proxy_max_body_bytes(path: &str) -> usize {
 
 fn provider_proxy_body_too_large_message(path: &str) -> &'static str {
     match path {
+        crate::computer_use::PROXY_PATH => {
+            "computer_use_request_too_large: Computer use arguments are too large."
+        }
         "/v1/image/generate" | "/v1/image/edit" | "/v1/video/animate" => {
             "image_request_too_large: the image request body is too large for June. \
              Use a smaller image and retry."
@@ -11777,11 +12523,14 @@ fn provider_proxy_required_token<'a>(
     memory_token: &'a str,
     recorder_token: &'a str,
     connector_token: &'a str,
+    computer_use_token: &'a str,
 ) -> &'a str {
     if path.starts_with("/v1/memory/") {
         memory_token
     } else if path.starts_with("/v1/recorder/") {
         recorder_token
+    } else if path == crate::computer_use::PROXY_PATH {
+        computer_use_token
     } else if path.starts_with("/v1/gmail/")
         || path.starts_with("/v1/gmail-actions/")
         || path.starts_with("/v1/gcal/")
@@ -13813,6 +14562,7 @@ assert capped["has_more"] is True, capped
             memory_token: "memory-token".to_string(),
             recorder_token: "recorder-token".to_string(),
             connector_token: "connector-token".to_string(),
+            computer_use_token: "computer-use-token".to_string(),
             image_sources: ImageSourceCapabilities {
                 images_dir: home.path().join("images"),
                 secret: [7; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES],
@@ -13902,6 +14652,7 @@ assert capped["has_more"] is True, capped
             token: "proxy-token".to_string(),
             recorder_token: "recorder-token".to_string(),
             connector_token: "connector-token".to_string(),
+            computer_use_token: "computer-use-token".to_string(),
             memory_token: "memory-token".to_string(),
             image_sources: ImageSourceCapabilities {
                 images_dir: home.path().join("images"),
@@ -14419,7 +15170,8 @@ assert capped["has_more"] is True, capped
                     "provider-tok",
                     "memory-tok",
                     "recorder-tok",
-                    "connector-tok"
+                    "connector-tok",
+                    "computer-use-tok"
                 ),
                 "memory-tok"
             );
@@ -14435,7 +15187,8 @@ assert capped["has_more"] is True, capped
                     "provider-tok",
                     "memory-tok",
                     "recorder-tok",
-                    "connector-tok"
+                    "connector-tok",
+                    "computer-use-tok"
                 ),
                 "recorder-tok"
             );
@@ -14452,7 +15205,8 @@ assert capped["has_more"] is True, capped
                     "provider-tok",
                     "memory-tok",
                     "recorder-tok",
-                    "connector-tok"
+                    "connector-tok",
+                    "computer-use-tok"
                 ),
                 "provider-tok"
             );
@@ -14476,7 +15230,8 @@ assert capped["has_more"] is True, capped
                     "provider-tok",
                     "memory-tok",
                     "recorder-tok",
-                    "connector-tok"
+                    "connector-tok",
+                    "computer-use-tok"
                 ),
                 "connector-tok"
             );
@@ -14484,12 +15239,15 @@ assert capped["has_more"] is True, capped
 
         let provider_bearer = request_with_authorization("Bearer provider-tok");
         let recorder_bearer = request_with_authorization("Bearer recorder-tok");
+        let connector_bearer = request_with_authorization("Bearer connector-tok");
+        let computer_use_bearer = request_with_authorization("Bearer computer-use-tok");
         let recorder_required = provider_proxy_required_token(
             "/v1/recorder/start",
             "provider-tok",
             "memory-tok",
             "recorder-tok",
             "connector-tok",
+            "computer-use-tok",
         );
         let provider_required = provider_proxy_required_token(
             "/v1/models",
@@ -14497,6 +15255,15 @@ assert capped["has_more"] is True, capped
             "memory-tok",
             "recorder-tok",
             "connector-tok",
+            "computer-use-tok",
+        );
+        let computer_use_required = provider_proxy_required_token(
+            crate::computer_use::PROXY_PATH,
+            "provider-tok",
+            "memory-tok",
+            "recorder-tok",
+            "connector-tok",
+            "computer-use-tok",
         );
         assert!(!provider_proxy_authorized(
             &provider_bearer,
@@ -14514,6 +15281,17 @@ assert capped["has_more"] is True, capped
             &provider_bearer,
             provider_required
         ));
+        assert_eq!(computer_use_required, "computer-use-tok");
+        assert!(provider_proxy_authorized(
+            &computer_use_bearer,
+            computer_use_required
+        ));
+        for wrong_scope in [&provider_bearer, &recorder_bearer, &connector_bearer] {
+            assert!(!provider_proxy_authorized(
+                wrong_scope,
+                computer_use_required
+            ));
+        }
     }
 
     #[test]
@@ -14540,6 +15318,7 @@ assert capped["has_more"] is True, capped
             "memory-token",
             "recorder-token",
             "connector-token",
+            "computer-use-token",
         );
         assert!(!provider_proxy_authorized(
             &request_with_authorization("Bearer proxy-token"),
@@ -14659,7 +15438,7 @@ assert capped["has_more"] is True, capped
     }
 
     #[test]
-    fn provider_proxy_uses_larger_body_cap_for_image_tools() {
+    fn provider_proxy_uses_route_specific_body_caps() {
         assert_eq!(
             JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES,
             base64_encoded_len(HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES)
@@ -14681,6 +15460,14 @@ assert capped["has_more"] is True, capped
             provider_proxy_max_body_bytes("/v1/image/edit")
                 > provider_proxy_max_body_bytes("/v1/chat/completions")
         );
+        assert_eq!(
+            provider_proxy_max_body_bytes(crate::computer_use::PROXY_PATH),
+            JUNE_PROVIDER_PROXY_MAX_COMPUTER_USE_BODY_BYTES
+        );
+        assert!(
+            provider_proxy_max_body_bytes(crate::computer_use::PROXY_PATH)
+                < provider_proxy_max_body_bytes("/v1/chat/completions")
+        );
     }
 
     #[test]
@@ -14697,6 +15484,10 @@ assert capped["has_more"] is True, capped
         let image_message = provider_proxy_body_too_large_message("/v1/image/edit");
         assert!(image_message.contains("image_request_too_large"));
         assert!(!image_message.contains("maximum context length"));
+        let computer_use_message =
+            provider_proxy_body_too_large_message(crate::computer_use::PROXY_PATH);
+        assert!(computer_use_message.contains("computer_use_request_too_large"));
+        assert!(!computer_use_message.contains("maximum context length"));
     }
 
     #[test]
@@ -15475,6 +16266,7 @@ mcp_servers:
             "memory-token",
             "recorder-token",
             "connector-token",
+            "computer-use-token",
             "web",
             &[],
             BuiltinMcpConfigs {
@@ -15483,6 +16275,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -15533,6 +16326,287 @@ mcp_servers:
     }
 
     #[test]
+    fn memory_policy_adds_and_removes_only_the_native_memory_deny() {
+        let mut config: serde_yaml::Value = serde_yaml::from_str(
+            r#"agent:
+  max_turns: 42
+  disabled_toolsets: [browser, memory, memory]
+skills:
+  config:
+    user-skill:
+      enabled: true
+mcp_servers:
+  user_server:
+    url: https://example.com/mcp
+"#,
+        )
+        .expect("valid config");
+
+        apply_memory_toolset_policy(&mut config, false);
+        let disabled = config["agent"]["disabled_toolsets"]
+            .as_sequence()
+            .expect("disabled list");
+        assert_eq!(
+            disabled
+                .iter()
+                .filter(|item| item.as_str() == Some("memory"))
+                .count(),
+            1,
+        );
+        assert!(disabled.iter().any(|item| item.as_str() == Some("browser")));
+
+        apply_memory_toolset_policy(&mut config, true);
+        let disabled = config["agent"]["disabled_toolsets"]
+            .as_sequence()
+            .expect("other deny remains");
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0], "browser");
+        assert_eq!(config["agent"]["max_turns"], 42);
+        assert_eq!(config["skills"]["config"]["user-skill"]["enabled"], true);
+        assert_eq!(
+            config["mcp_servers"]["user_server"]["url"],
+            "https://example.com/mcp"
+        );
+    }
+
+    #[test]
+    fn direct_memory_policy_update_preserves_gateway_only_config_state() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config_path = home.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"agent:
+  max_turns: 12
+  disabled_toolsets: [browser]
+skills:
+  external_dirs: [/tmp/shared-skills]
+mcp_servers:
+  user_server:
+    url: https://example.com/mcp
+"#,
+        )
+        .expect("seed config");
+
+        // This path takes no HermesBridgeConnection: it is the exact mutation
+        // used when only the launchd routine gateway remains alive.
+        update_hermes_memory_policy_file(&config_path, false).expect("disable memory");
+        let disabled: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&config_path).expect("read disabled config"),
+        )
+        .expect("disabled config parses");
+        assert!(disabled["agent"]["disabled_toolsets"]
+            .as_sequence()
+            .expect("disabled list")
+            .iter()
+            .any(|item| item.as_str() == Some("memory")));
+        assert_eq!(disabled["agent"]["max_turns"], 12);
+        assert_eq!(disabled["skills"]["external_dirs"][0], "/tmp/shared-skills");
+        assert_eq!(
+            disabled["mcp_servers"]["user_server"]["url"],
+            "https://example.com/mcp"
+        );
+
+        update_hermes_memory_policy_file(&config_path, true).expect("enable memory");
+        let enabled: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&config_path).expect("read enabled config"),
+        )
+        .expect("enabled config parses");
+        let disabled = enabled["agent"]["disabled_toolsets"]
+            .as_sequence()
+            .expect("browser deny remains");
+        assert_eq!(
+            disabled,
+            &[serde_yaml::Value::String("browser".to_string())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_write_preserves_symlink_target_and_private_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let managed = home.path().join("managed");
+        std::fs::create_dir_all(&managed).expect("managed dir");
+        let target = managed.join("config.yaml");
+        std::fs::write(&target, "agent:\n  max_turns: 3\n").expect("seed target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .expect("private mode");
+        let link = home.path().join("config.yaml");
+        symlink(&target, &link).expect("config symlink");
+
+        write_hermes_config_atomic(&link, "agent:\n  disabled_toolsets: [memory]\n")
+            .expect("atomic config write");
+
+        assert!(std::fs::symlink_metadata(&link)
+            .expect("link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("target contents"),
+            "agent:\n  disabled_toolsets: [memory]\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("target metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_atomic_config_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let config = home.path().join("config.yaml");
+        write_hermes_config_atomic(&config, "agent:\n  disabled_toolsets: [memory]\n")
+            .expect("atomic config write");
+        assert_eq!(
+            std::fs::metadata(&config)
+                .expect("config metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn atomic_config_write_preserves_macos_acl() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config = home.path().join("config.yaml");
+        std::fs::write(&config, "agent:\n  max_turns: 3\n").expect("seed config");
+        let chmod = std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("everyone allow read")
+            .arg(&config)
+            .status()
+            .expect("apply test ACL");
+        assert!(chmod.success());
+
+        write_hermes_config_atomic(&config, "agent:\n  disabled_toolsets: [memory]\n")
+            .expect("atomic config write");
+
+        let listing = std::process::Command::new("/bin/ls")
+            .arg("-le")
+            .arg(&config)
+            .output()
+            .expect("list config ACL");
+        assert!(listing.status.success());
+        assert!(String::from_utf8_lossy(&listing.stdout).contains("allow read"));
+    }
+
+    #[test]
+    fn direct_memory_policy_update_reads_the_latest_persisted_toggle() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config_path = home.path().join("config.yaml");
+        let settings_path = home.path().join("memory-settings.json");
+        std::fs::write(&config_path, "agent:\n  disabled_toolsets: [browser]\n")
+            .expect("seed config");
+
+        std::fs::write(&settings_path, r#"{"enabled":false}"#).expect("persist disabled setting");
+        apply_persisted_memory_policy_file(&config_path, &settings_path)
+            .expect("apply latest disabled setting");
+        let disabled: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&config_path).expect("read disabled config"),
+        )
+        .expect("disabled config parses");
+        assert!(disabled["agent"]["disabled_toolsets"]
+            .as_sequence()
+            .expect("disabled list")
+            .iter()
+            .any(|item| item.as_str() == Some("memory")));
+
+        // This newer persisted value is the only policy input. There is no
+        // stale caller-provided bool that an older waiter can apply later.
+        std::fs::write(&settings_path, r#"{"enabled":true}"#).expect("persist enabled setting");
+        apply_persisted_memory_policy_file(&config_path, &settings_path)
+            .expect("apply latest enabled setting");
+        let enabled: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&config_path).expect("read enabled config"),
+        )
+        .expect("enabled config parses");
+        assert_eq!(
+            enabled["agent"]["disabled_toolsets"]
+                .as_sequence()
+                .expect("browser deny remains"),
+            &[serde_yaml::Value::String("browser".to_string())],
+        );
+    }
+
+    #[test]
+    fn dashboard_mutations_are_classified_as_config_writers() {
+        assert!(!hermes_request_may_write(&reqwest::Method::GET));
+        assert!(!hermes_request_may_write(&reqwest::Method::HEAD));
+        assert!(hermes_request_may_write(&reqwest::Method::POST));
+        assert!(hermes_request_may_write(&reqwest::Method::PUT));
+        assert!(hermes_request_may_write(&reqwest::Method::PATCH));
+        assert!(hermes_request_may_write(&reqwest::Method::DELETE));
+    }
+
+    #[test]
+    fn memory_off_repairs_missing_or_corrupt_config_fail_closed() {
+        let missing_home = tempfile::tempdir().expect("missing tempdir");
+        let missing = missing_home.path().join("config.yaml");
+        update_hermes_memory_policy_file(&missing, false).expect("repair missing config");
+        let repaired: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&missing).expect("read repaired missing config"),
+        )
+        .expect("missing replacement parses");
+        assert_eq!(repaired["agent"]["disabled_toolsets"][0], "memory");
+
+        let corrupt_home = tempfile::tempdir().expect("corrupt tempdir");
+        let corrupt = corrupt_home.path().join("config.yaml");
+        let original = b": invalid yaml: [";
+        std::fs::write(&corrupt, original).expect("seed corrupt config");
+        update_hermes_memory_policy_file(&corrupt, false).expect("repair corrupt config");
+        let repaired: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&corrupt).expect("read repaired corrupt config"),
+        )
+        .expect("corrupt replacement parses");
+        assert_eq!(repaired["agent"]["disabled_toolsets"][0], "memory");
+
+        let entries: Vec<PathBuf> = std::fs::read_dir(corrupt_home.path())
+            .expect("read config directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .collect();
+        let backup = entries
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(HERMES_CONFIG_CORRUPT_BACKUP_PREFIX)
+                            && name.ends_with(".bak")
+                    })
+            })
+            .expect("corrupt backup");
+        assert_eq!(std::fs::read(backup).expect("read backup"), original);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(backup)
+                    .expect("backup metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+            );
+        }
+        assert!(!entries.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(HERMES_CONFIG_ATOMIC_TEMP_PREFIX))
+        }));
+    }
+
+    #[test]
     fn merge_hermes_config_prunes_stale_connector_servers() {
         let home = tempfile::tempdir().expect("tempdir");
         let config_path = home.path().join("config.yaml");
@@ -15571,6 +16645,7 @@ mcp_servers:
             "memory",
             "recorder",
             "connector",
+            "computer-use",
             "web",
             &[],
             BuiltinMcpConfigs {
@@ -15579,6 +16654,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -15794,12 +16870,14 @@ mcp_servers:
             "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
+            "computer-use-proxy-token",
             false,
             &test_june_context_mcp_config(),
             &test_june_web_mcp_config(),
             &test_june_image_mcp_config(),
             None,
             &test_june_recorder_mcp_config(),
+            &test_june_computer_use_mcp_config(false),
             None,
             std::slice::from_ref(&default_dir),
         )
@@ -15846,6 +16924,7 @@ mcp_servers:
             "memory-tok",
             "recorder-tok",
             "connector-tok",
+            "computer-use-tok",
             "web, memory",
             &dirs,
             BuiltinMcpConfigs {
@@ -15854,6 +16933,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -15891,6 +16971,7 @@ mcp_servers:
             "memory-tok",
             "recorder-tok",
             "connector-tok",
+            "computer-use-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
@@ -15899,6 +16980,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -15943,6 +17025,14 @@ mcp_servers:
         }
     }
 
+    fn test_june_computer_use_mcp_config(enabled: bool) -> JuneComputerUseMcpConfig {
+        JuneComputerUseMcpConfig {
+            command: "/tmp/hermes/venv/bin/python".to_string(),
+            script_path: PathBuf::from("/tmp/june/hermes-mcp/june_computer_use_mcp.py"),
+            enabled,
+        }
+    }
+
     fn test_june_connector_mcp_config(script: &str) -> JuneConnectorMcpConfig {
         JuneConnectorMcpConfig {
             command: "/tmp/hermes/venv/bin/python".to_string(),
@@ -15969,6 +17059,7 @@ mcp_servers:
         let image = test_june_image_mcp_config();
         let video = test_june_video_mcp_config();
         let recorder = test_june_recorder_mcp_config();
+        let computer_use = test_june_computer_use_mcp_config(true);
         let gmail = test_june_connector_mcp_config("june_gmail_mcp.py");
         let gmail_actions = test_june_connector_mcp_config("june_gmail_actions_mcp.py");
         let gcal = test_june_connector_mcp_config("june_gcal_mcp.py");
@@ -15995,6 +17086,7 @@ mcp_servers:
             "memory-proxy-tok",
             "recorder-proxy-tok",
             "connector-proxy-tok",
+            "computer-use-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
@@ -16003,6 +17095,7 @@ mcp_servers:
                 image: Some(&image),
                 video: Some(&video),
                 recorder: Some(&recorder),
+                computer_use: Some(&computer_use),
                 gmail: Some(&gmail),
                 gmail_actions: Some(&gmail_actions),
                 gcal: Some(&gcal),
@@ -16017,6 +17110,10 @@ mcp_servers:
         assert!(config.contains("mcp_servers:\n  june_context:\n"));
         assert!(config.contains("  june_web:\n"));
         assert!(config.contains("  june_recorder:\n"));
+        assert!(config.contains("  june_computer_use:\n"));
+        assert!(config
+            .contains("agent:\n  max_turns: 90\n  disabled_toolsets: [browser, computer_use]\n"));
+        assert!(config.contains("  june_computer_use:\n    enabled: true\n"));
         assert!(config.contains("    command: \"/tmp/hermes/venv/bin/python\"\n"));
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_context_mcp.py\"\n"));
         assert!(config.contains("      - \"/tmp/june/notes.sqlite3\"\n"));
@@ -16068,6 +17165,15 @@ mcp_servers:
         // general provider token.
         assert!(config.contains("      JUNE_RECORDER_PROXY_TOKEN: \"recorder-proxy-tok\"\n"));
         assert!(!config.contains("      JUNE_RECORDER_PROXY_TOKEN: \"proxy-tok\"\n"));
+        assert!(config.contains(
+            "      JUNE_COMPUTER_USE_PROXY_TOKEN: \"${JUNE_COMPUTER_USE_PROXY_TOKEN}\"\n"
+        ));
+        assert!(!config.contains("computer-use-proxy-tok"));
+        assert!(config.contains(
+            "      JUNE_COMPUTER_USE_PROXY_URL: \"http://127.0.0.1:9/v1/computer-use/action\"\n"
+        ));
+        assert!(!config.contains("CUA_DRIVER_RS_"));
+        assert!(!config.contains("HERMES_CUA_DRIVER"));
         // The Hermes-side tool timeout must sit at the top of the stack
         // (proxy lease < python client < hermes), or Hermes reports failure
         // while June is still honestly waiting on the permission prompt;
@@ -16142,6 +17248,7 @@ mcp_servers:
             "memory-proxy-tok",
             "recorder-proxy-tok",
             "connector-proxy-tok",
+            "computer-use-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
@@ -16150,6 +17257,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: Some(&gmail),
                 gmail_actions: Some(&gmail_actions),
                 gcal: Some(&gcal),
@@ -16181,6 +17289,7 @@ mcp_servers:
             "memory-proxy-tok",
             "recorder-proxy-tok",
             "connector-proxy-tok",
+            "computer-use-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
@@ -16189,6 +17298,7 @@ mcp_servers:
                 image: Some(&image),
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -16217,6 +17327,7 @@ mcp_servers:
             "memory-tok",
             "recorder-tok",
             "connector-tok",
+            "computer-use-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
@@ -16225,6 +17336,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -16253,6 +17365,7 @@ mcp_servers:
             "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
+            "computer-use-proxy-token",
             "web, memory",
             &[],
             BuiltinMcpConfigs {
@@ -16261,6 +17374,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -16280,6 +17394,7 @@ mcp_servers:
             "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
+            "computer-use-proxy-token",
             "web, memory",
             &[],
             BuiltinMcpConfigs {
@@ -16288,6 +17403,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                computer_use: None,
                 gmail: None,
                 gmail_actions: None,
                 gcal: None,
@@ -16324,6 +17440,23 @@ mcp_servers:
         });
         std::fs::write(&hermes, "").expect("hermes");
         std::fs::write(&python, "").expect("python");
+
+        assert_eq!(
+            hermes_python_command(&hermes.to_string_lossy()),
+            python.to_string_lossy()
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn hermes_python_command_uses_the_bundled_architecture_selector() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bin = root.path().join("native").join("hermes").join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let hermes = bin.join("hermes");
+        let python = bin.join("python3");
+        std::fs::write(&hermes, "").expect("hermes");
+        std::fs::write(&python, "").expect("python selector");
 
         assert_eq!(
             hermes_python_command(&hermes.to_string_lossy()),
@@ -16378,6 +17511,19 @@ mcp_servers:
         assert!(error.message.contains("tools/approval.py"));
         assert!(error.message.contains("expected"));
         assert!(error.message.contains("got"));
+    }
+
+    #[test]
+    fn managed_runtime_provenance_rejects_the_previous_patch_set() {
+        let current = format!(
+            r#"{{"source":"NousResearch/hermes-agent","commit":"{HERMES_AGENT_INSTALL_COMMIT}","patchSet":"{HERMES_RUNTIME_PATCH_SET}"}}"#
+        );
+        assert!(hermes_runtime_metadata_is_current(&current));
+
+        let previous = format!(
+            r#"{{"source":"NousResearch/hermes-agent","commit":"{HERMES_AGENT_INSTALL_COMMIT}","patchSet":"june-approval-memory-v2"}}"#
+        );
+        assert!(!hermes_runtime_metadata_is_current(&previous));
     }
 
     #[test]
@@ -16453,6 +17599,21 @@ mcp_servers:
 
         assert_eq!(error.code, "hermes_gateway_start_failed");
         assert!(error.message.contains("exited"));
+    }
+
+    #[test]
+    fn runtime_apply_command_error_hides_embedded_runtime_details() {
+        let error = runtime_apply_command_error(AppError::new(
+            "hermes_bridge_start_failed",
+            "Hermes runtime failed to start.",
+        ));
+
+        assert_eq!(error.code, "runtime_apply_failed");
+        assert_eq!(
+            error.message,
+            "June could not finish applying this change. Try again or restart June."
+        );
+        assert!(!error.message.contains("Hermes"));
     }
 
     #[test]
@@ -16604,7 +17765,7 @@ mcp_servers:
     }
 
     #[test]
-    fn interactive_toolsets_exclude_per_routine_autonomy_servers() {
+    fn interactive_toolsets_exclude_bypass_and_per_routine_autonomy_servers() {
         let home = tempfile::tempdir().expect("tempdir");
         let config_path = home.path().join("config.yaml");
         std::fs::write(
@@ -16624,7 +17785,12 @@ mcp_servers:
         .expect("write config");
 
         let selected = hermes_interactive_toolsets(&config_path);
-        assert!(selected.contains(&"hermes-cli".to_string()));
+        for safe in JUNE_INTERACTIVE_NATIVE_TOOLSETS {
+            assert!(selected.contains(&(*safe).to_string()), "missing {safe}");
+        }
+        assert!(!selected.contains(&"hermes-cli".to_string()));
+        assert!(!selected.contains(&"browser".to_string()));
+        assert!(!selected.contains(&"computer_use".to_string()));
         assert!(selected.contains(&"june_context".to_string()));
         assert!(selected.contains(&"june_gmail".to_string()));
         assert!(selected.contains(&"june_gmail_actions".to_string()));
@@ -16688,6 +17854,7 @@ mcp_servers:
         let image = test_june_image_mcp_config();
         let video = test_june_video_mcp_config();
         let recorder = test_june_recorder_mcp_config();
+        let computer_use = test_june_computer_use_mcp_config(false);
         let connectors = ConnectorMcpConfigs {
             base: Some(ConnectorBaseMcpConfigs {
                 gmail: Some(test_june_connector_mcp_config("june_gmail_mcp.py")),
@@ -16715,12 +17882,14 @@ mcp_servers:
             "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
+            "computer-use-proxy-token",
             false,
             &mcp,
             &web,
             &image,
             Some(&video),
             &recorder,
+            &computer_use,
             Some(&connectors),
             &[],
         )
@@ -16728,36 +17897,41 @@ mcp_servers:
 
         let config = std::fs::read_to_string(home.path().join("config.yaml")).expect("read config");
         assert!(config.contains("platform_toolsets:"));
+        assert!(config.contains("  june_computer_use:\n    enabled: false\n"));
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).expect("valid config YAML");
         // Naming any MCP server flips cron's auto-include into an allowlist, so
         // every built-in READ server that must stay available to routines is
         // listed explicitly alongside the sandboxed toolsets, plus the
         // connector READ servers (june_linear joins the ambient reads exactly
         // like the gmail/gcal read servers). The base toolset gate still holds.
-        let cron_line = format!(
-            "cron: [{}, june_context, june_web, june_image, june_recorder, june_video, june_gmail, june_gcal, june_linear]",
-            CRON_SANDBOXED_TOOLSETS.join(", ")
-        );
-        assert!(
-            config.contains(&cron_line),
-            "cron allowlist mismatch:\n{config}"
-        );
+        let cron = parsed["platform_toolsets"]["cron"]
+            .as_sequence()
+            .expect("cron allowlist");
+        let expected: Vec<serde_yaml::Value> = CRON_SANDBOXED_TOOLSETS
+            .iter()
+            .copied()
+            .chain([
+                "june_context",
+                "june_web",
+                "june_image",
+                "june_recorder",
+                "june_video",
+                "june_gmail",
+                "june_gcal",
+                "june_linear",
+            ])
+            .map(|toolset| serde_yaml::Value::String(toolset.to_string()))
+            .collect();
+        assert_eq!(cron, &expected, "cron allowlist mismatch:\n{config}");
         // The connector ACTION servers and per-job AUTO servers are NEVER in
         // the cron default: approval and autonomy are opted into per job by
-        // trust-mode enabled_toolsets. The exact cron_line match above (it ends
-        // at `june_linear]`) already proves no action/auto server is in the
-        // list; these guard the substrings directly too.
-        assert!(!config.contains("june_gmail_actions,"));
-        assert!(!config.contains("june_gcal_actions,"));
-        assert!(!config.contains("june_gcal_actions]"));
-        assert!(!config.contains("june_linear_actions,"));
-        assert!(!config.contains("june_linear_actions]"));
-        assert!(!config.contains("_auto_]"));
-        assert!(!config.contains("_auto_,"));
+        // trust-mode enabled_toolsets. The exact sequence match above proves
+        // no action or auto server is in the list.
         // The auto server IS registered under mcp_servers, just not in cron.
-        assert!(config.contains("  june_gmail_auto_ab12cd34:\n"));
+        assert!(parsed["mcp_servers"]["june_gmail_auto_ab12cd34"].is_mapping());
         // The Linear actions server is registered under mcp_servers too,
         // reachable only through approval-mode enabled_toolsets.
-        assert!(config.contains("  june_linear_actions:\n"));
+        assert!(parsed["mcp_servers"]["june_linear_actions"].is_mapping());
         for toolset in [
             "terminal",
             "file",
@@ -16784,6 +17958,7 @@ mcp_servers:
             image: None,
             video: None,
             recorder: None,
+            computer_use: None,
             gmail: None,
             gmail_actions: None,
             gcal: None,
@@ -16810,6 +17985,117 @@ mcp_servers:
         assert!(cron_platform_toolsets(&configs)
             .split(", ")
             .any(|toolset| toolset == "memory"));
+    }
+
+    #[test]
+    fn config_sync_self_heals_the_persisted_global_memory_policy() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let settings = home.path().join("memory-settings.json");
+        let config_path = home.path().join("config.yaml");
+        let invalid_source = b"agent:\n  disabled_toolsets: not-a-list\nskills:\n  config:\n    user-skill:\n      enabled: true\n";
+        std::fs::write(&config_path, invalid_source).expect("seed invalid policy shape");
+        let mut context = test_june_context_mcp_config();
+        context.memory_settings_path = settings.clone();
+        let web = test_june_web_mcp_config();
+        let image = test_june_image_mcp_config();
+        let recorder = test_june_recorder_mcp_config();
+
+        std::fs::write(&settings, r#"{"enabled":false}"#).expect("disable memory");
+        sync_hermes_config_with_external_dirs(
+            home.path(),
+            4242,
+            "proxy-token",
+            "memory-proxy-token",
+            "recorder-proxy-token",
+            "connector-proxy-token",
+            "computer-use-proxy-token",
+            false,
+            &context,
+            &web,
+            &image,
+            None,
+            &recorder,
+            &test_june_computer_use_mcp_config(false),
+            None,
+            &[],
+        )
+        .expect("sync disabled config");
+        let mut disabled: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&config_path).expect("read disabled config"),
+        )
+        .expect("disabled config parses");
+        assert!(disabled["agent"]["disabled_toolsets"]
+            .as_sequence()
+            .expect("disabled list")
+            .iter()
+            .any(|item| item.as_str() == Some("memory")));
+        assert_eq!(disabled["skills"]["config"]["user-skill"]["enabled"], true);
+        let backups = std::fs::read_dir(home.path())
+            .expect("read config directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(HERMES_CONFIG_CORRUPT_BACKUP_PREFIX)
+                            && name.ends_with(".bak")
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1, "spawn repair archives source once");
+        assert_eq!(
+            std::fs::read(&backups[0]).expect("read policy-shape backup"),
+            invalid_source,
+        );
+        disabled["agent"]["disabled_toolsets"] = serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("browser".to_string()),
+            serde_yaml::Value::String("memory".to_string()),
+        ]);
+        std::fs::write(
+            &config_path,
+            serde_yaml::to_string(&disabled).expect("serialize user config"),
+        )
+        .expect("add unrelated deny");
+
+        std::fs::write(&settings, r#"{"enabled":true}"#).expect("enable memory");
+        sync_hermes_config_with_external_dirs(
+            home.path(),
+            4242,
+            "proxy-token",
+            "memory-proxy-token",
+            "recorder-proxy-token",
+            "connector-proxy-token",
+            "computer-use-proxy-token",
+            false,
+            &context,
+            &web,
+            &image,
+            None,
+            &recorder,
+            &test_june_computer_use_mcp_config(false),
+            None,
+            &[],
+        )
+        .expect("sync enabled config");
+        let enabled: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&config_path).expect("read enabled config"),
+        )
+        .expect("enabled config parses");
+        let remaining = enabled["agent"]["disabled_toolsets"]
+            .as_sequence()
+            .expect("browser and Computer use denies remain");
+        assert_eq!(
+            remaining,
+            &[
+                serde_yaml::Value::String("browser".to_string()),
+                serde_yaml::Value::String("computer_use".to_string()),
+            ]
+        );
+        assert!(enabled["platform_toolsets"]["cron"]
+            .as_sequence()
+            .expect("cron allowlist")
+            .iter()
+            .any(|item| item.as_str() == Some("memory")));
     }
 
     #[tokio::test]
@@ -17650,7 +18936,7 @@ mcp_servers:
         let home = PathBuf::from("/Users/test");
         let workspace = PathBuf::from("/Users/test/Library/Application Support/june/hermes");
         let config_path = sandbox_config_write_path(&workspace);
-        let config_temp_prefix = sandbox_config_temp_prefix(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&config_path);
         let profile = build_sandbox_profile(
             &home,
             std::slice::from_ref(&workspace),
@@ -17703,11 +18989,95 @@ mcp_servers:
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn sandbox_profile_allows_only_an_external_config_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(dir.path()).expect("canonicalize home");
+        let workspace = home.join("workspace");
+        let external = home.join("external-config");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&external).expect("external config dir");
+        let target = external.join("managed-config.yaml");
+        std::fs::write(&target, "agent: {}\n").expect("target config");
+        symlink(&target, workspace.join(HERMES_CONFIG_FILE)).expect("config symlink");
+
+        let config_path = sandbox_config_write_path(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&config_path);
+        assert_eq!(config_path, target);
+        assert_eq!(
+            config_temp_prefix,
+            external.join(HERMES_CONFIG_ATOMIC_TEMP_PREFIX)
+        );
+        let profile = build_sandbox_profile(
+            &home,
+            std::slice::from_ref(&workspace),
+            &config_path,
+            &config_temp_prefix,
+            &[],
+            false,
+        );
+        assert!(profile.contains(&format!(
+            "(literal {})",
+            sbpl_quote(&target.to_string_lossy())
+        )));
+        assert!(profile.contains(&format!(
+            "(regex #\"^{}.*$\")",
+            sbpl_regex_escape(&config_temp_prefix.to_string_lossy())
+        )));
+        assert!(!profile.contains(&format!(
+            "(subpath {})",
+            sbpl_quote(&external.to_string_lossy())
+        )));
+
+        let profile_path = home.join("external-config-test.sb");
+        std::fs::write(&profile_path, profile).expect("profile");
+        let temporary = external.join(".config_external-test.tmp");
+        let write = std::process::Command::new(SANDBOX_EXEC_PATH)
+            .arg("-f")
+            .arg(&profile_path)
+            .arg("/bin/bash")
+            .arg("-c")
+            .arg(format!(
+                "printf changed > {} && mv {} {}",
+                sbpl_shell_quote(&temporary),
+                sbpl_shell_quote(&temporary),
+                sbpl_shell_quote(&target),
+            ))
+            .output()
+            .expect("run sandboxed atomic replacement");
+        assert!(
+            write.status.success(),
+            "resolved config replacement should be allowed: {}",
+            String::from_utf8_lossy(&write.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("updated target"),
+            "changed"
+        );
+
+        let denied = std::process::Command::new(SANDBOX_EXEC_PATH)
+            .arg("-f")
+            .arg(&profile_path)
+            .arg("/bin/bash")
+            .arg("-c")
+            .arg(format!(
+                "printf denied > {}",
+                sbpl_shell_quote(&external.join("unrelated.txt"))
+            ))
+            .output()
+            .expect("run sandboxed unrelated write");
+        assert!(!denied.status.success());
+        assert!(!external.join("unrelated.txt").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn sandbox_profile_opt_in_grants_agent_cli_state_only() {
         let home = PathBuf::from("/Users/test");
         let workspace = PathBuf::from("/Users/test/Library/Application Support/june/hermes");
         let config_path = sandbox_config_write_path(&workspace);
-        let config_temp_prefix = sandbox_config_temp_prefix(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&config_path);
         let profile = build_sandbox_profile(
             &home,
             std::slice::from_ref(&workspace),
@@ -17775,7 +19145,7 @@ mcp_servers:
         std::fs::write(home.join(".ssh").join("id_secret"), "TOPSECRET").expect("seed secret");
 
         let config_path = sandbox_config_write_path(&workspace);
-        let config_temp_prefix = sandbox_config_temp_prefix(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&config_path);
         let profile_text = build_sandbox_profile(
             &home,
             std::slice::from_ref(&workspace),
@@ -17884,7 +19254,7 @@ mcp_servers:
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let config_path = sandbox_config_write_path(&workspace);
-        let config_temp_prefix = sandbox_config_temp_prefix(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&config_path);
         let profile = build_sandbox_profile(
             &home,
             std::slice::from_ref(&workspace),
@@ -17946,7 +19316,7 @@ mcp_servers:
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let config_path = sandbox_config_write_path(&workspace);
-        let config_temp_prefix = sandbox_config_temp_prefix(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&config_path);
         let profile_text = build_sandbox_profile(
             &home,
             std::slice::from_ref(&workspace),

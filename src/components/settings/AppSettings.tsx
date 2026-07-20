@@ -120,6 +120,7 @@ import { IMAGE_GENERATION_ENABLED, VIDEO_GENERATION_ENABLED } from "../../lib/fe
 import { DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { ConnectorsSection } from "./ConnectorsSection";
+import { PluginsView } from "../plugins/PluginsView";
 import { ExternalDirsSection } from "./ExternalDirsSection";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
 import { SkillDetailSection } from "./SkillDetailSection";
@@ -2495,7 +2496,17 @@ export function AppSettings({
           />
         ) : null}
 
-        {activeTab === "connectors" ? <ConnectorsSection /> : null}
+        {activeTab === "connectors" ? (
+          <>
+            <ConnectorsSection />
+            {/* Plugins live inside Connectors until polished enough to graduate
+                back to a top-level page. */}
+            <PluginsView
+              onOpenModels={() => setActiveTab("models")}
+              onOpenBilling={() => setActiveTab("billing")}
+            />
+          </>
+        ) : null}
 
         {activeTab === "skills" ? <InstalledSkillsSection onOpenSkill={setOpenSkill} /> : null}
         {activeTab === "external-dirs" ? <ExternalDirsSection /> : null}

@@ -62,6 +62,7 @@ import { IconZap } from "central-icons/IconZap";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { ConnectorApprovalsTray } from "../components/connectors/ConnectorApprovalsTray";
+import { ComputerUseApprovalsTray } from "../components/agent/ComputerUseApprovalsTray";
 import {
   OPEN_REFERRAL_DIALOG_EVENT,
   ReferralNudge,
@@ -2362,7 +2363,7 @@ export function App() {
   }, []);
 
   // A profile switch swaps the visible data, not just the agent runtime
-  // (ADR 0029): re-read profile-scoped notes, projects, chat mappings, and
+  // (ADR 0031): re-read profile-scoped notes, projects, chat mappings, and
   // sessions together. The same refresh runs when profile data moves into the
   // already-active profile, where the active profile name itself does not
   // change. If a recording is running its note keeps the selection (get_note
@@ -4729,7 +4730,10 @@ export function App() {
       />
       {/* Connector action approvals (approval trust mode) can arrive from a
           routine or chat in any view, so the tray is mounted at the shell. */}
-      <ConnectorApprovalsTray />
+      <div className="shell-approvals-stack">
+        <ComputerUseApprovalsTray />
+        <ConnectorApprovalsTray />
+      </div>
       {/* The referral delight nudge floats bottom-left at the shell so it can
           appear over any view; click-through opens the sidebar-owned referral
           dialog by event. */}
