@@ -10605,6 +10605,7 @@ describe("AgentWorkspace", () => {
         content: [
           "Summarize this.",
           "",
+          "[June attachment manifest v1]",
           "Attached files copied into the June workspace:",
           "- june-context.md (Workspace): june-context.md",
           "",
@@ -10623,6 +10624,8 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace />);
 
     expect(await screen.findByText(/Here's a summary/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Attachments")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open june-context.md" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Generated files")).not.toBeInTheDocument();
   });
 

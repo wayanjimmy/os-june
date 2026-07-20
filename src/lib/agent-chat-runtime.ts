@@ -156,6 +156,18 @@ export type AgentChatSteeringPart = {
   text: string;
 };
 
+/** A file the user submitted with this message. Hermes stores attachment
+ * routing as prompt text, but the transcript renders it as first-class UI so
+ * workspace paths and model instructions never appear as user-authored copy. */
+export type AgentChatAttachmentPart = {
+  type: "attachment";
+  name: string;
+  path: string;
+  kind: "image" | "file";
+};
+
+export const USER_ATTACHMENT_PROMPT_MARKER = "[June attachment manifest v1]";
+
 /** A built-in image generation result (the `/image` slash command). It lives as
  * an assistant part so the generated image renders inline in the thread — with
  * its own loader and error states — instead of being dropped into the composer
@@ -226,6 +238,7 @@ export type AgentChatPart =
   | AgentChatSecretPart
   | AgentChatNoticePart
   | AgentChatSteeringPart
+  | AgentChatAttachmentPart
   | AgentChatImagePart
   | AgentChatVideoPart;
 
@@ -397,6 +410,9 @@ export function buildHermesSessionChatTurns(
           },
         );
       }
+      if (turn.role === "user") {
+        turn.parts.push(...attachmentPartsFromUserPrompt(content));
+      }
       if (!contextPart && turn.role === "assistant") {
         appendImageParts(turn.parts, messageImageParts);
         appendVideoParts(turn.parts, messageVideoParts);
@@ -412,7 +428,13 @@ export function buildHermesSessionChatTurns(
   const sortedTurns = sortAgentChatTurns(turns);
   deduplicateGeneratedMediaWithinAgentRuns(sortedTurns);
   return sortedTurns.filter((turn) =>
-    turn.parts.some((part) => part.type === "tool" || partText(part).trim()),
+    turn.parts.some((part) => {
+      if (part.type === "tool") return true;
+      if (turn.role === "user" && part.type === "text") {
+        return Boolean(displayedComposerUserMessageText(part.text).trim());
+      }
+      return Boolean(partText(part).trim());
+    }),
   );
 }
 
@@ -1494,8 +1516,8 @@ function displayedUserPromptText(content: string) {
 }
 
 export function displayedComposerUserMessageText(content: string): string {
-  return stripAttachmentPromptBlock(
-    displayedUserPromptText(stripImageAnalysisFailureNotice(content)),
+  return stripSyntheticImageAttachmentMarker(
+    stripAttachmentPromptBlock(displayedUserPromptText(stripImageAnalysisFailureNotice(content))),
   );
 }
 
@@ -1507,12 +1529,66 @@ function stripImageAnalysisFailureNotice(content: string): string {
 }
 
 function stripAttachmentPromptBlock(content: string): string {
-  return content
-    .replace(
-      /\n+Attached files copied into the June workspace:\n[\s\S]*?\n+Use these file paths when inspecting or operating on the files\.\s*$/i,
-      "",
-    )
-    .trim();
+  const stripped = attachmentEnvelopeFromUserPrompt(content)?.message ?? content.trim();
+  return stripped.trim() === "Use the attached file(s)." ? "" : stripped.trim();
+}
+
+const SYNTHETIC_IMAGE_ATTACHMENT_SUFFIX =
+  /\n*\[Image attached at:\s*[^\]]+\]\s*(?:\[[^\]\n]+\]\s*)*$/i;
+
+function stripSyntheticImageAttachmentMarker(content: string) {
+  return content.replace(SYNTHETIC_IMAGE_ATTACHMENT_SUFFIX, "").trim();
+}
+
+const USER_ATTACHMENT_IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|tiff?|bmp|avif)$/i;
+
+function attachmentPartsFromBlock(block: string): AgentChatAttachmentPart[] {
+  const seenPaths = new Set<string>();
+  return block.split("\n").flatMap((line) => {
+    const match = /^\s*-\s+(.+?)\s+\([^\n)]+\):\s*(.+?)\s*$/.exec(line);
+    const name = match?.[1]?.trim();
+    const path = match?.[2]?.trim();
+    if (!name || !path || seenPaths.has(path)) return [];
+    seenPaths.add(path);
+    return [
+      {
+        type: "attachment" as const,
+        name,
+        path,
+        kind: USER_ATTACHMENT_IMAGE_EXTENSION.test(name) ? ("image" as const) : ("file" as const),
+      },
+    ];
+  });
+}
+
+function attachmentEnvelopeFromUserPrompt(
+  content: string,
+): { message: string; attachments: AgentChatAttachmentPart[] } | undefined {
+  const syntheticImageSuffix = content.match(SYNTHETIC_IMAGE_ATTACHMENT_SUFFIX);
+  const prompt = syntheticImageSuffix?.index
+    ? content.slice(0, syntheticImageSuffix.index).trimEnd()
+    : content.trimEnd();
+  const marker = USER_ATTACHMENT_PROMPT_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const generated = new RegExp(
+    `^([\\s\\S]*?)(?:\\n\\n)?${marker}\\nAttached files copied into the June workspace:\\n([\\s\\S]+?)\\n\\nUse these file paths when inspecting or operating on the files\\.$`,
+    "i",
+  ).exec(prompt);
+  // Older image prompts predate the manifest marker. Their native image suffix
+  // is still an unambiguous signal that the preceding block was machine-added.
+  const legacyImage = syntheticImageSuffix
+    ? /^([\s\S]*?)(?:\n\n)?Attached files copied into the June workspace:\n([\s\S]+?)\n\nUse these file paths when inspecting or operating on the files\.$/i.exec(
+        prompt,
+      )
+    : undefined;
+  const match = generated ?? legacyImage;
+  if (!match?.[2]) return undefined;
+  const attachments = attachmentPartsFromBlock(match[2]);
+  if (!attachments.length) return undefined;
+  return { message: match[1] ?? "", attachments };
+}
+
+function attachmentPartsFromUserPrompt(content: string): AgentChatAttachmentPart[] {
+  return attachmentEnvelopeFromUserPrompt(content)?.attachments ?? [];
 }
 
 function isScheduledRunMessage(message: HermesSessionMessage) {
@@ -1900,6 +1976,7 @@ function partText(part: AgentChatPart) {
   // prompt so the turn isn't filtered out as empty and a copy reads sensibly.
   if (part.type === "image") return part.prompt;
   if (part.type === "video") return part.prompt;
+  if (part.type === "attachment") return `${part.name} ${part.path}`;
   return part.text;
 }
 
