@@ -1213,51 +1213,57 @@ impl Repositories {
         Ok(folder)
     }
 
-    pub async fn create_linked_folder(
+    pub async fn create_linked_folders(
         &self,
         profile: &str,
-        name: &str,
-        local_path: &str,
-    ) -> Result<FolderDto, sqlx::error::Error> {
-        if let Some(row) = query(
-            "SELECT id, name, description, instructions, memory_disabled, local_path, created_at, updated_at
-             FROM folders
-             WHERE profile = ? AND local_path = ? AND deleted_at IS NULL",
-        )
-        .bind(profile)
-        .bind(local_path)
-        .fetch_optional(&self.pool)
-        .await?
-        {
-            return Ok(folder_from_row(row));
-        }
+        projects: &[(String, String)],
+    ) -> Result<Vec<FolderDto>, sqlx::error::Error> {
+        let mut tx = self.pool.begin().await?;
+        let mut folders = Vec::with_capacity(projects.len());
+        for (name, local_path) in projects {
+            if let Some(row) = query(
+                "SELECT id, name, description, instructions, memory_disabled, local_path, created_at, updated_at
+                 FROM folders
+                 WHERE profile = ? AND local_path = ? AND deleted_at IS NULL",
+            )
+            .bind(profile)
+            .bind(local_path)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                folders.push(folder_from_row(row));
+                continue;
+            }
 
-        let now = timestamp();
-        let folder = FolderDto {
-            id: Uuid::new_v4().to_string(),
-            name: name.trim().to_string(),
-            description: None,
-            instructions: None,
-            memory_disabled: false,
-            local_path: Some(local_path.to_string()),
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        query(
-            "INSERT INTO folders
-             (id, name, description, profile, local_path, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&folder.id)
-        .bind(&folder.name)
-        .bind(&folder.description)
-        .bind(profile)
-        .bind(&folder.local_path)
-        .bind(&folder.created_at)
-        .bind(&folder.updated_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(folder)
+            let now = timestamp();
+            let folder = FolderDto {
+                id: Uuid::new_v4().to_string(),
+                name: name.trim().to_string(),
+                description: None,
+                instructions: None,
+                memory_disabled: false,
+                local_path: Some(local_path.to_string()),
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            query(
+                "INSERT INTO folders
+                 (id, name, description, profile, local_path, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&folder.id)
+            .bind(&folder.name)
+            .bind(&folder.description)
+            .bind(profile)
+            .bind(&folder.local_path)
+            .bind(&folder.created_at)
+            .bind(&folder.updated_at)
+            .execute(&mut *tx)
+            .await?;
+            folders.push(folder);
+        }
+        tx.commit().await?;
+        Ok(folders)
     }
 
     pub async fn rename_folder(
@@ -5976,6 +5982,34 @@ mod tests {
             .await
             .expect("finalize audio artifact");
         (note.id, artifact.id)
+    }
+
+    #[tokio::test]
+    async fn linked_folder_batch_rolls_back_when_any_insert_fails() {
+        let repos = test_repositories().await;
+        query(
+            "CREATE TRIGGER reject_linked_folder
+             BEFORE INSERT ON folders
+             WHEN NEW.local_path = '/tmp/reject'
+             BEGIN SELECT RAISE(ABORT, 'rejected for test'); END",
+        )
+        .execute(&repos.pool)
+        .await
+        .expect("create rejection trigger");
+
+        let projects = vec![
+            ("Accepted".to_string(), "/tmp/accepted".to_string()),
+            ("Rejected".to_string(), "/tmp/reject".to_string()),
+        ];
+        assert!(repos
+            .create_linked_folders("default", &projects)
+            .await
+            .is_err());
+        assert!(repos
+            .list_folders("default")
+            .await
+            .expect("list folders after rollback")
+            .is_empty());
     }
 
     fn transcription_plan(

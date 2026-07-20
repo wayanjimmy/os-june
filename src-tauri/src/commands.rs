@@ -375,9 +375,7 @@ pub async fn import_claude_projects(
         }
     }
 
-    let profile = active_profile(&app);
-    let repos = repositories(&app).await?;
-    let mut imported = Vec::with_capacity(paths.len());
+    let mut projects = Vec::with_capacity(paths.len());
     for path in paths {
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             return Err(AppError::new(
@@ -385,10 +383,13 @@ pub async fn import_claude_projects(
                 "One of the selected project folders has no usable name.",
             ));
         };
-        let path = path.to_string_lossy().into_owned();
-        imported.push(repos.create_linked_folder(&profile, name, &path).await?);
+        projects.push((name.to_string(), path.to_string_lossy().into_owned()));
     }
-    Ok(imported)
+    let profile = active_profile(&app);
+    Ok(repositories(&app)
+        .await?
+        .create_linked_folders(&profile, &projects)
+        .await?)
 }
 
 /// The sticky active profile, read straight from the Hermes home file. Gives
