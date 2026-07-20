@@ -63,8 +63,7 @@ const NOTION_CONNECTOR_BLURB =
 const NOTION_CONNECTED_BLURB =
   "Pages, search, and approved updates. Access may extend beyond selected pages.";
 
-const NOTION_RECONNECT_BLURB =
-  "Reconnect Notion to restore pages, search, and approved updates.";
+const NOTION_RECONNECT_BLURB = "Reconnect Notion to restore pages, search, and approved updates.";
 
 type NotionConnectorRowProps = {
   account: ConnectorAccount | null;
