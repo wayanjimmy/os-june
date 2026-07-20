@@ -5531,8 +5531,11 @@ mod tests {
     #[tokio::test]
     async fn note_audio_export_selection_enforces_eligibility_ownership_and_order() {
         let repos = test_repositories().await;
-        let note = repos.create_note(None).await.expect("note");
-        let other_note = repos.create_note(None).await.expect("other note");
+        let note = repos.create_note("default", None).await.expect("note");
+        let other_note = repos
+            .create_note("default", None)
+            .await
+            .expect("other note");
         query("UPDATE notes SET title = 'Product review' WHERE id = ?")
             .bind(&note.id)
             .execute(&repos.pool)
