@@ -4380,9 +4380,7 @@ fn validate_hermes_file_path(app: &AppHandle, path: &str) -> Result<PathBuf, App
     // roots so those references load; a path with directory components falls
     // through unchanged and the allow-list check below still gates whatever we
     // end up with.
-    let resolved = resolve_bare_image_filename(&hermes_home, path)
-        .or_else(|| resolve_bare_video_filename(&hermes_home, path))
-        .unwrap_or_else(|| PathBuf::from(path));
+    let resolved = resolve_hermes_file_candidate(&hermes_home, path);
     let requested = resolved.canonicalize().map_err(|error| {
         tracing::warn!(requested_path = %path, %error, "validate_hermes_file_path failed to canonicalize path");
         AppError::new("hermes_file_download_failed", error.to_string())
@@ -11050,6 +11048,24 @@ fn resolve_bare_video_filename(hermes_home: &Path, path: &str) -> Option<PathBuf
         .into_iter()
         .map(|relative| hermes_home.join(relative).join(&name))
         .find(|candidate| candidate.is_file())
+}
+
+/// Resolve the file reference June puts in a persisted prompt. Composer
+/// attachments use workspace-relative paths such as `uploads/photo.png`, while
+/// generated media may use a bare filename and tool output can carry an
+/// absolute path. The canonical-path allow-list in `validate_hermes_file_path`
+/// remains authoritative after this routing step, including for `..` input.
+fn resolve_hermes_file_candidate(hermes_home: &Path, path: &str) -> PathBuf {
+    resolve_bare_image_filename(hermes_home, path)
+        .or_else(|| resolve_bare_video_filename(hermes_home, path))
+        .unwrap_or_else(|| {
+            let literal = PathBuf::from(path.trim());
+            if literal.is_relative() {
+                hermes_home.join("workspace").join(literal)
+            } else {
+                literal
+            }
+        })
 }
 
 fn filesystem_roots(hermes_home: &Path) -> Result<Vec<FilesystemRootCandidate>, AppError> {
@@ -18598,6 +18614,26 @@ assert capped["has_more"] is True, capped
         assert_eq!(
             resolve_bare_image_filename(hermes_home, "../secrets.png"),
             None
+        );
+    }
+
+    #[test]
+    fn resolve_hermes_file_candidate_maps_relative_attachments_to_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hermes_home = temp.path();
+        let absolute = hermes_home.join("images").join("attached.png");
+
+        assert_eq!(
+            resolve_hermes_file_candidate(hermes_home, "uploads/icon.png"),
+            hermes_home.join("workspace").join("uploads/icon.png"),
+        );
+        assert_eq!(
+            resolve_hermes_file_candidate(hermes_home, absolute.to_string_lossy().as_ref()),
+            absolute,
+        );
+        assert_eq!(
+            resolve_hermes_file_candidate(hermes_home, "../outside.txt"),
+            hermes_home.join("workspace").join("../outside.txt"),
         );
     }
 

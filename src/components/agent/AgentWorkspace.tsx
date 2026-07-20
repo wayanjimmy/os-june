@@ -13538,6 +13538,9 @@ function AgentChatTurnRow({
   const contextParts = turn.parts.filter(
     (part): part is Extract<AgentChatPart, { type: "context" }> => part.type === "context",
   );
+  const attachmentParts = turn.parts.filter(
+    (part): part is Extract<AgentChatPart, { type: "attachment" }> => part.type === "attachment",
+  );
   const nonTextParts = turn.parts.filter((part) => part.type !== "text");
   const concreteResponse = turnIsConcreteResponse(turn);
   const copyText = copyableTextForTurn(turn);
@@ -13649,14 +13652,20 @@ function AgentChatTurnRow({
           </span>
         ) : null}
         <div className="agent-user-turn-body">
-          {textParts.map((part, index) => (
-            <MarkdownContent
-              key={`${turn.id}:text:${index}`}
-              // Issue-report sessions open with the wrapped investigation
-              // prompt; the transcript shows only what the user typed.
-              markdown={displayedComposerUserMessageText(part.text)}
-            />
-          ))}
+          {textParts.map((part, index) => {
+            const markdown = displayedComposerUserMessageText(part.text);
+            return markdown ? (
+              <MarkdownContent
+                key={`${turn.id}:text:${index}`}
+                // Issue-report sessions open with the wrapped investigation
+                // prompt; the transcript shows only what the user typed.
+                markdown={markdown}
+              />
+            ) : null;
+          })}
+          {attachmentParts.length ? (
+            <AgentUserAttachmentList attachments={attachmentParts} onOpen={onOpenArtifact} />
+          ) : null}
         </div>
         {turnActions}
       </article>
@@ -13799,6 +13808,92 @@ function AgentChatTurnRow({
         )}
       </div>
     </article>
+  );
+}
+
+function AgentUserAttachmentList({
+  attachments,
+  onOpen,
+}: {
+  attachments: Extract<AgentChatPart, { type: "attachment" }>[];
+  onOpen?: (artifact: AgentArtifact) => void;
+}) {
+  return (
+    <div className="agent-user-attachments" aria-label="Attachments">
+      {attachments.map((attachment) => (
+        <AgentUserAttachment key={attachment.path} attachment={attachment} onOpen={onOpen} />
+      ))}
+    </div>
+  );
+}
+
+function AgentUserAttachment({
+  attachment,
+  onOpen,
+}: {
+  attachment: Extract<AgentChatPart, { type: "attachment" }>;
+  onOpen?: (artifact: AgentArtifact) => void;
+}) {
+  const [previewDataUrl, setPreviewDataUrl] = useState<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    if (attachment.kind !== "image") return;
+    let cancelled = false;
+    hermesBridgeFilePreview(attachment.path)
+      .then((dataUrl) => {
+        if (!cancelled) setPreviewDataUrl(dataUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setPreviewDataUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [attachment.kind, attachment.path]);
+
+  const artifact: AgentArtifact = {
+    name: attachment.name,
+    path: attachment.path,
+    rootLabel: "Workspace",
+  };
+  const content =
+    attachment.kind === "image" ? (
+      previewDataUrl ? (
+        <img src={previewDataUrl} alt="" aria-hidden="true" draggable={false} />
+      ) : previewDataUrl === undefined ? (
+        <span className="agent-user-attachment-loading text-shimmer shimmer">Loading image...</span>
+      ) : (
+        <>
+          <span className="agent-attachment-file-icon" aria-hidden="true">
+            <FileTypeIcon name={attachment.name} size={18} />
+          </span>
+          <span className="agent-user-attachment-name">{attachment.name}</span>
+        </>
+      )
+    ) : (
+      <>
+        <span className="agent-attachment-file-icon" aria-hidden="true">
+          <FileTypeIcon name={attachment.name} size={18} />
+        </span>
+        <span className="agent-user-attachment-name">{attachment.name}</span>
+      </>
+    );
+
+  return onOpen ? (
+    <button
+      type="button"
+      className="agent-user-attachment"
+      data-kind={attachment.kind}
+      aria-label={`Open ${attachment.name}`}
+      title={attachment.name}
+      onClick={() => onOpen(artifact)}
+    >
+      {content}
+    </button>
+  ) : (
+    <div className="agent-user-attachment" data-kind={attachment.kind} title={attachment.name}>
+      {content}
+    </div>
   );
 }
 

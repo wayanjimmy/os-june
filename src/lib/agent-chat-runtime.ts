@@ -156,6 +156,16 @@ export type AgentChatSteeringPart = {
   text: string;
 };
 
+/** A file the user submitted with this message. Hermes stores attachment
+ * routing as prompt text, but the transcript renders it as first-class UI so
+ * workspace paths and model instructions never appear as user-authored copy. */
+export type AgentChatAttachmentPart = {
+  type: "attachment";
+  name: string;
+  path: string;
+  kind: "image" | "file";
+};
+
 /** A built-in image generation result (the `/image` slash command). It lives as
  * an assistant part so the generated image renders inline in the thread — with
  * its own loader and error states — instead of being dropped into the composer
@@ -226,6 +236,7 @@ export type AgentChatPart =
   | AgentChatSecretPart
   | AgentChatNoticePart
   | AgentChatSteeringPart
+  | AgentChatAttachmentPart
   | AgentChatImagePart
   | AgentChatVideoPart;
 
@@ -396,6 +407,9 @@ export function buildHermesSessionChatTurns(
             status: "complete",
           },
         );
+      }
+      if (turn.role === "user") {
+        turn.parts.push(...attachmentPartsFromUserPrompt(content));
       }
       if (!contextPart && turn.role === "assistant") {
         appendImageParts(turn.parts, messageImageParts);
@@ -1494,8 +1508,8 @@ function displayedUserPromptText(content: string) {
 }
 
 export function displayedComposerUserMessageText(content: string): string {
-  return stripAttachmentPromptBlock(
-    displayedUserPromptText(stripImageAnalysisFailureNotice(content)),
+  return stripSyntheticImageAttachmentMarker(
+    stripAttachmentPromptBlock(displayedUserPromptText(stripImageAnalysisFailureNotice(content))),
   );
 }
 
@@ -1507,12 +1521,41 @@ function stripImageAnalysisFailureNotice(content: string): string {
 }
 
 function stripAttachmentPromptBlock(content: string): string {
-  return content
-    .replace(
-      /\n+Attached files copied into the June workspace:\n[\s\S]*?\n+Use these file paths when inspecting or operating on the files\.\s*$/i,
-      "",
-    )
-    .trim();
+  const stripped = content.replace(
+    /\n*Attached files copied into the June workspace:\n[\s\S]*?\n+Use these file paths when inspecting or operating on the files\./gi,
+    "",
+  );
+  return stripped.trim() === "Use the attached file(s)." ? "" : stripped.trim();
+}
+
+function stripSyntheticImageAttachmentMarker(content: string) {
+  return content.replace(/\n*\[Image attached at:\s*[^\]]+\]\s*(?:\[[^\]\n]+\]\s*)*$/i, "").trim();
+}
+
+const USER_ATTACHMENT_IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|tiff?|bmp|avif)$/i;
+
+function attachmentPartsFromUserPrompt(content: string): AgentChatAttachmentPart[] {
+  const block = content.match(
+    /(?:^|\n)Attached files copied into the June workspace:\n([\s\S]*?)\n+Use these file paths when inspecting or operating on the files\./i,
+  )?.[1];
+  if (!block) return [];
+
+  const seenPaths = new Set<string>();
+  return block.split("\n").flatMap((line) => {
+    const match = /^\s*-\s+(.+?)\s+\([^\n)]+\):\s*(.+?)\s*$/.exec(line);
+    const name = match?.[1]?.trim();
+    const path = match?.[2]?.trim();
+    if (!name || !path || seenPaths.has(path)) return [];
+    seenPaths.add(path);
+    return [
+      {
+        type: "attachment" as const,
+        name,
+        path,
+        kind: USER_ATTACHMENT_IMAGE_EXTENSION.test(name) ? ("image" as const) : ("file" as const),
+      },
+    ];
+  });
 }
 
 function isScheduledRunMessage(message: HermesSessionMessage) {
@@ -1900,6 +1943,7 @@ function partText(part: AgentChatPart) {
   // prompt so the turn isn't filtered out as empty and a copy reads sensibly.
   if (part.type === "image") return part.prompt;
   if (part.type === "video") return part.prompt;
+  if (part.type === "attachment") return `${part.name} ${part.path}`;
   return part.text;
 }
 

@@ -784,6 +784,12 @@ describe("Agent chat runtime", () => {
         ].join("\n"),
         status: "complete",
       },
+      {
+        type: "attachment",
+        name: "CleanShot.png",
+        path: "uploads/CleanShot.png",
+        kind: "image",
+      },
     ]);
   });
 
@@ -804,6 +810,68 @@ describe("Agent chat runtime", () => {
         ].join("\n"),
       ),
     ).toBe("wdyt?");
+  });
+
+  it("turns persisted image prompt scaffolding into a user attachment", () => {
+    const content = [
+      "what is this math",
+      "",
+      "Attached files copied into the June workspace:",
+      "- CleanShot.png (Workspace): uploads/CleanShot.png",
+      "",
+      "Use these file paths when inspecting or operating on the files.",
+      "",
+      "[Image attached at: /Users/alex/Library/Application Support/June/images/upload.png]",
+      "[screenshot]",
+    ].join("\n");
+
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "image-message",
+        role: "user",
+        content,
+        timestamp: "2026-07-20T19:48:57.000Z",
+      },
+    ]);
+
+    expect(displayedComposerUserMessageText(content)).toBe("what is this math");
+    expect(turns[0]?.parts).toEqual([
+      { type: "text", text: content, status: "complete" },
+      {
+        type: "attachment",
+        name: "CleanShot.png",
+        path: "uploads/CleanShot.png",
+        kind: "image",
+      },
+    ]);
+  });
+
+  it("shows an attachment-only turn without synthetic fallback copy", () => {
+    const content = [
+      "Use the attached file(s).",
+      "",
+      "Attached files copied into the June workspace:",
+      "- brief.pdf (Workspace): uploads/brief.pdf",
+      "",
+      "Use these file paths when inspecting or operating on the files.",
+    ].join("\n");
+
+    expect(displayedComposerUserMessageText(content)).toBe("");
+    expect(
+      buildHermesSessionChatTurns([
+        {
+          id: "file-message",
+          role: "user",
+          content,
+          timestamp: "2026-07-20T19:48:57.000Z",
+        },
+      ])[0]?.parts.at(-1),
+    ).toEqual({
+      type: "attachment",
+      name: "brief.pdf",
+      path: "uploads/brief.pdf",
+      kind: "file",
+    });
   });
 
   it("hides injected project context from persisted user turns", () => {
