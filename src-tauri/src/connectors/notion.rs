@@ -62,11 +62,11 @@ const NOTION_READ_TOOL_ALLOWLIST: &[&str] = &[
     "notion-get-view-configuration-dsl",
 ];
 const NOTION_ACTION_TOOL_ALLOWLIST: &[&str] = &["notion-create-pages", "notion-update-page"];
-const NOTION_REQUIRED_TOOL_NAMES: &[&str] = &[
-    "notion-search",
-    "notion-fetch",
-    "notion-create-pages",
-    "notion-update-page",
+const NOTION_REQUIRED_TOOLS: &[(&str, &str)] = &[
+    ("notion-search", "search"),
+    ("notion-fetch", "fetch"),
+    ("notion-create-pages", "create_pages"),
+    ("notion-update-page", "update_page"),
 ];
 const NOTION_CREATE_PAGES_ALLOWED_FIELDS: &[&str] = &["allow_async", "pages", "parent"];
 const NOTION_CREATE_PAGE_ALLOWED_FIELDS: &[&str] = &[
@@ -486,17 +486,85 @@ async fn verify_hosted_mcp_discovery(access_token: &str) -> Result<(), AppError>
     let client = McpHttpClient::new(access_token.to_string());
     client.initialize().await?;
     let tools = client.hosted_tools_list().await?;
-    verify_required_hosted_tools(&tools)
+    verify_required_hosted_tools(&tools)?;
+    let access = client
+        .call_tool("notion-fetch", serde_json::json!({ "id": "self" }))
+        .await?;
+    verify_required_tool_access(&access)
 }
 
 fn verify_required_hosted_tools(tools: &[NotionMcpTool]) -> Result<(), AppError> {
-    if NOTION_REQUIRED_TOOL_NAMES
+    if NOTION_REQUIRED_TOOLS
         .iter()
-        .any(|required| !tools.iter().any(|tool| tool.name == *required))
+        .any(|(required, _)| !tools.iter().any(|tool| tool.name == *required))
     {
         return Err(AppError::new(
             "notion_mcp_required_tools_missing",
             "Notion hosted MCP is missing tools June requires.",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppError> {
+    let malformed = || {
+        AppError::new(
+            "notion_mcp_tool_access_check_failed",
+            "June could not verify which Notion tools are available for this workspace. Please try again.",
+        )
+    };
+    let result = result.as_object().ok_or_else(&malformed)?;
+    match result.get("isError") {
+        None | Some(serde_json::Value::Bool(false)) => {}
+        _ => return Err(malformed()),
+    }
+    let content = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(&malformed)?;
+    let mut access_map = None;
+    for block in content {
+        let Some(text) = block
+            .as_object()
+            .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+            .and_then(|block| block.get("text"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        let Some(map) = payload
+            .get("self")
+            .and_then(|value| value.get("current_tool_access"))
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+        if access_map.replace(map.clone()).is_some() {
+            return Err(malformed());
+        }
+    }
+    let access_map = access_map.ok_or_else(&malformed)?;
+    let mut unavailable = false;
+    for (_, access_key) in NOTION_REQUIRED_TOOLS {
+        let status = access_map
+            .get(*access_key)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|entry| entry.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(&malformed)?;
+        match status {
+            "available" | "limited_free_trial" => {}
+            "upgrade_required" | "not_enabled" => unavailable = true,
+            _ => return Err(malformed()),
+        }
+    }
+    if unavailable {
+        return Err(AppError::new(
+            "notion_mcp_required_tools_unavailable",
+            "This Notion workspace does not currently enable every tool June requires. Enable or upgrade access, then try again.",
         ));
     }
     Ok(())
@@ -2416,22 +2484,77 @@ mod tests {
             description: None,
             input_schema: object_schema(),
         };
-        let required = NOTION_REQUIRED_TOOL_NAMES
+        let required = NOTION_REQUIRED_TOOLS
             .iter()
-            .map(|name| tool(name))
+            .map(|(name, _)| tool(name))
             .collect::<Vec<_>>();
         assert!(verify_required_hosted_tools(&required).is_ok());
 
-        for missing in NOTION_REQUIRED_TOOL_NAMES {
-            let incomplete = NOTION_REQUIRED_TOOL_NAMES
+        for (missing, _) in NOTION_REQUIRED_TOOLS {
+            let incomplete = NOTION_REQUIRED_TOOLS
                 .iter()
-                .filter(|name| *name != missing)
-                .map(|name| tool(name))
+                .filter(|(name, _)| name != missing)
+                .map(|(name, _)| tool(name))
                 .chain(std::iter::once(tool("notion-get-users")))
                 .collect::<Vec<_>>();
             assert_eq!(
                 verify_required_hosted_tools(&incomplete).unwrap_err().code,
                 "notion_mcp_required_tools_missing"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_accepts_callable_notion_tool_access() {
+        assert!(verify_required_tool_access(&tool_access_result(&[])).is_ok());
+        for (_, access_key) in NOTION_REQUIRED_TOOLS {
+            assert!(verify_required_tool_access(&tool_access_result(&[(
+                access_key,
+                "limited_free_trial"
+            )]))
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_known_unavailable_notion_tool_access() {
+        for (_, access_key) in NOTION_REQUIRED_TOOLS {
+            for status in ["upgrade_required", "not_enabled"] {
+                assert_eq!(
+                    verify_required_tool_access(&tool_access_result(&[(access_key, status)]))
+                        .unwrap_err()
+                        .code,
+                    "notion_mcp_required_tools_unavailable"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_fails_closed_on_unverifiable_notion_tool_access() {
+        let valid = tool_access_result(&[]);
+        let mut duplicate = valid.clone();
+        duplicate["content"] =
+            serde_json::json!([valid["content"][1].clone(), valid["content"][1].clone()]);
+        let mut missing_required = valid.clone();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(missing_required["content"][1]["text"].as_str().unwrap()).unwrap();
+        payload["self"]["current_tool_access"]
+            .as_object_mut()
+            .unwrap()
+            .remove("update_page");
+        missing_required["content"][1]["text"] = serde_json::Value::String(payload.to_string());
+
+        for result in [
+            serde_json::json!({ "isError": true, "content": valid["content"].clone() }),
+            serde_json::json!({ "content": [{ "type": "text", "text": "{}" }] }),
+            tool_access_result(&[("create_pages", "AVAILABLE")]),
+            missing_required,
+            duplicate,
+        ] {
+            assert_eq!(
+                verify_required_tool_access(&result).unwrap_err().code,
+                "notion_mcp_tool_access_check_failed"
             );
         }
     }
@@ -3127,6 +3250,37 @@ mod tests {
             .as_object()
             .cloned()
             .expect("object schema")
+    }
+
+    fn tool_access_result(overrides: &[(&str, &str)]) -> serde_json::Value {
+        let access = NOTION_REQUIRED_TOOLS
+            .iter()
+            .map(|(_, access_key)| {
+                let status = overrides
+                    .iter()
+                    .find_map(|(key, status)| (*key == *access_key).then_some(*status))
+                    .unwrap_or("available");
+                (
+                    (*access_key).to_string(),
+                    serde_json::json!({ "status": status }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let text = serde_json::json!({
+            "self": {
+                "workspace": { "id": "workspace-id", "name": "Workspace" },
+                "user": { "id": "user-id", "name": "User" },
+                "current_tool_access": access,
+            }
+        })
+        .to_string();
+        serde_json::json!({
+            "content": [
+                { "type": "image", "data": "ignored" },
+                { "type": "text", "text": text },
+            ],
+            "isError": false,
+        })
     }
 
     #[test]
