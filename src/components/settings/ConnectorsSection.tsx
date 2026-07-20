@@ -101,7 +101,6 @@ function NotionConnectorActions({
   onDisconnect,
 }: NotionConnectorActionsProps) {
   const busy = connecting || disconnecting;
-  if (state === "unavailable") return null;
   const disconnectButton = (
     <button
       type="button"
@@ -115,7 +114,7 @@ function NotionConnectorActions({
     </button>
   );
 
-  if (state === "connected") return disconnectButton;
+  if (state === "connected" || state === "unavailable") return disconnectButton;
   if (state === "reconnect_required") {
     return (
       <>
