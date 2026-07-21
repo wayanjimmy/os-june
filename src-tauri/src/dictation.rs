@@ -1257,6 +1257,48 @@ fn set_window_alpha(hud: &WebviewWindow, alpha: f64) {
 #[cfg(not(target_os = "macos"))]
 fn set_window_alpha(_hud: &WebviewWindow, _alpha: f64) {}
 
+/// Show the HUD without stealing key focus on macOS. Mirrors the agent HUD's
+/// `order_agent_hud_front_without_key` (`src-tauri/src/agent_hud.rs`): Tauri's
+/// `show()` does `makeKeyAndOrderFront:`, which promotes June to the active app
+/// and flips the menu bar to June's menus for a frame even when the user is
+/// dictating into another app. `orderFrontRegardless` makes the window visible
+/// and frontmost without making it key — and, unlike `orderFront:`, does so
+/// even when June is not the active app, which is the dictation HUD's defining
+/// case (the user is typing in another app). The external app keeps focus.
+///
+fn show_hud_non_activating(app: &AppHandle, hud: &WebviewWindow, alpha: f64) {
+    #[cfg(target_os = "macos")]
+    {
+        let hud = hud.clone();
+        let _ = app.run_on_main_thread(move || order_hud_front_without_key(&hud, alpha));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = hud.show();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn order_hud_front_without_key(hud: &WebviewWindow, alpha: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    let Ok(handle) = hud.ns_window() else {
+        return;
+    };
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        let win = handle as *mut AnyObject;
+        let _: () = msg_send![win, setAlphaValue: alpha];
+        // orderFrontRegardless (not orderFront:) — the dictation HUD is shown
+        // while another app is active, and orderFront: only guarantees front
+        // placement when the app is already active. Neither method makes the
+        // window key or main, so focus and the menu bar stay put.
+        let _: () = msg_send![win, orderFrontRegardless];
+    }
+}
+
 /// Show the HUD window. Invoked by the webview from showHud() once it has
 /// measured the pill and resized the window to match — the window must never
 /// become visible before that resize, or it flashes up at a stale frame
@@ -1288,9 +1330,7 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     if !(was_hidden && entering) {
         // Plain show. An interrupted exit fade may have left the native
         // alpha low; restore it.
-        let alpha_hud = hud.clone();
-        let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 1.0));
-        let _ = hud.show();
+        show_hud_non_activating(&app, &hud, 1.0);
         return was_hidden;
     }
 
@@ -1304,18 +1344,14 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
         .ok()
         .and_then(|size| default_hud_position(&hud, size));
     let Some((x, y)) = target else {
-        let alpha_hud = hud.clone();
-        let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 1.0));
-        let _ = hud.show();
+        show_hud_non_activating(&app, &hud, 1.0);
         return was_hidden;
     };
 
     if !animate.unwrap_or(true) {
         // Reduced motion: right spot, no slide.
         let _ = hud.set_position(PhysicalPosition::new(x, y));
-        let alpha_hud = hud.clone();
-        let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 1.0));
-        let _ = hud.show();
+        show_hud_non_activating(&app, &hud, 1.0);
         return was_hidden;
     }
 
@@ -1328,11 +1364,7 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
         .map(|scale| (HUD_ENTER_OFFSET_LOGICAL * scale).round() as i32)
         .unwrap_or(0);
     let _ = hud.set_position(PhysicalPosition::new(x, y - offset));
-    {
-        let alpha_hud = hud.clone();
-        let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 0.0));
-    }
-    let _ = hud.show();
+    show_hud_non_activating(&app, &hud, 0.0);
     // Position and alpha land in one main-thread closure per frame so the
     // slide and the fade can't desync.
     const STEPS: u32 = 18;
@@ -5225,9 +5257,7 @@ pub(crate) fn wake_hud_window(app: &AppHandle) {
         // re-centers precisely once the webview has sized the window.
         position_hud_window_top_center(&hud);
         HUD_WOKEN_FADED.store(true, std::sync::atomic::Ordering::Relaxed);
-        let alpha_hud = hud.clone();
-        let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 0.0));
-        let _ = hud.show();
+        show_hud_non_activating(app, &hud, 0.0);
     }
 }
 
