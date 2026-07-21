@@ -14,6 +14,7 @@
 
 pub mod approvals;
 pub mod commands;
+pub mod github;
 pub mod google;
 pub mod linear;
 pub mod notion;
@@ -41,6 +42,8 @@ const ACCESS_TOKEN_EXPIRY_BUFFER_SECS: i64 = 60;
 const GOOGLE_OAUTH_CLIENT_ID_ENV: &str = "GOOGLE_OAUTH_CLIENT_ID";
 const GOOGLE_OAUTH_CLIENT_SECRET_ENV: &str = "GOOGLE_OAUTH_CLIENT_SECRET";
 const LINEAR_OAUTH_CLIENT_ID_ENV: &str = "LINEAR_OAUTH_CLIENT_ID";
+pub(crate) const GITHUB_OAUTH_CLIENT_ID_ENV: &str = "GITHUB_OAUTH_CLIENT_ID";
+pub(crate) const GITHUB_OAUTH_CLIENT_SECRET_ENV: &str = "GITHUB_OAUTH_CLIENT_SECRET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +51,7 @@ pub enum ConnectorProvider {
     Google,
     Notion,
     Linear,
+    Github,
 }
 
 impl ConnectorProvider {
@@ -56,6 +60,7 @@ impl ConnectorProvider {
             ConnectorProvider::Google => "google",
             ConnectorProvider::Notion => "notion",
             ConnectorProvider::Linear => "linear",
+            ConnectorProvider::Github => "github",
         }
     }
 
@@ -67,6 +72,7 @@ impl ConnectorProvider {
         match value {
             "notion" => ConnectorProvider::Notion,
             "linear" => ConnectorProvider::Linear,
+            "github" => ConnectorProvider::Github,
             _ => ConnectorProvider::Google,
         }
     }
@@ -233,6 +239,42 @@ fn require_linear_client_id() -> Result<String, AppError> {
     Ok(client_id)
 }
 
+/// GitHub App credential: client id and client secret. Unlike Linear's
+/// PKCE-only public-client flow, GitHub's token endpoint requires the client
+/// secret. Both values are shipped in the binary and neither grants user-data
+/// access without the user's authorization code or refresh token. Runtime env
+/// values override the build-time values for local testing (mirrors
+/// [`GoogleOAuthClient`] exactly; deliberate duplication per house style).
+struct GithubOAuthClient {
+    client_id: String,
+    client_secret: String,
+}
+
+fn github_oauth_client() -> GithubOAuthClient {
+    crate::os_accounts::load_local_env();
+    GithubOAuthClient {
+        client_id: env_or_build_trimmed(
+            GITHUB_OAUTH_CLIENT_ID_ENV,
+            option_env!("GITHUB_OAUTH_CLIENT_ID"),
+        ),
+        client_secret: env_or_build_trimmed(
+            GITHUB_OAUTH_CLIENT_SECRET_ENV,
+            option_env!("GITHUB_OAUTH_CLIENT_SECRET"),
+        ),
+    }
+}
+
+fn require_github_oauth_client() -> Result<GithubOAuthClient, AppError> {
+    let client = github_oauth_client();
+    if client.client_id.is_empty() || client.client_secret.is_empty() {
+        return Err(AppError::new(
+            "connector_not_configured",
+            "GitHub connector is not configured in this build.",
+        ));
+    }
+    Ok(client)
+}
+
 /// The callback ports registered on the Linear OAuth application
 /// (`http://127.0.0.1:<port>/callback`, one URL per port). Linear matches
 /// the registered callback URL exactly - it does not ignore the loopback
@@ -255,6 +297,30 @@ fn linear_loopback_ports_from(override_value: &str) -> Vec<u16> {
     match override_value.parse::<u16>() {
         Ok(port) if port != 0 => vec![port],
         _ => LINEAR_LOOPBACK_PORTS.to_vec(),
+    }
+}
+
+/// The callback ports registered on the GitHub OAuth application
+/// (`http://127.0.0.1:<port>/callback`, one URL per port). GitHub matches the
+/// registered callback URL exactly - including the port - so the connect
+/// listener must bind one of exactly these. Keep this list in sync with the
+/// GitHub App's registered callback URLs.
+const GITHUB_LOOPBACK_PORTS: &[u16] = &[44751, 44752, 44753];
+const GITHUB_OAUTH_LOOPBACK_PORT_ENV: &str = "GITHUB_OAUTH_LOOPBACK_PORT";
+
+/// The candidate loopback ports for a GitHub connect: the
+/// `GITHUB_OAUTH_LOOPBACK_PORT` override alone when it parses as a port
+/// (for an OAuth app registered with a custom callback URL), otherwise the
+/// registered defaults.
+fn github_loopback_ports() -> Vec<u16> {
+    crate::os_accounts::load_local_env();
+    github_loopback_ports_from(&env_trimmed(GITHUB_OAUTH_LOOPBACK_PORT_ENV))
+}
+
+fn github_loopback_ports_from(override_value: &str) -> Vec<u16> {
+    match override_value.parse::<u16>() {
+        Ok(port) if port != 0 => vec![port],
+        _ => GITHUB_LOOPBACK_PORTS.to_vec(),
     }
 }
 
@@ -504,6 +570,133 @@ async fn refresh_linear_access_token_with_freshness_gate(
                 return Err(AppError::new(
                     "connector_refresh_unavailable",
                     "Couldn't reach Linear to refresh access. Try again in a moment.",
+                ));
+            }
+        }
+    }
+}
+
+fn github_not_connected_error() -> AppError {
+    AppError::new(
+        "connector_not_connected",
+        "This GitHub account is not connected.",
+    )
+}
+
+fn github_reconnect_required_error() -> AppError {
+    AppError::new(
+        "connector_reconnect_required",
+        "GitHub access for this account expired. Reconnect it in settings.",
+    )
+}
+
+/// Resolve a usable access token for the GitHub account: the cached token when
+/// it is comfortably fresh, otherwise a refreshed one. The account id is the
+/// stringified numeric GitHub user id; it shares [`REFRESH_LOCKS`] with Google
+/// and Linear accounts (no collision possible). The refresh loop is a
+/// deliberate duplicate of the Linear one with GitHub types - the two flows
+/// differ in credential shape (secret required) and outcome enum, and an
+/// abstraction over both would obscure more than it saves.
+pub async fn github_access_token(
+    app: &tauri::AppHandle,
+    account_id: &str,
+) -> Result<String, AppError> {
+    let stored = store::load_tokens(ConnectorProvider::Github, account_id)
+        .await?
+        .ok_or_else(github_not_connected_error)?;
+    if access_token_is_fresh(stored.expires_at_unix, now_unix()) {
+        return Ok(stored.access_token.clone());
+    }
+    refresh_github_access_token_with_freshness_gate(app, account_id, true).await
+}
+
+/// Refresh regardless of cached freshness. Callers use this to retry once
+/// after `github::GithubApiError::Unauthorized` (a token revoked or expired
+/// server side before its local expiry).
+pub async fn force_refresh_github_access_token(
+    app: &tauri::AppHandle,
+    account_id: &str,
+) -> Result<String, AppError> {
+    // Skip the freshness fast path but still serialize on the account lock.
+    refresh_github_access_token_with_freshness_gate(app, account_id, false).await
+}
+
+async fn refresh_github_access_token_with_freshness_gate(
+    app: &tauri::AppHandle,
+    account_id: &str,
+    accept_fresh: bool,
+) -> Result<String, AppError> {
+    let client = require_github_oauth_client()?;
+    let lock = refresh_lock_for(account_id);
+    let _guard = lock.lock().await;
+    // Re-read inside the lock: another caller may have already refreshed
+    // (and rotated the refresh token) while we waited.
+    let mut stored = store::load_tokens(ConnectorProvider::Github, account_id)
+        .await?
+        .ok_or_else(github_not_connected_error)?;
+    if accept_fresh && access_token_is_fresh(stored.expires_at_unix, now_unix()) {
+        return Ok(stored.access_token.clone());
+    }
+
+    // Non-expiring token: if the stored refresh_token is empty the GitHub App
+    // has "expire user authorization tokens" disabled. The access token does
+    // not expire; never call GitHub with an empty refresh token.
+    if stored.refresh_token.is_empty() {
+        mark_reconnect_required(app, account_id).await;
+        return Err(github_reconnect_required_error());
+    }
+
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match github::refresh(
+            &client.client_id,
+            &client.client_secret,
+            &stored.refresh_token,
+        )
+        .await
+        {
+            github::GithubRefreshOutcome::Refreshed(fresh) => {
+                stored.access_token = fresh.access_token.clone();
+                // Rotation: GitHub rotates the refresh token on every
+                // refresh; persist it, keep the existing one if absent.
+                if let Some(rotated) = fresh
+                    .refresh_token
+                    .as_deref()
+                    .filter(|token| !token.is_empty())
+                {
+                    stored.refresh_token = rotated.to_string();
+                }
+                stored.expires_at_unix = fresh
+                    .expires_in
+                    .map(|secs| now_unix() + secs.max(0))
+                    .unwrap_or_else(|| now_unix() + github::NON_EXPIRING_TOKEN_LIFETIME_SECS);
+                // GitHub already rotated server-side, so a failed persist
+                // here strands the NEW refresh token. Log distinctly so a
+                // later forced reconnect is diagnosable to this write.
+                if let Err(error) =
+                    store::store_tokens(ConnectorProvider::Github, account_id, &stored).await
+                {
+                    tracing::error!(
+                        error_code = %error.code,
+                        "persisting rotated github refresh token failed; grant recovers only within github's consumption grace window"
+                    );
+                    return Err(error);
+                }
+                return Ok(stored.access_token.clone());
+            }
+            github::GithubRefreshOutcome::InvalidGrant => {
+                mark_reconnect_required(app, account_id).await;
+                return Err(github_reconnect_required_error());
+            }
+            github::GithubRefreshOutcome::Transient => {
+                if attempt < oauth::REFRESH_MAX_ATTEMPTS {
+                    tokio::time::sleep(oauth::REFRESH_RETRY_BACKOFF * attempt as u32).await;
+                    continue;
+                }
+                return Err(AppError::new(
+                    "connector_refresh_unavailable",
+                    "Couldn't reach GitHub to refresh access. Try again in a moment.",
                 ));
             }
         }
@@ -1063,6 +1256,200 @@ pub async fn begin_connect_linear(
     })
 }
 
+/// The non-secret metadata blob persisted on a GitHub account row. Keys are
+/// camelCase to match [`ConnectorAccountMetadata`]'s parse; empty-string
+/// fields are omitted rather than stored as noise. Note: ConnectorAccountMetadata
+/// ignores unknown keys (actorLogin, actorName), which is fine.
+fn github_account_metadata_json(identity: &github::GithubIdentity) -> String {
+    let mut map = serde_json::Map::new();
+    for (key, value) in [
+        ("actorLogin", &identity.login),
+        ("actorName", &identity.name),
+    ] {
+        if !value.is_empty() {
+            map.insert(key.to_string(), serde_json::Value::String(value.clone()));
+        }
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
+/// Run the full GitHub connect flow (browser consent, loopback callback, code
+/// exchange, identity resolution, custody write, DB index upsert) for the
+/// requested scope bundles. The account is keyed by the NUMERIC GitHub user id
+/// (stringified), not the login: logins can change, but numeric ids are
+/// stable. `reconnect_account_id` carries that id on a reconnect or scope
+/// escalation. With a `reconnect_account_id` naming an already-connected
+/// account whose granted scopes cover the request, no browser round-trip happens
+/// (mirroring the Linear escalation short-circuit).
+pub async fn begin_connect_github(
+    app: &tauri::AppHandle,
+    flow: &ConnectFlow,
+    bundles: &[scopes::ScopeBundle],
+    reconnect_account_id: Option<&str>,
+) -> Result<ConnectorAccount, AppError> {
+    // Defensive: the command layer validates too, but a Google bundle here
+    // would request Google scope URLs from GitHub's consent screen.
+    if let Some(bundle) = bundles
+        .iter()
+        .find(|bundle| bundle.provider() != ConnectorProvider::Github)
+    {
+        return Err(AppError::new(
+            "connector_scope_provider_mismatch",
+            format!(
+                "Scope bundle \"{}\" does not belong to the github connector.",
+                bundle.name()
+            ),
+        ));
+    }
+    let client = require_github_oauth_client()?;
+    let repos = crate::commands::repositories(app).await?;
+
+    let reconnect_account_id = reconnect_account_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    // Escalation/reconnect short-circuit: an existing, healthy account
+    // that already holds every wanted scope needs no new consent.
+    if let Some(account_id) = reconnect_account_id {
+        if let Some(record) = repos.get_connector_account(account_id).await? {
+            let already_granted = scopes::missing_scopes(&record.scopes, bundles).is_empty();
+            if record.provider == ConnectorProvider::Github.as_str()
+                && already_granted
+                && record.status == ConnectorAccountStatus::Connected.as_str()
+            {
+                return account_dto(&repos, record).await;
+            }
+        }
+    }
+
+    let grant = github::authorize(
+        flow,
+        &client.client_id,
+        &client.client_secret,
+        &github_loopback_ports(),
+    )
+    .await?;
+    let identity = grant.identity;
+    let user_id = identity.user_id.clone();
+
+    // A reconnect id means the user asked to (re)connect one specific account.
+    // The browser can still consent for a different one; abort on mismatch
+    // rather than silently storing the wrong account.
+    if let Some(expected) = reconnect_account_id {
+        if !user_id.eq_ignore_ascii_case(expected) {
+            return Err(AppError::new(
+                "connector_account_mismatch",
+                "That GitHub account does not match the one you were reconnecting. Try again and choose that account.",
+            ));
+        }
+    }
+
+    // Same single-account rationale as Google and Linear, scoped to GitHub.
+    let existing_accounts = repos.list_connector_accounts().await?;
+    if let Some(existing_id) = conflicting_existing_account(
+        existing_accounts
+            .iter()
+            .map(|record| (record.provider.as_str(), record.account_id.as_str())),
+        ConnectorProvider::Github.as_str(),
+        &user_id,
+    ) {
+        // Name the stored login when the metadata carries it.
+        let display = existing_accounts
+            .iter()
+            .find(|record| record.account_id == existing_id)
+            .and_then(|record| serde_json::from_str::<serde_json::Value>(&record.metadata).ok())
+            .and_then(|metadata| {
+                metadata
+                    .get("actorLogin")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or(existing_id);
+        return Err(AppError::new(
+            "connector_single_account_only",
+            format!(
+                "June local mode uses one GitHub account at a time. Disconnect {display} before connecting another."
+            ),
+        ));
+    }
+
+    // June-side grant markers: GitHub returns no scope field; the markers are
+    // determined by what the user requested. When write is being added to an
+    // existing account, union the requested markers with the stored ones so a
+    // write-escalation never drops the read marker.
+    let requested_markers = scopes::requested_github_scopes(bundles);
+    let existing_scopes = existing_accounts
+        .iter()
+        .find(|record| {
+            record.provider == ConnectorProvider::Github.as_str()
+                && record.account_id.eq_ignore_ascii_case(&user_id)
+        })
+        .map(|record| record.scopes.as_slice());
+    // GitHub returns no scope field; always use the fallback union path.
+    let granted_scopes = scopes::resolve_granted_scopes(None, &requested_markers, existing_scopes);
+
+    // Refresh-token keep-existing fallback on escalation: when GitHub omits
+    // the refresh token on a write-escalation connect AND the custody already
+    // holds one, keep the existing one (mirrors the Linear pattern).
+    let refresh_token = match grant
+        .tokens
+        .refresh_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+    {
+        Some(token) => token.to_string(),
+        None => {
+            // Non-expiring token app or escalation with no new refresh token:
+            // keep whatever is in custody (may be empty for non-expiring apps).
+            store::load_tokens(ConnectorProvider::Github, &user_id)
+                .await?
+                .map(|existing| existing.refresh_token.clone())
+                .unwrap_or_default()
+        }
+    };
+
+    let expires_at_unix = grant
+        .tokens
+        .expires_in
+        .map(|secs| now_unix() + secs.max(0))
+        .unwrap_or_else(|| now_unix() + github::NON_EXPIRING_TOKEN_LIFETIME_SECS);
+
+    let tokens = store::StoredConnectorTokens {
+        access_token: grant.tokens.access_token.clone(),
+        refresh_token,
+        expires_at_unix,
+        scopes: granted_scopes.clone(),
+        // login as the informational email field (mirrors Linear's user_email).
+        email: identity.login.clone(),
+    };
+    store::store_tokens(ConnectorProvider::Github, &user_id, &tokens).await?;
+
+    let metadata_json = github_account_metadata_json(&identity);
+    repos
+        .upsert_connector_account(
+            &user_id,
+            ConnectorProvider::Github.as_str(),
+            &identity.login,
+            &granted_scopes,
+            ConnectorAccountStatus::Connected.as_str(),
+            &metadata_json,
+        )
+        .await?;
+    emit_connectors_changed(app);
+
+    Ok(ConnectorAccount {
+        account_id: user_id,
+        provider: ConnectorProvider::Github,
+        email: identity.login,
+        scopes: granted_scopes,
+        status: ConnectorAccountStatus::Connected,
+        workspace_name: None,
+        workspace_url_key: None,
+        selected_teams: Vec::new(),
+    })
+}
+
 /// Abort an in-flight connect (drains the browser-handoff wait).
 pub fn cancel_connect(flow: &ConnectFlow) {
     flow.cancel();
@@ -1084,6 +1471,7 @@ pub async fn disconnect(
         Some(record) => match ConnectorProvider::from_db(&record.provider) {
             ConnectorProvider::Google => &[ConnectorProvider::Google],
             ConnectorProvider::Linear => &[ConnectorProvider::Linear],
+            ConnectorProvider::Github => &[ConnectorProvider::Github],
             ConnectorProvider::Notion => {
                 notion::disconnect(app).await?;
                 emit_connectors_changed(app);
@@ -1095,7 +1483,11 @@ pub async fn disconnect(
             emit_connectors_changed(app);
             return Ok(());
         }
-        None => &[ConnectorProvider::Google, ConnectorProvider::Linear],
+        None => &[
+            ConnectorProvider::Google,
+            ConnectorProvider::Linear,
+            ConnectorProvider::Github,
+        ],
     };
     for &provider in providers {
         if revoke_grant {
@@ -1124,6 +1516,21 @@ pub async fn disconnect(
                         }
                         if !stored.access_token.is_empty() {
                             let _ = linear::revoke(&stored.access_token, "access_token").await;
+                        }
+                    }
+                    ConnectorProvider::Github => {
+                        // GitHub: revoke the user access token via the
+                        // applications endpoint (DELETE). Best-effort.
+                        if !stored.access_token.is_empty() {
+                            let client = github_oauth_client();
+                            if !client.client_id.is_empty() && !client.client_secret.is_empty() {
+                                let _ = github::revoke(
+                                    &client.client_id,
+                                    &client.client_secret,
+                                    &stored.access_token,
+                                )
+                                .await;
+                            }
                         }
                     }
                     ConnectorProvider::Notion => {}
@@ -1335,6 +1742,15 @@ mod tests {
             "\"linear\""
         );
         assert_eq!(
+            serde_json::to_string(&ConnectorProvider::Github).unwrap(),
+            "\"github\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ConnectorProvider>("\"github\"").unwrap(),
+            ConnectorProvider::Github
+        );
+        assert_eq!(ConnectorProvider::Github.as_str(), "github");
+        assert_eq!(
             serde_json::to_string(&ConnectorAccountStatus::ReconnectRequired).unwrap(),
             "\"reconnect_required\""
         );
@@ -1357,6 +1773,10 @@ mod tests {
         assert_eq!(
             ConnectorProvider::from_db("linear"),
             ConnectorProvider::Linear
+        );
+        assert_eq!(
+            ConnectorProvider::from_db("github"),
+            ConnectorProvider::Github
         );
         assert_eq!(
             ConnectorProvider::from_db("unexpected"),
@@ -1682,6 +2102,93 @@ mod tests {
         assert_eq!(
             ambiguous.message,
             "June could not confirm whether Linear applied this change. Check Linear before retrying; action id action-123."
+        );
+    }
+
+    // --- GitHub-specific tests -------------------------------------------------------
+
+    #[test]
+    fn github_loopback_ports_prefer_valid_env_override_only() {
+        // A parseable non-zero override narrows the candidates to that port.
+        assert_eq!(github_loopback_ports_from("50000"), vec![50000]);
+        // Empty, garbage, zero, and out-of-range values all fall back to the
+        // registered defaults.
+        assert_eq!(github_loopback_ports_from(""), GITHUB_LOOPBACK_PORTS);
+        assert_eq!(
+            github_loopback_ports_from("not-a-port"),
+            GITHUB_LOOPBACK_PORTS
+        );
+        assert_eq!(github_loopback_ports_from("0"), GITHUB_LOOPBACK_PORTS);
+        assert_eq!(github_loopback_ports_from("70000"), GITHUB_LOOPBACK_PORTS);
+    }
+
+    #[test]
+    fn github_error_helpers_carry_stable_codes() {
+        let not_connected = github_not_connected_error();
+        assert_eq!(not_connected.code, "connector_not_connected");
+        assert_eq!(
+            not_connected.message,
+            "This GitHub account is not connected."
+        );
+
+        let reconnect = github_reconnect_required_error();
+        assert_eq!(reconnect.code, "connector_reconnect_required");
+        assert_eq!(
+            reconnect.message,
+            "GitHub access for this account expired. Reconnect it in settings."
+        );
+    }
+
+    #[test]
+    fn github_account_metadata_json_omits_empty_fields() {
+        let identity = github::GithubIdentity {
+            user_id: "12345".to_string(),
+            login: "octocat".to_string(),
+            name: "Octo Cat".to_string(),
+        };
+        let raw = github_account_metadata_json(&identity);
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["actorLogin"], "octocat");
+        assert_eq!(json["actorName"], "Octo Cat");
+
+        let empty_name = github::GithubIdentity {
+            user_id: "12345".to_string(),
+            login: "octocat".to_string(),
+            name: String::new(),
+        };
+        let raw2 = github_account_metadata_json(&empty_name);
+        let json2: serde_json::Value = serde_json::from_str(&raw2).unwrap();
+        assert_eq!(json2["actorLogin"], "octocat");
+        assert!(json2.get("actorName").is_none());
+    }
+
+    #[test]
+    fn github_provider_as_str_round_trips_from_db() {
+        assert_eq!(ConnectorProvider::Github.as_str(), "github");
+        assert_eq!(
+            ConnectorProvider::from_db("github"),
+            ConnectorProvider::Github
+        );
+    }
+
+    #[test]
+    fn single_account_guard_works_for_github() {
+        // First connect: no conflict.
+        assert_eq!(conflicting_existing_account([], "github", "12345"), None);
+        // Reconnect same account (case-insensitive): allowed.
+        assert_eq!(
+            conflicting_existing_account([("github", "12345")], "github", "12345"),
+            None
+        );
+        // Different account: blocked.
+        assert_eq!(
+            conflicting_existing_account([("github", "12345")], "github", "99999"),
+            Some("12345".to_string())
+        );
+        // GitHub account does not block Linear or Google connect.
+        assert_eq!(
+            conflicting_existing_account([("github", "12345")], "linear", "workspace-1"),
+            None
         );
     }
 }
