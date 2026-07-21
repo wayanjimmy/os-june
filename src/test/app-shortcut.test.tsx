@@ -56,7 +56,7 @@ function stubNavigatorPlatform(platform: string, userAgent: string) {
 const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
   listeners: new Map<string, (event: { payload?: unknown }) => void>(),
-  pendingMeetingStartRequest: undefined as { requestedAtMs: number } | undefined,
+  pendingMeetingStartRequest: undefined as { requestedAtMs: number; expired: boolean } | undefined,
   takePendingMeetingStartRequest: vi.fn(async () => {
     const request = mocks.pendingMeetingStartRequest;
     mocks.pendingMeetingStartRequest = undefined;
@@ -1400,7 +1400,7 @@ describe("App shortcuts", () => {
 
       await waitFor(() => expect(systemReadinessCalls).toBe(2));
 
-      mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
+      mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now(), expired: false };
       await act(async () => {
         await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
           payload: undefined,

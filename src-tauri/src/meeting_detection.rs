@@ -17,6 +17,7 @@ const MEETING_START_REQUEST_TTL_MS: u64 = 30_000;
 #[serde(rename_all = "camelCase")]
 pub struct PendingMeetingStartRequest {
     requested_at_ms: u64,
+    expired: bool,
 }
 
 #[derive(Debug, Default)]
@@ -40,11 +41,12 @@ impl MeetingStartRequestState {
             .lock()
             .map_err(|_| "meeting start request state is unavailable".to_string())?
             .take();
-        Ok(requested_at_ms
-            .filter(|requested_at_ms| {
-                now_ms.saturating_sub(*requested_at_ms) <= MEETING_START_REQUEST_TTL_MS
-            })
-            .map(|requested_at_ms| PendingMeetingStartRequest { requested_at_ms }))
+        Ok(
+            requested_at_ms.map(|requested_at_ms| PendingMeetingStartRequest {
+                requested_at_ms,
+                expired: now_ms.saturating_sub(requested_at_ms) > MEETING_START_REQUEST_TTL_MS,
+            }),
+        )
     }
 }
 
@@ -705,6 +707,7 @@ mod tests {
             state.take_at(1_100).expect("take request"),
             Some(PendingMeetingStartRequest {
                 requested_at_ms: 1_000,
+                expired: false,
             })
         );
         assert_eq!(state.take_at(1_100).expect("take empty request"), None);
@@ -720,6 +723,7 @@ mod tests {
             state.take_at(2_100).expect("take request"),
             Some(PendingMeetingStartRequest {
                 requested_at_ms: 2_000,
+                expired: false,
             })
         );
     }
@@ -733,7 +737,10 @@ mod tests {
             state
                 .take_at(1_000 + MEETING_START_REQUEST_TTL_MS + 1)
                 .expect("take stale request"),
-            None
+            Some(PendingMeetingStartRequest {
+                requested_at_ms: 1_000,
+                expired: true,
+            })
         );
     }
 

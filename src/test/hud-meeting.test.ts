@@ -177,6 +177,7 @@ describe("meeting detection HUD", () => {
     );
     expect(hudElement().dataset.state).toBe("meeting");
     expect(mocks.hide).not.toHaveBeenCalled();
+    await emit("meeting-detection-event", { type: "meeting_cleared" });
   });
 
   it("dismisses the prompt and stays quiet until the meeting clears", async () => {

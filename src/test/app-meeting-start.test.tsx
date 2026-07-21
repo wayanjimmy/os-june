@@ -8,7 +8,7 @@ type TauriListener = (event: { payload: unknown }) => unknown;
 
 const mocks = vi.hoisted(() => ({
   listeners: new Map<string, TauriListener>(),
-  pendingMeetingStartRequest: undefined as { requestedAtMs: number } | undefined,
+  pendingMeetingStartRequest: undefined as { requestedAtMs: number; expired: boolean } | undefined,
   listen: vi.fn((event: string, listener: TauriListener) => {
     mocks.listeners.set(event, listener);
     return Promise.resolve(vi.fn());
@@ -270,7 +270,7 @@ describe("meeting start transcription event", () => {
   });
 
   async function fireMeetingStart() {
-    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now(), expired: false };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -348,6 +348,7 @@ describe("meeting start transcription event", () => {
 
     await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
     await fireMeetingStart();
+    expect(mocks.takePendingMeetingStartRequest).not.toHaveBeenCalled();
     expect(mocks.createNote).not.toHaveBeenCalled();
 
     await waitFor(() => expect(mocks.bootstrapApp).toHaveBeenCalledOnce());
@@ -373,7 +374,7 @@ describe("meeting start transcription event", () => {
     ).toHaveLength(1);
   });
 
-  it("drops a queued meeting start after the prompt intent expires", async () => {
+  it("explains when a queued meeting start expires before recording begins", async () => {
     const first = note();
     const bootstrap = deferred<BootstrapResponse>();
     mocks.bootstrapApp.mockReturnValue(bootstrap.promise);
@@ -401,6 +402,11 @@ describe("meeting start transcription event", () => {
       await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith(first.id));
       expect(mocks.createNote).not.toHaveBeenCalled();
       expect(mocks.startRecording).not.toHaveBeenCalled();
+      expect(
+        screen.getByText(
+          "Recording did not start in time. Open meeting notes and select Record to try again.",
+        ),
+      ).toBeInTheDocument();
     } finally {
       now.mockRestore();
       monotonicNow.mockRestore();
@@ -430,7 +436,7 @@ describe("meeting start transcription event", () => {
         };
       });
     });
-    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now(), expired: false };
 
     render(<App />);
 

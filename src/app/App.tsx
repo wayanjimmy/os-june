@@ -303,6 +303,8 @@ const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
 const MEETING_START_REQUEST_TTL_MS = 30_000;
 const MEETING_START_LISTENER_RETRY_DELAYS_MS = [250, 1_000, 5_000] as const;
+const MEETING_START_REQUEST_EXPIRED_MESSAGE =
+  "Recording did not start in time. Open meeting notes and select Record to try again.";
 const COMPOSER_FUNDING_DISABLED_REASON =
   "Add credits to send messages or generate images and videos.";
 const RECORDING_FUNDING_DISABLED_REASON =
@@ -3674,6 +3676,10 @@ export function App() {
   // while the app boots and drain it through the freshest handler while the
   // user's prompt intent is still current.
   const pendingMeetingStartAtRef = useRef<number | undefined>(undefined);
+  const meetingStartReadyRef = useRef(false);
+  const meetingStartListenerRegisteredRef = useRef(false);
+  const drainPendingMeetingStartRef = useRef<() => void>(() => {});
+  meetingStartReadyRef.current = !appBlocked && bootstrapped;
   const meetingStartHandlerRef = useRef<(queuedAt?: number) => void>(() => {});
   meetingStartHandlerRef.current = (queuedAt) => {
     if (appBlocked || !bootstrapped) {
@@ -3682,6 +3688,7 @@ export function App() {
     }
     pendingMeetingStartAtRef.current = undefined;
     if (queuedAt !== undefined && Date.now() - queuedAt > MEETING_START_REQUEST_TTL_MS) {
+      setError(MEETING_START_REQUEST_EXPIRED_MESSAGE);
       return;
     }
     void handleStartMeetingDetectedRecording();
@@ -3689,6 +3696,7 @@ export function App() {
 
   useEffect(() => {
     if (appBlocked || !bootstrapped) return;
+    drainPendingMeetingStartRef.current();
     const queuedAt = pendingMeetingStartAtRef.current;
     if (queuedAt === undefined) return;
     pendingMeetingStartAtRef.current = undefined;
@@ -3701,12 +3709,19 @@ export function App() {
     let retryTimer: number | undefined;
 
     const drainPendingRequest = () => {
+      if (!meetingStartReadyRef.current || !meetingStartListenerRegisteredRef.current) return;
       void takePendingMeetingStartRequest()
         .then((request) => {
-          if (!aborted && request) meetingStartHandlerRef.current(request.requestedAtMs);
+          if (aborted || !request) return;
+          if (request.expired) {
+            setError(MEETING_START_REQUEST_EXPIRED_MESSAGE);
+            return;
+          }
+          meetingStartHandlerRef.current(request.requestedAtMs);
         })
         .catch(() => {});
     };
+    drainPendingMeetingStartRef.current = drainPendingRequest;
 
     const register = (attempt = 0) => {
       void listen(MEETING_START_TRANSCRIPTION_EVENT, drainPendingRequest)
@@ -3716,6 +3731,7 @@ export function App() {
             return;
           }
           unlisten = cleanup;
+          meetingStartListenerRegisteredRef.current = true;
           drainPendingRequest();
         })
         .catch((error) => {
@@ -3733,6 +3749,7 @@ export function App() {
     register();
     return () => {
       aborted = true;
+      meetingStartListenerRegisteredRef.current = false;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       unlisten?.();
     };

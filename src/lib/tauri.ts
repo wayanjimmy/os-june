@@ -1046,6 +1046,7 @@ export async function agentOpenReady() {
 
 export type PendingMeetingStartRequest = {
   requestedAtMs: number;
+  expired: boolean;
 };
 
 export async function takePendingMeetingStartRequest() {
