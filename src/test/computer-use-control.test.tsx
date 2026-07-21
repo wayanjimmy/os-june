@@ -155,6 +155,91 @@ describe("ComputerUseControl", () => {
     await screen.findByText("Ready");
   });
 
+  it("coalesces a permission probe across an unmount and remount", async () => {
+    tauriMocks.computerUseStatus.mockResolvedValue(
+      status({ grantEnabled: true, accessibility: true, state: "permission_missing" }),
+    );
+    let finishPermissionProbe: ((value: ComputerUseStatusDto) => void) | undefined;
+    tauriMocks.computerUseRequestPermissions.mockImplementationOnce(
+      () =>
+        new Promise<ComputerUseStatusDto>((resolve) => {
+          finishPermissionProbe = resolve;
+        }),
+    );
+    const first = render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Open Screen recording settings" }),
+    );
+
+    first.unmount();
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Open Screen recording settings" }),
+    );
+
+    expect(tauriMocks.computerUseRequestPermissions).toHaveBeenCalledTimes(1);
+    const readyStatus = status({
+      grantEnabled: true,
+      accessibility: true,
+      screenRecording: true,
+      ready: true,
+      state: "ready",
+    });
+    tauriMocks.computerUseStatus.mockResolvedValue(readyStatus);
+    finishPermissionProbe?.(readyStatus);
+    await screen.findByText("Ready");
+  });
+
+  it("queues a newly reached permission pane behind an active probe", async () => {
+    tauriMocks.computerUseStatus.mockResolvedValue(
+      status({ grantEnabled: true, state: "permission_missing" }),
+    );
+    let finishAccessibilityProbe: ((value: ComputerUseStatusDto) => void) | undefined;
+    let finishScreenRecordingProbe: ((value: ComputerUseStatusDto) => void) | undefined;
+    tauriMocks.computerUseRequestPermissions
+      .mockImplementationOnce(
+        () =>
+          new Promise<ComputerUseStatusDto>((resolve) => {
+            finishAccessibilityProbe = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<ComputerUseStatusDto>((resolve) => {
+            finishScreenRecordingProbe = resolve;
+          }),
+      );
+    const first = render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Open Accessibility settings" }),
+    );
+
+    first.unmount();
+    tauriMocks.computerUseStatus.mockResolvedValue(
+      status({ grantEnabled: true, accessibility: true, state: "permission_missing" }),
+    );
+    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Open Screen recording settings" }),
+    );
+
+    expect(tauriMocks.computerUseRequestPermissions).toHaveBeenCalledTimes(1);
+    finishAccessibilityProbe?.(
+      status({ grantEnabled: true, accessibility: true, state: "permission_missing" }),
+    );
+    await waitFor(() => expect(tauriMocks.computerUseRequestPermissions).toHaveBeenCalledTimes(2));
+    const readyStatus = status({
+      grantEnabled: true,
+      accessibility: true,
+      screenRecording: true,
+      ready: true,
+      state: "ready",
+    });
+    tauriMocks.computerUseStatus.mockResolvedValue(readyStatus);
+    finishScreenRecordingProbe?.(readyStatus);
+    await screen.findByText("Ready");
+  });
+
   it("keeps Accessibility labeled as step 1 when Screen recording was allowed first", async () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, screenRecording: true, state: "permission_missing" }),

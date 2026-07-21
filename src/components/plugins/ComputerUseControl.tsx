@@ -45,6 +45,27 @@ function requirementState(ready: boolean, enabled: boolean) {
 
 type MacOSPermission = "accessibility" | "screenRecording";
 
+const pendingPermissionRequests = new Map<MacOSPermission, Promise<ComputerUseStatusDto>>();
+let permissionRequestTail: Promise<unknown> = Promise.resolve();
+
+function requestComputerUsePermission(permission: MacOSPermission) {
+  const pending = pendingPermissionRequests.get(permission);
+  if (pending) return pending;
+
+  const request = permissionRequestTail
+    .catch(() => undefined)
+    .then(() => computerUseRequestPermissions());
+  permissionRequestTail = request;
+  pendingPermissionRequests.set(permission, request);
+  const clear = () => {
+    if (pendingPermissionRequests.get(permission) === request) {
+      pendingPermissionRequests.delete(permission);
+    }
+  };
+  void request.then(clear, clear);
+  return request;
+}
+
 function permissionLabel(permission: MacOSPermission) {
   return permission === "accessibility" ? "Accessibility" : "Screen recording";
 }
@@ -59,7 +80,6 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>();
   const permissionDragRef = useRef<HTMLButtonElement>(null);
-  const permissionRequestRef = useRef<Promise<void> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -144,17 +164,7 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
         // Give the click immediate visible feedback. Starting the signed helper
         // and probing TCC can take several seconds on a cold launch.
         await openPrivacySettings(pane);
-        if (!permissionRequestRef.current) {
-          const request = computerUseRequestPermissions()
-            .then(publish)
-            .finally(() => {
-              if (permissionRequestRef.current === request) {
-                permissionRequestRef.current = null;
-              }
-            });
-          permissionRequestRef.current = request;
-        }
-        await permissionRequestRef.current;
+        publish(await requestComputerUsePermission(pane));
       } catch (error) {
         setMessage(messageFromError(error));
       }
