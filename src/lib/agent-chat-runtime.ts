@@ -140,14 +140,27 @@ export type AgentChatSecretPart = {
 };
 
 /** A turn-level condition the user can act on, rendered as a notice card
- * instead of raw error text: `credits` (the balance ran out) or
+ * instead of raw error text: `credits` (the balance ran out),
+ * `upstream-provider` (the runtime exhausted its provider retries), or
  * `context-overflow` (the request outgrew the model's context / the agent
  * request-size limit and cannot be retried as-is — JUN-169). */
 export type AgentChatNoticePart = {
   type: "notice";
-  kind: "credits" | "context-overflow";
+  kind: "credits" | "context-overflow" | "upstream-provider";
   text: string;
 };
+
+export const UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY =
+  "The model service is temporarily unavailable. Your answer is saved.";
+export const UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT = [
+  "[June upstream provider recovery]",
+  "Continue from the last failed step using the clarification answer already recorded in this session. Do not repeat the clarification.",
+  "[/June upstream provider recovery]",
+].join("\n");
+
+const UPSTREAM_PROVIDER_FAILURE_MARKER = "upstream_provider_failed";
+const PERSISTED_UPSTREAM_PROVIDER_FAILURE =
+  /^\s*(?:error:\s*)?api call failed after \d+ retries:\s*http \d+:\s*upstream_provider_failed\b/i;
 
 /** A mid-run instruction the user steered into a still-working session (feature
  * 06), rendered as a quiet "Steering" system item so the transcript records
@@ -402,7 +415,9 @@ export function buildHermesSessionChatTurns(
       if (content) {
         const notice =
           turn.role === "assistant"
-            ? (creditsNoticeFromTurnText(content) ?? persistedContextOverflowNotice(content))
+            ? (creditsNoticeFromTurnText(content) ??
+              persistedContextOverflowNotice(content) ??
+              upstreamProviderFailureNotice(content, false))
             : undefined;
         turn.parts.push(
           notice ?? {
@@ -496,6 +511,27 @@ function contextOverflowNotice(text: string): AgentChatNoticePart | undefined {
     : undefined;
 }
 
+// Hermes exposes an exhausted upstream-provider retry as assistant text. A
+// live message.complete has an authoritative failed flag, so the stable marker
+// is sufficient there. Persisted messages lose that flag; only the exact
+// runtime sentinel may fold on reload so successful prose discussing the code
+// stays ordinary text.
+function upstreamProviderFailureNotice(
+  text: string,
+  failed: boolean,
+): AgentChatNoticePart | undefined {
+  const matches = failed
+    ? text.toLowerCase().includes(UPSTREAM_PROVIDER_FAILURE_MARKER)
+    : PERSISTED_UPSTREAM_PROVIDER_FAILURE.test(text);
+  return matches
+    ? {
+        type: "notice",
+        kind: "upstream-provider",
+        text: UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+      }
+    : undefined;
+}
+
 // Persisted/reloaded turns carry no failure flag (the stored message has no
 // status field), so only the unambiguous error sentinels may fold. An ordinary
 // saved answer that discusses "the maximum context length" must stay text, not
@@ -524,7 +560,8 @@ function messageToTurn(message: AgentMessageDto): AgentChatTurn {
   const notice =
     message.role === "assistant"
       ? (creditsNoticeFromTurnText(message.content) ??
-        persistedContextOverflowNotice(message.content))
+        persistedContextOverflowNotice(message.content) ??
+        upstreamProviderFailureNotice(message.content, false))
       : undefined;
   return {
     id: message.id,
@@ -691,14 +728,15 @@ function appendLiveHermesEvents(
           currentAssistant = lastInterimAssistant;
         }
         currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-        // A billing failure is recognizable from its "Error:" text prefix; a
-        // context overflow is not, so only fold it when the turn actually
-        // failed — an ordinary sentence that mentions "context length" stays prose.
+        // Upstream-provider and context failures only fold when the turn
+        // actually failed; successful prose mentioning either marker stays
+        // prose. Billing also requires its runtime "Error:" prefix.
         const displayText = stripMediaReferences(text).trim();
         const imageParts = imagePartsFromHermesContent(text);
         const videoParts = videoPartsFromHermesContent(text);
         const notice = displayText
-          ? (creditsNoticeFromTurnText(displayText) ??
+          ? (upstreamProviderFailureNotice(displayText, event.failed === true) ??
+            creditsNoticeFromTurnText(displayText) ??
             (event.failed ? contextOverflowNotice(displayText) : undefined))
           : undefined;
         if (notice) {
@@ -1583,6 +1621,7 @@ function displayedUserPromptText(content: string) {
 }
 
 export function displayedComposerUserMessageText(content: string): string {
+  if (content.trim() === UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT) return "Try again";
   return stripSyntheticImageAttachmentMarker(
     stripAttachmentPromptBlock(displayedUserPromptText(stripImageAnalysisFailureNotice(content))),
   );

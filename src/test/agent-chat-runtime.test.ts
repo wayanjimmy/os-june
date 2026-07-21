@@ -11,6 +11,8 @@ import {
   mediaVideoReferences,
   repairContractionSpacing,
   stripRenderedMediaReferences,
+  UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+  UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT,
   videoPartsFromHermesContent,
 } from "../lib/agent-chat-runtime";
 import { categoryPrompt } from "../lib/issue-report-prompt";
@@ -3253,6 +3255,83 @@ describe("Agent chat runtime", () => {
     ]);
 
     expect(turns[0]?.parts).toEqual([{ type: "text", text: prose, status: "complete" }]);
+  });
+
+  const UPSTREAM_PROVIDER_ERROR =
+    "API call failed after 3 retries: HTTP 502: upstream_provider_failed";
+
+  it("folds a failed upstream-provider message.complete into a friendly notice", () => {
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          complete: true,
+          delta: UPSTREAM_PROVIDER_ERROR,
+          failed: true,
+        }),
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([
+      {
+        type: "notice",
+        kind: "upstream-provider",
+        text: UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+      },
+    ]);
+  });
+
+  it("keeps successful prose that mentions upstream_provider_failed as text", () => {
+    const prose = "The code upstream_provider_failed is how June API normalizes transport errors.";
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          complete: true,
+          delta: prose,
+          failed: false,
+        }),
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([{ type: "text", text: prose, status: "complete" }]);
+  });
+
+  it("folds only the exact persisted upstream-provider failure sentinel", () => {
+    const failed = buildHermesSessionChatTurns([
+      {
+        id: "failed",
+        role: "assistant",
+        content: UPSTREAM_PROVIDER_ERROR,
+        timestamp: "2026-06-04T10:00:00.000Z",
+      },
+    ]);
+    const prose = `A log can say ${UPSTREAM_PROVIDER_ERROR} while explaining recovery.`;
+    const successful = buildHermesSessionChatTurns([
+      {
+        id: "successful",
+        role: "assistant",
+        content: prose,
+        timestamp: "2026-06-04T10:00:00.000Z",
+      },
+    ]);
+
+    expect(failed[0]?.parts).toEqual([
+      {
+        type: "notice",
+        kind: "upstream-provider",
+        text: UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+      },
+    ]);
+    expect(successful[0]?.parts).toEqual([{ type: "text", text: prose, status: "complete" }]);
+  });
+
+  it("renders the persisted provider-recovery prompt as Try again", () => {
+    expect(displayedComposerUserMessageText(UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT)).toBe(
+      "Try again",
+    );
   });
 
   // The terminal error Hermes surfaces when a single oversized turn cannot be
