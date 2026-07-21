@@ -118,6 +118,19 @@ describe("TabBar", () => {
     expect(appCss).not.toContain("var(--control-md) + var(--sp-2) -");
   });
 
+  it("overrides the titlebar control clearance on Windows so the toggle sits at the left edge", () => {
+    const rule = cssRuleFor('.app-shell[data-platform="windows"]');
+
+    // Windows has no traffic lights — the macOS 70px clearance must be zeroed
+    // so the toggle's `left` (and the collapsed tab strip's `padding-left`,
+    // which reads the same tokens) moves to the left edge together.
+    expect(rule).toContain("--titlebar-controls-end: 0px;");
+    expect(rule).toContain("--titlebar-controls-gap: var(--sp-3);");
+    // The vertical nudge is a macOS-specific tweak and must not be overridden
+    // here — the defect is horizontal only.
+    expect(rule).not.toContain("--titlebar-controls-nudge");
+  });
+
   it("keeps the tab strip full-width when the files panel is open", () => {
     const panelRule = cssRuleFor(
       '.app-shell:has(.agent-workspace[data-artifact-panel="open"]) .main-panel',

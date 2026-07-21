@@ -8307,6 +8307,18 @@ button.agent-user-attachment:hover {
   -webkit-app-region: drag;
 }
 
+/* Windows has no traffic-light controls, so the macOS clearance baked into
+ * --titlebar-controls-end (70px for the green button) leaves the sidebar
+ * toggle floating ~86px in with nothing to its left. Override only the two
+ * horizontal geometry tokens on Windows: the toggle's `left` and the tab
+ * strip's `padding-left` both read them, so one override keeps the two
+ * consistent. The vertical nudge token is intentionally untouched — the
+ * defect is horizontal only. */
+.app-shell[data-platform="windows"] {
+  --titlebar-controls-end: 0px;
+  --titlebar-controls-gap: var(--sp-3);
+}
+
 .chrome-sidebar-toggle {
   position: fixed;
   /* Vertically centered in the titlebar, then nudged down a hair to sit level
