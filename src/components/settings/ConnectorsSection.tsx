@@ -227,8 +227,12 @@ function NotionConnectorRow({
 const CONNECT_TITLES = {
   google: { connect: "Connect Google account", add: "Add Google access" },
   linear: { connect: "Connect Linear workspace", add: "Add Linear access" },
-  github: { connect: "Connect GitHub account", add: "Add GitHub access" },
-} satisfies Record<OAuthConnectorProvider, { connect: string; add: string }>;
+  github: {
+    connect: "Connect GitHub account",
+    add: "Add GitHub access",
+    reconnect: "Reconnect GitHub account",
+  },
+} satisfies Record<OAuthConnectorProvider, { connect: string; add: string; reconnect?: string }>;
 
 const CONNECT_TOASTS = {
   google: {
@@ -364,6 +368,10 @@ export function ConnectorsSection({
   // preselects that account/workspace so the backend's single-account guard
   // passes.
   const [connectTarget, setConnectTarget] = useState<ConnectorAccount | null>(null);
+  // When true, the connect dialog was opened by a GitHub reconnect click. This
+  // changes the dialog title and suppresses the bundle picker (the user already
+  // chose bundles when they first connected; we reuse them as-is).
+  const [connectIsReconnect, setConnectIsReconnect] = useState(false);
   const [connecting, setConnecting] = useState(false);
   // Device-code payload for an in-flight GitHub connect (null = not in device
   // flow or no code received yet).
@@ -558,9 +566,12 @@ export function ConnectorsSection({
         loginHint: connectTarget ? loginHintFor(connectTarget) : undefined,
       });
       setConnectOpen(false);
+      setConnectIsReconnect(false);
       setGithubDeviceCode(null);
       const toasts = CONNECT_TOASTS[connectProvider];
-      toast.success(connectTarget ? toasts.add : toasts.connect);
+      toast.success(
+        connectIsReconnect ? toasts.reconnect : connectTarget ? toasts.add : toasts.connect,
+      );
       // A Linear connect that comes back with no teams yet — always true on a
       // first connect — needs one more step before June can read or write
       // anything in the workspace, so walk straight into team selection.
@@ -653,11 +664,64 @@ export function ConnectorsSection({
     setConnectOpen(false);
     setGithubDeviceCode(null);
     setConnectError(null);
+    setConnectIsReconnect(false);
   }
 
   async function reconnect(account: ConnectorAccount) {
     if (account.provider === "notion") return;
     setNotConfigured(null);
+
+    // GitHub uses the device-authorization flow: the device-code panel only
+    // renders inside the connect dialog. Route GitHub reconnects through the
+    // same dialog surface so the user sees the code. The dialog starts the
+    // connect immediately (no extra click needed) using the account's existing
+    // bundles and login hint — the reconnect flag suppresses the bundle picker
+    // and adjusts the title and toast.
+    if (account.provider === "github") {
+      const accountBundles = bundlesFromScopes(account.scopes, account.provider);
+      setConnectProvider("github");
+      setConnectTarget(account);
+      setBundles(accountBundles);
+      setConnectIsReconnect(true);
+      setConnectError(null);
+      setGithubDeviceCode(null);
+      setConnectOpen(true);
+      // Start the connect immediately — the user already clicked Reconnect.
+      setConnecting(true);
+      try {
+        await runConnect({
+          provider: "github",
+          scopes: accountBundles,
+          loginHint: loginHintFor(account),
+        });
+        setConnectOpen(false);
+        setConnectIsReconnect(false);
+        setGithubDeviceCode(null);
+        toast.success(CONNECT_TOASTS.github.reconnect);
+      } catch (err) {
+        const code = errorCode(err);
+        if (isConnectorNotConfiguredError(err)) {
+          setNotConfigured("github");
+          setConnectOpen(false);
+          setConnectIsReconnect(false);
+        } else if (code === "connector_connect_canceled") {
+          setGithubDeviceCode(null);
+        } else if (code === "connector_github_device_expired") {
+          setGithubDeviceCode(null);
+          setConnectError("The code expired before it was approved. Try again.");
+        } else if (code === "connector_github_device_declined") {
+          setGithubDeviceCode(null);
+          setConnectError("GitHub reported the request was declined.");
+        } else {
+          setGithubDeviceCode(null);
+          toast.error(messageFromError(err));
+        }
+      } finally {
+        setConnecting(false);
+      }
+      return;
+    }
+
     setReconnectingId(account.accountId);
     try {
       const updated = await runConnect({
@@ -868,7 +932,10 @@ export function ConnectorsSection({
             const name = PROVIDER_NAMES[provider];
             const status = account ? accountStatusMeta(account.status, provider) : null;
             const subtitle = account ? accountSubtitle(account) : PROVIDER_BLURBS[provider];
-            const reconnecting = account !== null && reconnectingId === account.accountId;
+            const reconnecting =
+              account !== null &&
+              (reconnectingId === account.accountId ||
+                (provider === "github" && connectIsReconnect && connectOpen));
             // Linear only: a connected workspace with no teams picked yet
             // still needs one more step before June can read or write
             // anything in it.
@@ -923,7 +990,7 @@ export function ConnectorsSection({
                           type="button"
                           className="btn btn-secondary"
                           aria-label={`Reconnect ${name}`}
-                          disabled={reconnectingId !== null}
+                          disabled={reconnectingId !== null || reconnecting}
                           aria-busy={reconnecting || undefined}
                           onClick={() => void reconnect(account)}
                         >
@@ -984,9 +1051,11 @@ export function ConnectorsSection({
         open={connectOpen}
         onClose={dismissConnect}
         title={
-          connectTarget
-            ? CONNECT_TITLES[connectProvider].add
-            : CONNECT_TITLES[connectProvider].connect
+          connectIsReconnect && connectProvider === "github" && CONNECT_TITLES.github.reconnect
+            ? CONNECT_TITLES.github.reconnect
+            : connectTarget
+              ? CONNECT_TITLES[connectProvider].add
+              : CONNECT_TITLES[connectProvider].connect
         }
         description={
           githubDeviceCode && connectProvider === "github"

@@ -27523,6 +27523,13 @@ button.connector-approvals-info {
   cursor: default;
 }
 
+.github-device-code-value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xl);
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
 /* PDF export uses the platform print sheet. Strip the application chrome and
  * release every viewport-bound scroller so the full formatted note paginates. */
 @media print {

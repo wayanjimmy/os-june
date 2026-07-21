@@ -1088,6 +1088,88 @@ describe("ConnectorsSection — GitHub", () => {
     await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
   });
 
+  it("GitHub reconnect opens the dialog and device-code panel is visible when the event fires", async () => {
+    // The regression test: device-code panel must render inside the dialog that
+    // opens when the user clicks Reconnect — not outside it, and not only via
+    // the manual Connect path.
+    mocks.connectorsList.mockResolvedValue([githubAccount({ status: "reconnect_required" })]);
+    mocks.connectorsConnect.mockReturnValue(new Promise(() => {}));
+    render(<ConnectorsSection />);
+    await screen.findByText("Reconnect needed");
+
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
+
+    // The dialog opens immediately (before the user has to click anything else).
+    const dialog = await screen.findByRole("dialog", { name: "Reconnect GitHub account" });
+    // connectorsConnect is called automatically with the account's existing bundles and login hint.
+    await waitFor(() =>
+      expect(mocks.connectorsConnect).toHaveBeenCalledWith({
+        scopes: ["github_read"],
+        loginHint: "12345678",
+        provider: "github",
+      }),
+    );
+
+    // Fire the device-code event from the backend.
+    act(() => {
+      eventHandlers.get("june://connectors-github-device-code")?.({
+        payload: {
+          userCode: "RECON-5678",
+          verificationUri: "https://github.com/login/device",
+          expiresInSeconds: 900,
+        },
+      });
+    });
+
+    // The device-code panel is visible INSIDE the dialog (regression guard).
+    expect(await within(dialog).findByText("RECON-5678")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/enter this code at github\.com\/login\/device to approve June/i),
+    ).toBeInTheDocument();
+  });
+
+  it("GitHub reconnect + connector_github_device_expired shows retry copy inside the dialog", async () => {
+    mocks.connectorsList.mockResolvedValue([githubAccount({ status: "reconnect_required" })]);
+    let rejectConnect: (reason: unknown) => void = () => {};
+    mocks.connectorsConnect.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectConnect = reject;
+      }),
+    );
+    render(<ConnectorsSection />);
+    await screen.findByText("Reconnect needed");
+
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Reconnect GitHub account" });
+
+    // Simulate backend rejecting with expired code.
+    act(() => rejectConnect({ code: "connector_github_device_expired", message: "expired" }));
+
+    // The retry error notice appears inside the dialog.
+    expect(
+      await within(dialog).findByText(/the code expired before it was approved\. try again\./i),
+    ).toBeInTheDocument();
+    // The Connect button reappears for a retry.
+    expect(within(dialog).getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("Linear reconnect does NOT open the connect dialog", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      linearAccount({ status: "reconnect_required", selectedTeams: [TEAM_ENG] }),
+    ]);
+    mocks.connectorsConnect.mockResolvedValue(linearAccount({ selectedTeams: [TEAM_ENG] }));
+    render(<ConnectorsSection />);
+    await screen.findByText(/Acme/);
+
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect Linear" }));
+
+    // No connect dialog should open for Linear reconnect.
+    await waitFor(() => expect(mocks.connectorsConnect).toHaveBeenCalled());
+    expect(screen.queryByRole("dialog", { name: /reconnect/i })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: /connect linear/i })).toBeNull();
+  });
+
   it("shows no team management UI for GitHub", async () => {
     mocks.connectorsList.mockResolvedValue([githubAccount()]);
     render(<ConnectorsSection />);
