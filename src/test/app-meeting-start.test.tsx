@@ -8,9 +8,15 @@ type TauriListener = (event: { payload: unknown }) => unknown;
 
 const mocks = vi.hoisted(() => ({
   listeners: new Map<string, TauriListener>(),
+  pendingMeetingStartRequest: undefined as { requestedAtMs: number } | undefined,
   listen: vi.fn((event: string, listener: TauriListener) => {
     mocks.listeners.set(event, listener);
     return Promise.resolve(vi.fn());
+  }),
+  takePendingMeetingStartRequest: vi.fn(async () => {
+    const request = mocks.pendingMeetingStartRequest;
+    mocks.pendingMeetingStartRequest = undefined;
+    return request ?? null;
   }),
   getCurrentWindow: vi.fn(),
   bootstrapApp: vi.fn(),
@@ -123,6 +129,7 @@ vi.mock("../lib/tauri", () => ({
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
+  takePendingMeetingStartRequest: mocks.takePendingMeetingStartRequest,
   // The agent workspace mounts at launch; a quiet, not-running bridge keeps
   // these tests focused on the meetings surfaces.
   hermesBridgeStatus: vi.fn(async () => ({ running: false })),
@@ -189,10 +196,19 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function installDefaultListenMock() {
+  mocks.listen.mockImplementation((event: string, listener: TauriListener) => {
+    mocks.listeners.set(event, listener);
+    return Promise.resolve(vi.fn());
+  });
+}
+
 describe("meeting start transcription event", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listeners.clear();
+    mocks.pendingMeetingStartRequest = undefined;
+    installDefaultListenMock();
 
     const first = note();
     const payload: BootstrapResponse = {
@@ -254,6 +270,7 @@ describe("meeting start transcription event", () => {
   });
 
   async function fireMeetingStart() {
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -364,8 +381,9 @@ describe("meeting start transcription event", () => {
     render(<App />);
 
     await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
-    const queuedAt = performance.now();
-    const now = vi.spyOn(performance, "now").mockReturnValue(queuedAt);
+    const queuedAt = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(queuedAt);
+    const monotonicNow = vi.spyOn(performance, "now").mockReturnValue(1);
     try {
       await fireMeetingStart();
       now.mockReturnValue(queuedAt + 30_001);
@@ -385,7 +403,94 @@ describe("meeting start transcription event", () => {
       expect(mocks.startRecording).not.toHaveBeenCalled();
     } finally {
       now.mockRestore();
+      monotonicNow.mockRestore();
     }
+  });
+
+  it("drains a native request queued before listener registration completes", async () => {
+    const fresh = note({
+      id: "note-2",
+      title: "New meeting",
+      preview: "",
+      generatedContent: undefined,
+    });
+    const cleanup = vi.fn();
+    let finishMeetingRegistration: (() => void) | undefined;
+    mocks.createNote.mockResolvedValue(fresh);
+    mocks.startRecording.mockResolvedValue(recording({ noteId: fresh.id }));
+    mocks.listen.mockImplementation((event: string, listener: TauriListener) => {
+      if (event !== MEETING_START_TRANSCRIPTION_EVENT) {
+        mocks.listeners.set(event, listener);
+        return Promise.resolve(vi.fn());
+      }
+      return new Promise((resolve) => {
+        finishMeetingRegistration = () => {
+          mocks.listeners.set(event, listener);
+          resolve(cleanup);
+        };
+      });
+    });
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
+
+    render(<App />);
+
+    await waitFor(() => expect(finishMeetingRegistration).toBeTypeOf("function"));
+    expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(false);
+    expect(mocks.takePendingMeetingStartRequest).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishMeetingRegistration?.();
+    });
+
+    await waitFor(() =>
+      expect(mocks.startRecording).toHaveBeenCalledWith(fresh.id, "microphonePlusSystem"),
+    );
+    expect(mocks.takePendingMeetingStartRequest).toHaveBeenCalledOnce();
+    expect(mocks.startRecording).toHaveBeenCalledOnce();
+  });
+
+  it("retries listener registration after a transient failure", async () => {
+    const fresh = note({
+      id: "note-2",
+      title: "New meeting",
+      preview: "",
+      generatedContent: undefined,
+    });
+    let meetingRegistrationAttempts = 0;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.createNote.mockResolvedValue(fresh);
+    mocks.startRecording.mockResolvedValue(recording({ noteId: fresh.id }));
+    mocks.listen.mockImplementation((event: string, listener: TauriListener) => {
+      if (event === MEETING_START_TRANSCRIPTION_EVENT) {
+        meetingRegistrationAttempts += 1;
+        if (meetingRegistrationAttempts === 1) {
+          return Promise.reject(new Error("event plugin not ready"));
+        }
+      }
+      mocks.listeners.set(event, listener);
+      return Promise.resolve(vi.fn());
+    });
+
+    render(<App />);
+
+    await waitFor(
+      () => {
+        expect(meetingRegistrationAttempts).toBe(2);
+        expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true);
+      },
+      { timeout: 1_000 },
+    );
+    await fireMeetingStart();
+
+    await waitFor(() =>
+      expect(mocks.startRecording).toHaveBeenCalledWith(fresh.id, "microphonePlusSystem"),
+    );
+    expect(mocks.startRecording).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      "Failed to register the meeting start listener; retrying.",
+      expect.any(Error),
+    );
+    warn.mockRestore();
   });
 
   it("cleans up Tauri listeners that resolve after unmount", async () => {
@@ -422,6 +527,8 @@ describe("agent recorder request event", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listeners.clear();
+    mocks.pendingMeetingStartRequest = undefined;
+    installDefaultListenMock();
 
     const first = note();
     const payload: BootstrapResponse = {

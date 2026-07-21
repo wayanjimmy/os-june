@@ -316,6 +316,8 @@ pub fn run() {
             agent_hud::agent_hud_open_agent,
             notifications::send_app_notification,
             notifications::agent_open_ready,
+            meeting_detection::queue_meeting_start_request,
+            meeting_detection::take_pending_meeting_start_request,
             meeting_hud::meeting_hud_latest_status,
             meeting_hud::meeting_hud_reopen,
             providers::provider_model_settings,

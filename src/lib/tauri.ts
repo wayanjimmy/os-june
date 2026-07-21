@@ -1044,6 +1044,14 @@ export async function agentOpenReady() {
   return invoke<string | null>("agent_open_ready");
 }
 
+export type PendingMeetingStartRequest = {
+  requestedAtMs: number;
+};
+
+export async function takePendingMeetingStartRequest() {
+  return invoke<PendingMeetingStartRequest | null>("take_pending_meeting_start_request");
+}
+
 export async function createAgentTask(input: {
   prompt: string;
   title?: string;

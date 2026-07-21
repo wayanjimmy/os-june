@@ -115,6 +115,7 @@ import {
   agentHudShow,
   agentOpenReady,
   sendAppNotification,
+  takePendingMeetingStartRequest,
   type LiveTranscriptEventDto,
 } from "../lib/tauri";
 import { playRecordingSound, preloadRecordingSounds } from "../lib/recording-sounds";
@@ -301,6 +302,7 @@ const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
 const MEETING_START_REQUEST_TTL_MS = 30_000;
+const MEETING_START_LISTENER_RETRY_DELAYS_MS = [250, 1_000, 5_000] as const;
 const COMPOSER_FUNDING_DISABLED_REASON =
   "Add credits to send messages or generate images and videos.";
 const RECORDING_FUNDING_DISABLED_REASON =
@@ -3667,19 +3669,19 @@ export function App() {
     }
   }, []);
 
-  // The HUD emits this request once and immediately hides, so the listener must
-  // remain registered for the app's lifetime. Keep one pending request while
-  // the app boots; repeated early requests coalesce and drain through the
-  // freshest handler while the user's prompt intent is still current.
+  // The native mailbox stores this request before waking the webview, so a HUD
+  // click cannot disappear while this listener registers. Keep one request
+  // while the app boots and drain it through the freshest handler while the
+  // user's prompt intent is still current.
   const pendingMeetingStartAtRef = useRef<number | undefined>(undefined);
   const meetingStartHandlerRef = useRef<(queuedAt?: number) => void>(() => {});
   meetingStartHandlerRef.current = (queuedAt) => {
     if (appBlocked || !bootstrapped) {
-      pendingMeetingStartAtRef.current = queuedAt ?? performance.now();
+      pendingMeetingStartAtRef.current = queuedAt ?? Date.now();
       return;
     }
     pendingMeetingStartAtRef.current = undefined;
-    if (queuedAt !== undefined && performance.now() - queuedAt > MEETING_START_REQUEST_TTL_MS) {
+    if (queuedAt !== undefined && Date.now() - queuedAt > MEETING_START_REQUEST_TTL_MS) {
       return;
     }
     void handleStartMeetingDetectedRecording();
@@ -3696,14 +3698,42 @@ export function App() {
   useEffect(() => {
     let aborted = false;
     let unlisten: (() => void) | undefined;
-    void listen(MEETING_START_TRANSCRIPTION_EVENT, () => {
-      meetingStartHandlerRef.current();
-    }).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
+    let retryTimer: number | undefined;
+
+    const drainPendingRequest = () => {
+      void takePendingMeetingStartRequest()
+        .then((request) => {
+          if (!aborted && request) meetingStartHandlerRef.current(request.requestedAtMs);
+        })
+        .catch(() => {});
+    };
+
+    const register = (attempt = 0) => {
+      void listen(MEETING_START_TRANSCRIPTION_EVENT, drainPendingRequest)
+        .then((cleanup) => {
+          if (aborted) {
+            cleanup();
+            return;
+          }
+          unlisten = cleanup;
+          drainPendingRequest();
+        })
+        .catch((error) => {
+          if (!aborted) {
+            console.warn("Failed to register the meeting start listener; retrying.", error);
+            const retryDelay =
+              MEETING_START_LISTENER_RETRY_DELAYS_MS[
+                Math.min(attempt, MEETING_START_LISTENER_RETRY_DELAYS_MS.length - 1)
+              ];
+            retryTimer = window.setTimeout(() => register(attempt + 1), retryDelay);
+          }
+        });
+    };
+
+    register();
     return () => {
       aborted = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       unlisten?.();
     };
   }, []);

@@ -56,6 +56,12 @@ function stubNavigatorPlatform(platform: string, userAgent: string) {
 const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
   listeners: new Map<string, (event: { payload?: unknown }) => void>(),
+  pendingMeetingStartRequest: undefined as { requestedAtMs: number } | undefined,
+  takePendingMeetingStartRequest: vi.fn(async () => {
+    const request = mocks.pendingMeetingStartRequest;
+    mocks.pendingMeetingStartRequest = undefined;
+    return request ?? null;
+  }),
   getCurrentWindow: vi.fn(),
   bootstrapApp: vi.fn(),
   createNote: vi.fn(),
@@ -232,6 +238,7 @@ vi.mock("../lib/tauri", () => ({
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
+  takePendingMeetingStartRequest: mocks.takePendingMeetingStartRequest,
   ensureHermesBridgeSession: mocks.ensureHermesBridgeSession,
   finalizeHermesBridgeBranch: mocks.finalizeHermesBridgeBranch,
   hermesAgentCliAccess: mocks.hermesAgentCliAccess,
@@ -335,6 +342,7 @@ function recordingSession(overrides: Partial<RecordingSessionDto> = {}): Recordi
 describe("App shortcuts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.pendingMeetingStartRequest = undefined;
     resetActiveHermesProfileForTests();
     setActiveHermesProfileName("default");
     const first = note();
@@ -1392,6 +1400,7 @@ describe("App shortcuts", () => {
 
       await waitFor(() => expect(systemReadinessCalls).toBe(2));
 
+      mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
       await act(async () => {
         await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
           payload: undefined,

@@ -26,9 +26,15 @@ type TauriListener = (event: { payload: unknown }) => unknown;
 
 const mocks = vi.hoisted(() => ({
   listeners: new Map<string, TauriListener>(),
+  pendingMeetingStartRequest: undefined as { requestedAtMs: number } | undefined,
   listen: vi.fn((event: string, listener: TauriListener) => {
     mocks.listeners.set(event, listener);
     return Promise.resolve(vi.fn());
+  }),
+  takePendingMeetingStartRequest: vi.fn(async () => {
+    const request = mocks.pendingMeetingStartRequest;
+    mocks.pendingMeetingStartRequest = undefined;
+    return request ?? null;
   }),
   getCurrentWindow: vi.fn(),
   bootstrapApp: vi.fn(),
@@ -176,6 +182,7 @@ vi.mock("../lib/tauri", () => ({
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
+  takePendingMeetingStartRequest: mocks.takePendingMeetingStartRequest,
   // The agent workspace mounts at launch; a quiet, not-running bridge keeps
   // these tests focused on the meetings surfaces.
   hermesBridgeStatus: vi.fn(async () => ({ running: false })),
@@ -271,6 +278,7 @@ describe("notes recording reliability", () => {
     clearMaxGrantWait();
     vi.clearAllMocks();
     mocks.listeners.clear();
+    mocks.pendingMeetingStartRequest = undefined;
     resetActiveHermesProfileForTests();
     mocks.listFolders.mockResolvedValue([]);
     mocks.listHermesSessions.mockResolvedValue([]);
@@ -382,6 +390,7 @@ describe("notes recording reliability", () => {
     render(<App />);
     await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -891,6 +900,7 @@ describe("notes recording reliability", () => {
     mocks.createNote.mockClear();
     mocks.startRecording.mockClear();
 
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -916,6 +926,7 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
 
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     act(() => {
       void mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -923,6 +934,7 @@ describe("notes recording reliability", () => {
     });
     await waitFor(() => expect(mocks.createNote).toHaveBeenCalledTimes(1));
 
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     act(() => {
       void mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -972,6 +984,7 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
 
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -1008,6 +1021,7 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
 
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -1016,6 +1030,7 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.deleteNote).toHaveBeenCalledWith("fresh-note"));
     expect(mocks.startRecording).toHaveBeenCalledTimes(1);
 
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,
@@ -1048,6 +1063,7 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
 
+    mocks.pendingMeetingStartRequest = { requestedAtMs: Date.now() };
     await act(async () => {
       await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
         payload: undefined,

@@ -1,11 +1,80 @@
 use serde::Serialize;
-use std::{collections::BTreeSet, time::Duration};
-use tauri::{AppHandle, Emitter};
+use std::{
+    collections::BTreeSet,
+    sync::Mutex,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const CLEAR_AFTER_INACTIVE_POLLS: u8 = 2;
 const HEARTBEAT_EVERY_ACTIVE_POLLS: u8 = 5;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MEETING_DETECTION_EVENT_NAME: &str = "meeting-detection-event";
+const MEETING_START_REQUEST_EVENT_NAME: &str = "june://meeting-start-transcription";
+const MEETING_START_REQUEST_TTL_MS: u64 = 30_000;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMeetingStartRequest {
+    requested_at_ms: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct MeetingStartRequestState {
+    pending_requested_at_ms: Mutex<Option<u64>>,
+}
+
+impl MeetingStartRequestState {
+    fn queue_at(&self, requested_at_ms: u64) -> Result<(), String> {
+        let mut pending = self
+            .pending_requested_at_ms
+            .lock()
+            .map_err(|_| "meeting start request state is unavailable".to_string())?;
+        *pending = Some(requested_at_ms);
+        Ok(())
+    }
+
+    fn take_at(&self, now_ms: u64) -> Result<Option<PendingMeetingStartRequest>, String> {
+        let requested_at_ms = self
+            .pending_requested_at_ms
+            .lock()
+            .map_err(|_| "meeting start request state is unavailable".to_string())?
+            .take();
+        Ok(requested_at_ms
+            .filter(|requested_at_ms| {
+                now_ms.saturating_sub(*requested_at_ms) <= MEETING_START_REQUEST_TTL_MS
+            })
+            .map(|requested_at_ms| PendingMeetingStartRequest { requested_at_ms }))
+    }
+}
+
+fn wall_clock_millis() -> Result<u64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| "system clock is outside the supported range".to_string())
+}
+
+/// Stores the HUD action before emitting the wake event. Tauri events are not
+/// buffered while a webview listener is registering, so the main window also
+/// drains this one-slot mailbox immediately after registration succeeds.
+#[tauri::command]
+pub fn queue_meeting_start_request(
+    app: AppHandle,
+    state: State<'_, MeetingStartRequestState>,
+) -> Result<(), String> {
+    state.queue_at(wall_clock_millis()?)?;
+    let _ = app.emit(MEETING_START_REQUEST_EVENT_NAME, ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn take_pending_meeting_start_request(
+    state: State<'_, MeetingStartRequestState>,
+) -> Result<Option<PendingMeetingStartRequest>, String> {
+    state.take_at(wall_clock_millis()?)
+}
 
 struct AllowedMicApp {
     bundle_prefix: &'static str,
@@ -48,6 +117,8 @@ const ALLOWED_MIC_APPS: &[AllowedMicApp] = &[
 ];
 
 pub fn setup(app: &mut tauri::App) {
+    app.manage(MeetingStartRequestState::default());
+
     #[cfg(target_os = "macos")]
     spawn_monitor(app.handle().clone());
 
@@ -624,6 +695,47 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_meeting_start_request_is_taken_exactly_once() {
+        let state = MeetingStartRequestState::default();
+        state.queue_at(1_000).expect("queue request");
+
+        assert_eq!(
+            state.take_at(1_100).expect("take request"),
+            Some(PendingMeetingStartRequest {
+                requested_at_ms: 1_000,
+            })
+        );
+        assert_eq!(state.take_at(1_100).expect("take empty request"), None);
+    }
+
+    #[test]
+    fn pending_meeting_start_requests_coalesce_to_the_latest_action() {
+        let state = MeetingStartRequestState::default();
+        state.queue_at(1_000).expect("queue first request");
+        state.queue_at(2_000).expect("queue second request");
+
+        assert_eq!(
+            state.take_at(2_100).expect("take request"),
+            Some(PendingMeetingStartRequest {
+                requested_at_ms: 2_000,
+            })
+        );
+    }
+
+    #[test]
+    fn pending_meeting_start_request_expires_on_wall_clock_time() {
+        let state = MeetingStartRequestState::default();
+        state.queue_at(1_000).expect("queue request");
+
+        assert_eq!(
+            state
+                .take_at(1_000 + MEETING_START_REQUEST_TTL_MS + 1)
+                .expect("take stale request"),
+            None
+        );
+    }
 
     fn input_process(pid: u32, bundle_id: &str) -> MicrophoneInputProcess {
         MicrophoneInputProcess::new(pid, bundle_id.to_string()).expect("valid process")
