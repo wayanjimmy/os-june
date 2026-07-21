@@ -503,9 +503,9 @@ pub fn pagination_next(
 #[serde(rename_all = "camelCase")]
 pub struct GithubRepositoryList {
     pub repositories: Vec<GithubRepository>,
-    /// `true` when the safety page cap was reached with more pages remaining,
-    /// meaning the list is incomplete. Users with more than 500 installations
-    /// or more than 500 repositories in a single installation will see this.
+    /// `true` when the safety page cap stopped the enumeration, so the list
+    /// may be incomplete (500 installations, or 500 repositories in one
+    /// installation; see [`pagination_next`] for the boundary semantics).
     pub truncated: bool,
 }
 

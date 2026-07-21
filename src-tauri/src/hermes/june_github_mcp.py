@@ -83,9 +83,9 @@ TOOLS: list[dict[str, Any]] = [
                 "per_page": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 50,
+                    "maximum": 30,
                     "default": 20,
-                    "description": "Number of results to return (max 50).",
+                    "description": "Number of results to return (max 30).",
                 },
             },
             "required": ["query"],
@@ -139,9 +139,9 @@ TOOLS: list[dict[str, Any]] = [
                 "per_page": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 50,
+                    "maximum": 30,
                     "default": 20,
-                    "description": "Number of comments to return (max 50).",
+                    "description": "Number of comments to return (max 30).",
                 },
             },
             "required": ["owner", "repo", "number"],
@@ -369,7 +369,7 @@ def build_payload(name: Any, account: str, arguments: dict[str, Any]) -> dict[st
         if not query:
             raise ValueError("query is required")
         payload["query"] = query
-        per_page = clamp(arguments.get("per_page"), 50, 20)
+        per_page = clamp(arguments.get("per_page"), 30, 20)
         payload["per_page"] = per_page
     elif name == "get_issue":
         owner = str(arguments.get("owner") or "").strip()
@@ -397,7 +397,7 @@ def build_payload(name: Any, account: str, arguments: dict[str, Any]) -> dict[st
         payload["owner"] = owner
         payload["repo"] = repo
         payload["number"] = number
-        payload["per_page"] = clamp(arguments.get("per_page"), 50, 20)
+        payload["per_page"] = clamp(arguments.get("per_page"), 30, 20)
     elif name == "get_pull_request":
         owner = str(arguments.get("owner") or "").strip()
         if not owner:
