@@ -161,6 +161,8 @@ export const UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT = [
 const UPSTREAM_PROVIDER_FAILURE_MARKER = "upstream_provider_failed";
 const PERSISTED_UPSTREAM_PROVIDER_FAILURE =
   /^\s*(?:error:\s*)?api call failed after \d+ retries:\s*http \d+:\s*upstream_provider_failed\s*$/i;
+const TRAILING_UPSTREAM_PROVIDER_FAILURE =
+  /\s*(?:error:\s*)?api call failed after \d+ retries:\s*http \d+:\s*upstream_provider_failed\s*$/i;
 
 /** A mid-run instruction the user steered into a still-working session (feature
  * 06), rendered as a quiet "Steering" system item so the transcript records
@@ -417,7 +419,7 @@ export function buildHermesSessionChatTurns(
           turn.role === "assistant"
             ? (creditsNoticeFromTurnText(content) ??
               persistedContextOverflowNotice(content) ??
-              upstreamProviderFailureNotice(content, false))
+              upstreamProviderFailureNotice(content))
             : undefined;
         turn.parts.push(
           notice ?? {
@@ -512,17 +514,15 @@ function contextOverflowNotice(text: string): AgentChatNoticePart | undefined {
 }
 
 // Hermes exposes an exhausted upstream-provider retry as assistant text. A
-// live message.complete has an authoritative failed flag, so the stable marker
-// is sufficient there. Persisted messages lose that flag; only the exact
-// runtime sentinel may fold on reload so successful prose discussing the code
-// stays ordinary text.
+// live message.complete has an authoritative failed flag. Persisted messages
+// lose that flag, so only the exact runtime sentinel may fold on reload. The
+// same exactness on live failures keeps partial output out of this recovery
+// path; retrying a truncated answer is deliberately outside JUN-363.
 function upstreamProviderFailureNotice(
   text: string,
-  failed: boolean,
+  failed?: boolean,
 ): AgentChatNoticePart | undefined {
-  const matches = failed
-    ? text.toLowerCase().includes(UPSTREAM_PROVIDER_FAILURE_MARKER)
-    : PERSISTED_UPSTREAM_PROVIDER_FAILURE.test(text);
+  const matches = failed !== false && PERSISTED_UPSTREAM_PROVIDER_FAILURE.test(text);
   return matches
     ? {
         type: "notice",
@@ -530,6 +530,10 @@ function upstreamProviderFailureNotice(
         text: UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
       }
     : undefined;
+}
+
+function withoutTrailingUpstreamProviderFailure(text: string) {
+  return text.replace(TRAILING_UPSTREAM_PROVIDER_FAILURE, "").trim();
 }
 
 // Persisted/reloaded turns carry no failure flag (the stored message has no
@@ -561,7 +565,7 @@ function messageToTurn(message: AgentMessageDto): AgentChatTurn {
     message.role === "assistant"
       ? (creditsNoticeFromTurnText(message.content) ??
         persistedContextOverflowNotice(message.content) ??
-        upstreamProviderFailureNotice(message.content, false))
+        upstreamProviderFailureNotice(message.content))
       : undefined;
   return {
     id: message.id,
@@ -732,13 +736,24 @@ function appendLiveHermesEvents(
         // actually failed; successful prose mentioning either marker stays
         // prose. Billing also requires its runtime "Error:" prefix.
         const displayText = stripMediaReferences(text).trim();
+        const hasStreamedAssistantText = currentAssistant.parts.some(
+          (part) => part.type === "text" && Boolean(part.text.trim()),
+        );
         const imageParts = imagePartsFromHermesContent(text);
         const videoParts = videoPartsFromHermesContent(text);
         const notice = displayText
-          ? (upstreamProviderFailureNotice(displayText, event.failed === true) ??
+          ? ((!hasStreamedAssistantText
+              ? upstreamProviderFailureNotice(displayText, event.failed)
+              : undefined) ??
             creditsNoticeFromTurnText(displayText) ??
             (event.failed ? contextOverflowNotice(displayText) : undefined))
           : undefined;
+        const visibleDisplayText =
+          !notice &&
+          event.failed === true &&
+          displayText.toLowerCase().includes(UPSTREAM_PROVIDER_FAILURE_MARKER)
+            ? withoutTrailingUpstreamProviderFailure(displayText)
+            : displayText;
         if (notice) {
           // The complete text is authoritative for the turn (see
           // completeAssistantTextPart); when it's a billing failure, any
@@ -752,11 +767,15 @@ function appendLiveHermesEvents(
             // stripped complete text. Replace the text wholesale with the
             // stripped prose (or drop it) so the reference never stays visible.
             removeAssistantTextParts(currentAssistant.parts);
-            if (displayText) {
-              currentAssistant.parts.push({ type: "text", text: displayText, status: "complete" });
+            if (visibleDisplayText) {
+              currentAssistant.parts.push({
+                type: "text",
+                text: visibleDisplayText,
+                status: "complete",
+              });
             }
-          } else if (displayText) {
-            completeAssistantTextPart(currentAssistant.parts, displayText);
+          } else if (visibleDisplayText) {
+            completeAssistantTextPart(currentAssistant.parts, visibleDisplayText);
           }
           appendImageParts(currentAssistant.parts, imageParts);
           appendVideoParts(currentAssistant.parts, videoParts);

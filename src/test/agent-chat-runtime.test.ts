@@ -3299,6 +3299,62 @@ describe("Agent chat runtime", () => {
     expect(turns[0]?.parts).toEqual([{ type: "text", text: prose, status: "complete" }]);
   });
 
+  it("keeps a successful exact upstream-provider sentinel as text", () => {
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          complete: true,
+          delta: UPSTREAM_PROVIDER_ERROR,
+          failed: false,
+        }),
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([
+      { type: "text", text: UPSTREAM_PROVIDER_ERROR, status: "complete" },
+    ]);
+  });
+
+  it("preserves streamed partial output instead of offering provider recovery", () => {
+    const partialAnswer = "Here is the part I completed.";
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:00.000Z",
+          delta: partialAnswer,
+        }),
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          complete: true,
+          delta: UPSTREAM_PROVIDER_ERROR,
+          failed: true,
+        }),
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([{ type: "text", text: partialAnswer, status: "complete" }]);
+  });
+
+  it("strips a trailing provider sentinel while preserving partial completion prose", () => {
+    const partialAnswer = "Here is the part I completed.";
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          complete: true,
+          delta: `${partialAnswer}\n${UPSTREAM_PROVIDER_ERROR}`,
+          failed: true,
+        }),
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([{ type: "text", text: partialAnswer, status: "complete" }]);
+  });
+
   it("folds only the exact persisted upstream-provider failure sentinel", () => {
     const failed = buildHermesSessionChatTurns([
       {
