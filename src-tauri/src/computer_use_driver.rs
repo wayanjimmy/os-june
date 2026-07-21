@@ -282,16 +282,18 @@ where
                     Response::ok(id, join_current_stage_result(&call.args))
                 }
                 Ok(call) => {
-                    if let Some(notification) =
-                        pointer_notification(&call.name, &call.args, &screenshot_sizes)
-                    {
-                        write_json(&mut stdout, &notification).await?;
-                    }
+                    let notification =
+                        pointer_notification(&call.name, &call.args, &screenshot_sizes);
                     let tool_name = call.name;
                     let tool_args = call.args;
                     let result = registry.invoke(&tool_name, tool_args.clone()).await;
                     match serde_json::to_value(result) {
                         Ok(result) => {
+                            if let Some(notification) =
+                                pointer_notification_for_result(notification, &result)
+                            {
+                                write_json(&mut stdout, &notification).await?;
+                            }
                             if tool_name == "get_window_state" {
                                 remember_screenshot_size(
                                     &mut screenshot_sizes,
@@ -767,7 +769,7 @@ fn remember_screenshot_size(
     arguments: &Value,
     result: &Value,
 ) {
-    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+    if tool_result_is_error(result) {
         return;
     }
     let Some((pid, window_id)) = action_identity(arguments) else {
@@ -786,6 +788,18 @@ fn remember_screenshot_size(
         return;
     };
     sizes.insert((pid, window_id), size);
+}
+
+#[cfg(target_os = "macos")]
+fn pointer_notification_for_result(notification: Option<Value>, result: &Value) -> Option<Value> {
+    (!tool_result_is_error(result))
+        .then_some(notification)
+        .flatten()
+}
+
+#[cfg(target_os = "macos")]
+fn tool_result_is_error(result: &Value) -> bool {
+    result.get("isError").and_then(Value::as_bool) == Some(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -1095,6 +1109,27 @@ mod tests {
                     "screenshot_height": 1400.0,
                 }
             }))
+        );
+    }
+
+    #[test]
+    fn failed_actions_do_not_publish_pointer_notifications() {
+        let notification = Some(json!({
+            "jsonrpc": "2.0",
+            "method": POINTER_NOTIFICATION_METHOD,
+            "params": { "kind": "point" },
+        }));
+
+        assert_eq!(
+            pointer_notification_for_result(
+                notification.clone(),
+                &json!({ "isError": true, "content": [] }),
+            ),
+            None
+        );
+        assert_eq!(
+            pointer_notification_for_result(notification.clone(), &json!({ "content": [] })),
+            notification
         );
     }
 

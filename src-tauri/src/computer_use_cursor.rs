@@ -219,9 +219,9 @@ fn schedule_snapshot(app: &AppHandle, expected_epoch: u64, snapshot: CursorSnaps
             duration_ms,
         ),
         Some(PointerMotion::Point(point)) => {
-            schedule_point(app, expected_epoch, snapshot.revision, Some(point));
+            schedule_point(app, expected_epoch, snapshot.revision, point);
         }
-        None => schedule_point(app, expected_epoch, snapshot.revision, None),
+        None => {}
     }
 }
 
@@ -233,9 +233,9 @@ fn schedule_drag(
     to: ScreenPoint,
     duration_ms: u64,
 ) {
-    schedule_point(app, expected_epoch, revision, Some(from));
+    schedule_point(app, expected_epoch, revision, from);
     if duration_ms == 0 {
-        schedule_point(app, expected_epoch, revision, Some(to));
+        schedule_point(app, expected_epoch, revision, to);
         return;
     }
 
@@ -254,13 +254,13 @@ fn schedule_drag(
                 &app,
                 expected_epoch,
                 revision,
-                Some(interpolate(from, to, step as f64 / steps as f64)),
+                interpolate(from, to, step as f64 / steps as f64),
             );
         }
     });
 }
 
-fn schedule_point(app: &AppHandle, expected_epoch: u64, revision: u64, point: Option<ScreenPoint>) {
+fn schedule_point(app: &AppHandle, expected_epoch: u64, revision: u64, point: ScreenPoint) {
     let app_for_main = app.clone();
     let _ = app.run_on_main_thread(move || {
         let state = app_for_main.state::<crate::computer_use::ComputerUseState>();
@@ -388,7 +388,7 @@ fn quartz_to_appkit(point: ScreenPoint, primary_screen_max_y: f64) -> Option<Scr
 }
 
 #[cfg(target_os = "macos")]
-fn show_native_panel(point: Option<ScreenPoint>) {
+fn show_native_panel(point: ScreenPoint) {
     use objc2::{msg_send, MainThreadMarker};
     use objc2_foundation::NSPoint;
 
@@ -403,24 +403,10 @@ fn show_native_panel(point: Option<ScreenPoint>) {
     };
 
     unsafe {
-        match point {
-            Some(point) => {
-                let Some(point) = quartz_to_appkit(point, primary_screen_max_y) else {
-                    return;
-                };
-                let _: () = msg_send![panel, setFrameOrigin: panel_origin(point)];
-            }
-            None => {
-                let Some(event_class) = objc2::runtime::AnyClass::get(c"NSEvent") else {
-                    return;
-                };
-                let point: NSPoint = msg_send![event_class, mouseLocation];
-                let _: () = msg_send![panel, setFrameOrigin: panel_origin(ScreenPoint {
-                    x: point.x,
-                    y: point.y,
-                })];
-            }
-        }
+        let Some(point) = quartz_to_appkit(point, primary_screen_max_y) else {
+            return;
+        };
+        let _: () = msg_send![panel, setFrameOrigin: panel_origin(point)];
         let _: () = msg_send![panel, orderFrontRegardless];
     }
 
@@ -433,7 +419,7 @@ fn show_native_panel(point: Option<ScreenPoint>) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn show_native_panel(_point: Option<ScreenPoint>) {}
+fn show_native_panel(_point: ScreenPoint) {}
 
 #[cfg(target_os = "macos")]
 fn hide_native_panel() {
@@ -694,6 +680,7 @@ mod tests {
         let mut lifecycle = CursorLifecycle::default();
         assert!(lifecycle.show(4, 5).is_none());
         let shown = lifecycle.show(5, 5).expect("current epoch shows");
+        assert_eq!(shown.motion, None);
         assert!(lifecycle.accepts(5, 5, shown.revision));
         let moved = lifecycle
             .apply_motion(5, 5, PointerMotion::Point(ScreenPoint { x: 3.0, y: 4.0 }))
