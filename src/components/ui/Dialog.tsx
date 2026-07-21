@@ -61,6 +61,16 @@ export function Dialog({
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
+  // Keep closeDisabled live for the keydown effect without making it a
+  // dependency, mirroring the onCloseRef pattern above. Toggling the close
+  // lock (e.g. the Notion consent dialog entering/leaving the "waiting for
+  // browser" state on OAuth failure) would otherwise tear the keydown
+  // effect down and re-run it — churning the listener and refocusing
+  // `previousFocus` unnecessarily while the dialog stays open.
+  const closeDisabledRef = useRef(closeDisabled);
+  useEffect(() => {
+    closeDisabledRef.current = closeDisabled;
+  }, [closeDisabled]);
 
   useEffect(() => {
     if (!open) return;
@@ -68,7 +78,7 @@ export function Dialog({
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (!closeDisabled) onCloseRef.current();
+        if (!closeDisabledRef.current) onCloseRef.current();
         return;
       }
       if (event.key !== "Tab" || !cardRef.current) return;
@@ -92,7 +102,7 @@ export function Dialog({
       document.body.style.overflow = previousOverflow;
       previousFocusRef.current?.focus?.();
     };
-  }, [open, closeDisabled]);
+  }, [open]);
 
   useLayoutEffect(() => {
     if (!open || !cardRef.current) return;
