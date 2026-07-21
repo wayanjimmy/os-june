@@ -356,6 +356,38 @@ describe("meeting start transcription event", () => {
     ).toHaveLength(1);
   });
 
+  it("drops a queued meeting start after the prompt intent expires", async () => {
+    const first = note();
+    const bootstrap = deferred<BootstrapResponse>();
+    mocks.bootstrapApp.mockReturnValue(bootstrap.promise);
+
+    render(<App />);
+
+    await waitFor(() => expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(true));
+    const queuedAt = performance.now();
+    const now = vi.spyOn(performance, "now").mockReturnValue(queuedAt);
+    try {
+      await fireMeetingStart();
+      now.mockReturnValue(queuedAt + 30_001);
+
+      await act(async () => {
+        bootstrap.resolve({
+          folders: [],
+          notes: [first],
+          activeRecoveries: [],
+          providerConfigured: true,
+        });
+        await bootstrap.promise;
+      });
+
+      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith(first.id));
+      expect(mocks.createNote).not.toHaveBeenCalled();
+      expect(mocks.startRecording).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("cleans up Tauri listeners that resolve after unmount", async () => {
     const cleanups: Array<ReturnType<typeof vi.fn>> = [];
     const pendingListeners: Array<(cleanup: (typeof cleanups)[number]) => void> = [];

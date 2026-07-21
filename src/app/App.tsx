@@ -300,6 +300,7 @@ const ROUTINE_RUN_NOTIFY_POLL_MS = 15000;
 const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
+const MEETING_START_REQUEST_TTL_MS = 30_000;
 const COMPOSER_FUNDING_DISABLED_REASON =
   "Add credits to send messages or generate images and videos.";
 const RECORDING_FUNDING_DISABLED_REASON =
@@ -3667,23 +3668,29 @@ export function App() {
   }, []);
 
   // The HUD emits this request once and immediately hides, so the listener must
-  // remain registered for the app's lifetime. Keep one pending bit while the
-  // app boots; repeated early requests coalesce and drain through the freshest
-  // handler as soon as recording can start.
-  const pendingMeetingStartRef = useRef(false);
-  const meetingStartHandlerRef = useRef<() => void>(() => {});
-  meetingStartHandlerRef.current = () => {
+  // remain registered for the app's lifetime. Keep one pending request while
+  // the app boots; repeated early requests coalesce and drain through the
+  // freshest handler while the user's prompt intent is still current.
+  const pendingMeetingStartAtRef = useRef<number | undefined>(undefined);
+  const meetingStartHandlerRef = useRef<(queuedAt?: number) => void>(() => {});
+  meetingStartHandlerRef.current = (queuedAt) => {
     if (appBlocked || !bootstrapped) {
-      pendingMeetingStartRef.current = true;
+      pendingMeetingStartAtRef.current = queuedAt ?? performance.now();
       return;
     }
-    pendingMeetingStartRef.current = false;
+    pendingMeetingStartAtRef.current = undefined;
+    if (queuedAt !== undefined && performance.now() - queuedAt > MEETING_START_REQUEST_TTL_MS) {
+      return;
+    }
     void handleStartMeetingDetectedRecording();
   };
 
   useEffect(() => {
-    if (appBlocked || !bootstrapped || !pendingMeetingStartRef.current) return;
-    meetingStartHandlerRef.current();
+    if (appBlocked || !bootstrapped) return;
+    const queuedAt = pendingMeetingStartAtRef.current;
+    if (queuedAt === undefined) return;
+    pendingMeetingStartAtRef.current = undefined;
+    meetingStartHandlerRef.current(queuedAt);
   }, [appBlocked, bootstrapped]);
 
   useEffect(() => {

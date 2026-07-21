@@ -1392,16 +1392,12 @@ describe("App shortcuts", () => {
 
       await waitFor(() => expect(systemReadinessCalls).toBe(2));
 
-      await waitFor(async () => {
-        if (mocks.startRecording.mock.calls.length === 0) {
-          await act(async () => {
-            await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
-              payload: undefined,
-            });
-          });
-        }
-        expect(mocks.startRecording).toHaveBeenCalled();
+      await act(async () => {
+        await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
+          payload: undefined,
+        });
       });
+      await waitFor(() => expect(mocks.startRecording).toHaveBeenCalled());
       expect(mocks.startRecording).toHaveBeenCalledWith(expect.any(String), "microphoneOnly");
 
       await new Promise((resolve) => window.setTimeout(resolve, 1_200));
