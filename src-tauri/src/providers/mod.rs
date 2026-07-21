@@ -678,7 +678,14 @@ pub fn set_live_transcription(
     state: State<'_, ProviderSettingsState>,
     request: SetLiveTranscriptionRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings(&state, |settings| {
+    set_live_transcription_impl(&state, request)
+}
+
+fn set_live_transcription_impl(
+    state: &ProviderSettingsState,
+    request: SetLiveTranscriptionRequest,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    update_settings(state, |settings| {
         settings.live_transcription = request.enabled;
     })
 }
@@ -1414,6 +1421,7 @@ fn sanitize_settings(
         image_safe_mode,
         image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
         image_safe_mode_set_by_user: settings.image_safe_mode_set_by_user,
+        live_transcription: settings.live_transcription,
         profile_overrides: sanitize_profile_overrides(settings.profile_overrides),
     }
 }
@@ -2066,6 +2074,47 @@ mod tests {
 
         assert!(!settings.image_safe_mode);
         assert!(settings.image_safe_mode_set_by_user);
+    }
+
+    #[test]
+    fn default_settings_enable_live_transcription() {
+        assert!(default_settings().live_transcription);
+    }
+
+    #[test]
+    fn provider_settings_deserialize_defaults_missing_live_transcription_field() {
+        // Files written by builds before JUN-375 carry no `liveTranscription`
+        // key; the serde default keeps the preview on for them.
+        let settings = serde_json::from_value::<ProviderModelSettings>(serde_json::json!({
+            "transcriptionProvider": "venice",
+            "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
+            "generationModel": "zai-org-glm-5-2",
+            "imageModel": "venice-sd35"
+        }))
+        .unwrap();
+
+        assert!(settings.live_transcription);
+    }
+
+    #[test]
+    fn set_live_transcription_persists_the_toggle() {
+        let state = test_state();
+
+        let updated =
+            set_live_transcription_impl(&state, SetLiveTranscriptionRequest { enabled: false })
+                .unwrap();
+        assert!(!updated.live_transcription);
+        let saved: ProviderModelSettings =
+            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
+        assert!(!saved.live_transcription);
+
+        let updated =
+            set_live_transcription_impl(&state, SetLiveTranscriptionRequest { enabled: true })
+                .unwrap();
+        assert!(updated.live_transcription);
+        let saved: ProviderModelSettings =
+            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
+        assert!(saved.live_transcription);
     }
 
     #[test]

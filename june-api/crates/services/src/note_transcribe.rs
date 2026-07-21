@@ -42,6 +42,17 @@ struct PreparedNoteTranscription {
     estimate: Credits,
 }
 
+/// Borrowed identity fields for settling a failed preview, kept separate
+/// because the transcription request takes ownership of the audio fields.
+struct FailedPreviewSettlement<'a> {
+    user_id: &'a UserId,
+    note_id: &'a str,
+    model_id: &'a ModelId,
+    seconds: u64,
+    actual: Credits,
+    action_token: String,
+}
+
 impl NoteTranscribeService {
     pub fn new(deps: NoteTranscribeServiceDeps) -> Self {
         Self {
@@ -205,28 +216,15 @@ impl NoteTranscribeService {
         {
             Ok(transcript) => transcript,
             Err(error) => {
-                // Failed previews used to settle at the full audio price just
-                // to avoid stranding the hold; release bills nothing instead.
-                let release_outcome = release_hold(ReleaseHoldParams {
-                    os_accounts: self.os_accounts.as_ref(),
-                    action: ActionSlug::NoteTranscribe,
+                self.release_failed_preview(FailedPreviewSettlement {
+                    user_id: &params.user_id,
+                    note_id: &params.note_id,
+                    model_id: &params.model_id,
+                    seconds,
+                    actual,
                     action_token: authorization.action_token,
                 })
                 .await;
-                if let ReleaseHoldOutcome::Settled(receipt) = release_outcome {
-                    tracing::info!(
-                        user_id = %params.user_id.0,
-                        action = ActionSlug::NoteTranscribe.as_str(),
-                        note_id = %params.note_id,
-                        model = %params.model_id.0,
-                        preview = true,
-                        probed_seconds = seconds,
-                        computed_credits = actual.0,
-                        settled_credits = receipt.credits_charged.0,
-                        idempotent_replay = receipt.idempotent_replay,
-                        "settled failed note transcription"
-                    );
-                }
                 return Err(error.into());
             }
         };
@@ -265,6 +263,40 @@ impl NoteTranscribeService {
             transcript,
             receipt,
         })
+    }
+
+    /// Settles a failed preview. Failed previews used to settle at the full
+    /// audio price just to avoid stranding the hold; release bills nothing
+    /// instead.
+    async fn release_failed_preview(&self, settlement: FailedPreviewSettlement<'_>) {
+        let FailedPreviewSettlement {
+            user_id,
+            note_id,
+            model_id,
+            seconds,
+            actual,
+            action_token,
+        } = settlement;
+        let release_outcome = release_hold(ReleaseHoldParams {
+            os_accounts: self.os_accounts.as_ref(),
+            action: ActionSlug::NoteTranscribe,
+            action_token,
+        })
+        .await;
+        if let ReleaseHoldOutcome::Settled(receipt) = release_outcome {
+            tracing::info!(
+                user_id = %user_id.0,
+                action = ActionSlug::NoteTranscribe.as_str(),
+                note_id = %note_id,
+                model = %model_id.0,
+                preview = true,
+                probed_seconds = seconds,
+                computed_credits = actual.0,
+                settled_credits = receipt.credits_charged.0,
+                idempotent_replay = receipt.idempotent_replay,
+                "settled failed note transcription"
+            );
+        }
     }
 
     async fn transcribe_charged(

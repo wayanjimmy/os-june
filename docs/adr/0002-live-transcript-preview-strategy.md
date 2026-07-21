@@ -4,6 +4,32 @@
 
 accepted - Phase 1 microphone preview implemented
 
+## Addendum - 2026-07-21 (JUN-375: disclosed, optional, billed live transcription)
+
+Resolves the billing question this decision deferred ("Do not bill users for
+both preview and final transcription without an explicit product decision",
+and the matching open question). Narrowly superseded:
+
+- The Phase 1 zero-credit preview settlement was the no-consent-surface
+  default, not a permanent stance. June now ships a **Live transcription**
+  advanced setting, default on, whose copy discloses that the preview
+  transcribes audio twice and may use extra credits. A preview request from a
+  build that carries this setting is consented billable usage and settles at
+  the actual computed price.
+- Turning the setting off stops both preview lanes at the capture source: no
+  preview audio leaves the device and nothing is authorized or billed.
+- Wire compatibility is preserved: the desktop adds an optional
+  `previewOptedIn` form field to preview transcription requests. June API
+  settles opted-in previews at actual price; requests without the flag (every
+  shipped client that predates the setting) keep the zero-credit settlement
+  from PR #869. No existing field or endpoint changed shape.
+- Preview charges stay distinguishable in the ledger: the preview path keeps
+  its `note_transcribe_preview:*` idempotency-key prefix, separate from the
+  final `note_transcribe:*` charge for the same recording.
+
+Preview rate limiting for unconsented legacy clients remains open under
+JUN-372.
+
 ## Context
 
 Users want to see words appear while June is taking meeting notes. The product

@@ -665,10 +665,12 @@ mod tests {
         // Consented preview bills the computed price instead of zero; the
         // authorization hold is unchanged.
         assert_eq!(output.receipt.credits_charged.0, 4);
-        assert!(os_accounts.events().iter().any(|event| matches!(
-            event,
-            RecordedCall::Charge { credits: 4, .. }
-        )));
+        assert!(
+            os_accounts
+                .events()
+                .iter()
+                .any(|event| matches!(event, RecordedCall::Charge { credits: 4, .. }))
+        );
     }
 
     #[tokio::test]
