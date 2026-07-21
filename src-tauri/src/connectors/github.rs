@@ -741,7 +741,7 @@ pub async fn get_issue(
     repo: &str,
     number: u64,
 ) -> Result<GithubIssueDetail, GithubApiError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}");
+    let url = repo_api_url(owner, repo, &format!("/issues/{number}"));
     let response = github_api_request(access_token, reqwest::Method::GET, &url)
         .send()
         .await
@@ -825,8 +825,10 @@ pub async fn list_issue_comments(
     per_page: Option<u32>,
 ) -> Result<Vec<GithubIssueComment>, GithubApiError> {
     let per_page = per_page.unwrap_or(25).min(30);
-    let url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments?per_page={per_page}"
+    let url = repo_api_url(
+        owner,
+        repo,
+        &format!("/issues/{number}/comments?per_page={per_page}"),
     );
     let response = github_api_request(access_token, reqwest::Method::GET, &url)
         .send()
@@ -917,7 +919,7 @@ pub async fn get_pull_request(
     repo: &str,
     number: u64,
 ) -> Result<GithubPullRequest, GithubApiError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
+    let url = repo_api_url(owner, repo, &format!("/pulls/{number}"));
     let response = github_api_request(access_token, reqwest::Method::GET, &url)
         .send()
         .await
@@ -950,6 +952,36 @@ pub async fn get_pull_request(
         html_url: wire.html_url,
         updated_at: wire.updated_at,
     })
+}
+
+// ----- URL building -----------------------------------------------------------
+
+/// Percent-encode one URL path segment (an owner or repo name). Valid GitHub
+/// names never need escaping, so this is defense in depth against a
+/// model-supplied value smuggling `/`, `?`, or `#` into the request path.
+fn encode_segment(value: &str) -> String {
+    urlencoding::encode(value).into_owned()
+}
+
+/// Percent-encode a repository file path segment by segment, preserving `/`
+/// so the contents API sees the real directory structure. Encoding the whole
+/// path would send `src/lib.rs` as the single segment `src%2Flib.rs`.
+fn encode_repo_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| urlencoding::encode(segment).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `https://api.github.com/repos/{owner}/{repo}{tail}` with the owner and
+/// repo segments encoded. `tail` must start with `/` (or `?` for none) and is
+/// appended verbatim, so callers encode any dynamic parts of it themselves.
+fn repo_api_url(owner: &str, repo: &str, tail: &str) -> String {
+    format!(
+        "https://api.github.com/repos/{}/{}{tail}",
+        encode_segment(owner),
+        encode_segment(repo)
+    )
 }
 
 // ----- File read --------------------------------------------------------------
@@ -989,9 +1021,10 @@ pub async fn read_file(
     path: &str,
     git_ref: Option<&str>,
 ) -> Result<GithubFileContent, GithubApiError> {
-    let mut url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/contents/{}",
-        urlencoding::encode(path)
+    let mut url = repo_api_url(
+        owner,
+        repo,
+        &format!("/contents/{}", encode_repo_path(path)),
     );
     if let Some(r) = git_ref {
         url.push_str(&format!("?ref={}", urlencoding::encode(r)));
@@ -1135,7 +1168,7 @@ pub async fn create_issue(
     body: Option<&str>,
     labels: Option<&[String]>,
 ) -> Result<GithubIssueRef, GithubApiError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues");
+    let url = repo_api_url(owner, repo, "/issues");
     let mut payload = serde_json::json!({ "title": title });
     if let Some(b) = body {
         payload["body"] = serde_json::json!(b);
@@ -1174,7 +1207,7 @@ pub async fn update_issue(
     body: Option<&str>,
     labels: Option<&[String]>,
 ) -> Result<GithubIssueRef, GithubApiError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}");
+    let url = repo_api_url(owner, repo, &format!("/issues/{number}"));
     let mut payload = serde_json::json!({});
     if let Some(t) = title {
         payload["title"] = serde_json::json!(t);
@@ -1214,7 +1247,7 @@ pub async fn add_comment(
     number: u64,
     body: &str,
 ) -> Result<GithubIssueRef, GithubApiError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments");
+    let url = repo_api_url(owner, repo, &format!("/issues/{number}/comments"));
     let response = github_api_request(access_token, reqwest::Method::POST, &url)
         .json(&serde_json::json!({ "body": body }))
         .send()
@@ -1247,6 +1280,35 @@ pub async fn add_comment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_repo_path_preserves_directory_separators() {
+        // A nested path must stay multi-segment: encoding the whole string
+        // would send `src%2Flib.rs` and 404 (or worse, hit the wrong route).
+        assert_eq!(encode_repo_path("src/lib.rs"), "src/lib.rs");
+        assert_eq!(
+            encode_repo_path("src/connectors/github.rs"),
+            "src/connectors/github.rs"
+        );
+        // Spaces and other unsafe characters inside a segment are still
+        // escaped; the separators between segments are not.
+        assert_eq!(encode_repo_path("docs/my notes.md"), "docs/my%20notes.md");
+        assert_eq!(encode_repo_path("a/b?c"), "a/b%3Fc");
+    }
+
+    #[test]
+    fn repo_api_url_encodes_owner_and_repo_segments() {
+        assert_eq!(
+            repo_api_url("owner", "repo", "/issues/7"),
+            "https://api.github.com/repos/owner/repo/issues/7"
+        );
+        // A stray slash in a model-supplied owner cannot open a new path
+        // segment: it is percent-encoded.
+        assert_eq!(
+            repo_api_url("evil/../x", "repo", "/issues"),
+            "https://api.github.com/repos/evil%2F..%2Fx/repo/issues"
+        );
+    }
 
     #[test]
     fn auth_url_has_no_scope_and_no_code_challenge() {
