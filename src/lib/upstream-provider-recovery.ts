@@ -15,13 +15,13 @@ export function displayedUpstreamProviderRecoveryText(content: string) {
   return content.trim() === UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT ? "Try again" : content;
 }
 
-/** Hermes can truncate a session preview mid-prompt. The private opener is
- * therefore the stable boundary for replacing both complete and truncated
- * recovery instructions before any session-list surface receives them. */
+/** Hermes can truncate a session preview mid-prompt, so the preview is
+ * replaced when it is a prefix of the full recovery prompt. That covers every
+ * truncation point while a user message that merely quotes the opener and
+ * then diverges stays visible as the user's own text. */
 export function displayedUpstreamProviderRecoveryPreview(preview: string | undefined) {
   const trimmed = preview?.trimStart();
-  return trimmed === UPSTREAM_PROVIDER_RECOVERY_OPEN ||
-    trimmed?.startsWith(`${UPSTREAM_PROVIDER_RECOVERY_OPEN}\n`)
+  return trimmed && UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT.startsWith(trimmed.trimEnd())
     ? "Try again"
     : preview;
 }

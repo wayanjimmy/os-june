@@ -162,8 +162,10 @@ export type AgentChatNoticePart = {
 const UPSTREAM_PROVIDER_FAILURE_MARKER = "upstream_provider_failed";
 const PERSISTED_UPSTREAM_PROVIDER_FAILURE =
   /^\s*(?:error:\s*)?api call failed after \d+ retries:\s*http \d+:\s*upstream_provider_failed\s*$/i;
-const TRAILING_UPSTREAM_PROVIDER_FAILURE =
-  /\s*(?:error:\s*)?api call failed after \d+ retries:\s*http \d+:\s*upstream_provider_failed\s*$/i;
+// Not anchored to the end: the strip must cover the same scope the marker
+// detection does, so a sentinel followed by more prose never renders raw.
+const UPSTREAM_PROVIDER_FAILURE_SENTENCE =
+  /\s*(?:error:\s*)?api call failed after \d+ retries:\s*http \d+:\s*upstream_provider_failed\s*/gi;
 
 /** A mid-run instruction the user steered into a still-working session (feature
  * 06), rendered as a quiet "Steering" system item so the transcript records
@@ -533,8 +535,8 @@ function upstreamProviderFailureNotice(
     : undefined;
 }
 
-function withoutTrailingUpstreamProviderFailure(text: string) {
-  return text.replace(TRAILING_UPSTREAM_PROVIDER_FAILURE, "").trim();
+function withoutUpstreamProviderFailureSentinel(text: string) {
+  return text.replace(UPSTREAM_PROVIDER_FAILURE_SENTENCE, "\n").trim();
 }
 
 // Persisted/reloaded turns carry no failure flag (the stored message has no
@@ -753,7 +755,7 @@ function appendLiveHermesEvents(
           !notice &&
           event.failed === true &&
           displayText.toLowerCase().includes(UPSTREAM_PROVIDER_FAILURE_MARKER)
-            ? withoutTrailingUpstreamProviderFailure(displayText)
+            ? withoutUpstreamProviderFailureSentinel(displayText)
             : displayText;
         if (notice) {
           // The complete text is authoritative for the turn (see

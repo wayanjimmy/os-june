@@ -3338,6 +3338,32 @@ describe("Agent chat runtime", () => {
     expect(turns[0]?.parts).toEqual([{ type: "text", text: partialAnswer, status: "complete" }]);
   });
 
+  it("strips a mid-text provider sentinel so the raw marker never renders", () => {
+    const partialAnswer = "Here is the part I completed.";
+    const followUp = "June will retry this step.";
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:00.000Z",
+          delta: partialAnswer,
+        }),
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          complete: true,
+          delta: `${partialAnswer}\n${UPSTREAM_PROVIDER_ERROR}\n${followUp}`,
+          failed: true,
+        }),
+      ],
+    );
+
+    const texts = turns[0]?.parts.filter((part) => part.type === "text") ?? [];
+    expect(texts).toHaveLength(1);
+    expect(texts[0]?.text).toContain(partialAnswer);
+    expect(texts[0]?.text).toContain(followUp);
+    expect(texts[0]?.text).not.toContain("upstream_provider_failed");
+  });
+
   it("strips a trailing provider sentinel while preserving partial completion prose", () => {
     const partialAnswer = "Here is the part I completed.";
     const turns = buildHermesSessionChatTurns(

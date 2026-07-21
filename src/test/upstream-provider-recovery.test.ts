@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentChatTurn } from "../lib/agent-chat-runtime";
 import {
+  UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT,
   createUpstreamProviderRecoveryStore,
+  displayedUpstreamProviderRecoveryPreview,
   upstreamProviderRecoveryIds,
 } from "../lib/upstream-provider-recovery";
 
@@ -22,6 +24,25 @@ function providerFailure(id: string): AgentChatTurn {
 }
 
 describe("upstream-provider recovery", () => {
+  it("replaces any truncation of the recovery prompt in previews, but not a quote that diverges", () => {
+    expect(displayedUpstreamProviderRecoveryPreview(UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT)).toBe(
+      "Try again",
+    );
+    // Hermes may cut the preview at any point inside the prompt.
+    expect(
+      displayedUpstreamProviderRecoveryPreview(UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT.slice(0, 48)),
+    ).toBe("Try again");
+    expect(displayedUpstreamProviderRecoveryPreview("[June upstream provider recovery]")).toBe(
+      "Try again",
+    );
+    // A user message that quotes the opener and then diverges is the user's
+    // own text and must stay visible.
+    const quote = "[June upstream provider recovery] is what June sends, right?";
+    expect(displayedUpstreamProviderRecoveryPreview(quote)).toBe(quote);
+    expect(displayedUpstreamProviderRecoveryPreview(undefined)).toBeUndefined();
+    expect(displayedUpstreamProviderRecoveryPreview("   ")).toBe("   ");
+  });
+
   it("uses failure order rather than surface-local turn ids", () => {
     const workspaceIds = upstreamProviderRecoveryIds([
       providerFailure("assistant:workspace-time:1"),
