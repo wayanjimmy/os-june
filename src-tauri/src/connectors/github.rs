@@ -184,6 +184,36 @@ fn classify_device_code_error(error_code: Option<String>) -> AppError {
     }
 }
 
+// ----- Poll deadline (pure, unit-testable) ------------------------------------
+
+/// Fallback `expires_in` used when the device-code response returns 0 or an
+/// absent value. 900 seconds (15 minutes) is well above GitHub's documented
+/// 15-minute device-code lifetime plus the 30-second margin below.
+const DEVICE_CODE_EXPIRES_IN_FALLBACK_SECS: u64 = 900;
+
+/// Margin added to `expires_in` when computing the local deadline. GitHub may
+/// report `expired_token` slightly after the nominal expiry; the margin ensures
+/// we do not race the server and give the user the full advertised window.
+const DEVICE_CODE_DEADLINE_MARGIN_SECS: u64 = 30;
+
+/// Pure helper: returns `true` when the local poll loop should stop because the
+/// device code's validity window (plus a grace margin) has elapsed.
+///
+/// - `elapsed_secs`: seconds elapsed since the device code was obtained.
+/// - `expires_in_secs`: the `expires_in` value from the device-code response;
+///   0 means "not provided" and triggers the fallback.
+///
+/// Factored as a pure function so the deadline policy is unit-testable without
+/// any async or time dependencies.
+pub fn poll_deadline_reached(elapsed_secs: u64, expires_in_secs: u64) -> bool {
+    let window = if expires_in_secs == 0 {
+        DEVICE_CODE_EXPIRES_IN_FALLBACK_SECS
+    } else {
+        expires_in_secs
+    };
+    elapsed_secs >= window.saturating_add(DEVICE_CODE_DEADLINE_MARGIN_SECS)
+}
+
 // ----- Poll decision (pure, unit-testable) ------------------------------------
 
 /// Decision returned by [`device_poll_action`] for one poll iteration.
@@ -231,6 +261,12 @@ pub fn device_poll_action(error: Option<&str>, interval_secs: u64) -> DevicePoll
 /// expires. Honors the `ConnectFlow` cancellation signal between polls so
 /// closing the dialog cleanly aborts the wait. Bounded network-error retries
 /// prevent a momentary blip from aborting a long-lived poll loop.
+///
+/// A local deadline is anchored when the device code is obtained: the loop
+/// terminates with `connector_github_device_expired` once
+/// `expires_in + DEVICE_CODE_DEADLINE_MARGIN_SECS` seconds have elapsed,
+/// regardless of GitHub's responses. This closes the gap where an unknown
+/// GitHub error code mapped to `Pending` forever.
 async fn poll_for_token(
     flow: &ConnectFlow,
     client_id: &str,
@@ -239,11 +275,27 @@ async fn poll_for_token(
     let mut interval_secs = device_code.interval.max(5);
     let mut network_errors = 0usize;
 
+    // Anchor a local deadline so the loop cannot run past the device code's
+    // validity window even if GitHub sends unrecognised error codes.
+    let poll_start = std::time::Instant::now();
+    let expires_in_secs = device_code.expires_in;
+
     // Register a cancellation sender for the duration of the poll.
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
     flow.register_cancel_sender(cancel_tx);
 
     let result = loop {
+        // Check the local deadline before sleeping. This runs at the top of
+        // every iteration so the loop exits promptly once the code window
+        // (plus the margin) is exhausted, even if GitHub keeps responding with
+        // unknown error codes that `device_poll_action` maps to Pending.
+        if poll_deadline_reached(poll_start.elapsed().as_secs(), expires_in_secs) {
+            break Err(AppError::new(
+                "connector_github_device_expired",
+                "The code expired before it was approved. Try again.",
+            ));
+        }
+
         // Wait for the polling interval, racing against cancellation.
         let sleep = tokio::time::sleep(std::time::Duration::from_secs(interval_secs));
         tokio::select! {
@@ -1959,5 +2011,58 @@ mod tests {
             "Device flow is not enabled on the GitHub App. Enable it in the App's settings and try again.",
         );
         assert_eq!(disabled.code, "connector_github_device_flow_disabled");
+    }
+
+    // ----- poll_deadline_reached tests ----------------------------------------
+
+    #[test]
+    fn poll_deadline_not_reached_before_window() {
+        // Well before the expiry window: not reached.
+        assert!(!poll_deadline_reached(0, 900));
+        assert!(!poll_deadline_reached(100, 900));
+        // Just before the deadline (900 + 30 - 1 = 929 elapsed).
+        assert!(!poll_deadline_reached(929, 900));
+    }
+
+    #[test]
+    fn poll_deadline_reached_at_boundary() {
+        // Exactly at expires_in + margin (900 + 30 = 930): reached.
+        assert!(poll_deadline_reached(930, 900));
+    }
+
+    #[test]
+    fn poll_deadline_reached_after_boundary() {
+        // Past the deadline: reached.
+        assert!(poll_deadline_reached(1000, 900));
+        assert!(poll_deadline_reached(u64::MAX / 2, 900));
+    }
+
+    #[test]
+    fn poll_deadline_fallback_when_expires_in_is_zero() {
+        // expires_in = 0 means "not provided"; fallback is
+        // DEVICE_CODE_EXPIRES_IN_FALLBACK_SECS (900).
+        // Before fallback + margin: not reached.
+        assert!(
+            !poll_deadline_reached(929, 0),
+            "before fallback deadline must not be reached"
+        );
+        // At fallback + margin: reached.
+        assert!(
+            poll_deadline_reached(930, 0),
+            "at fallback deadline must be reached"
+        );
+    }
+
+    #[test]
+    fn poll_deadline_uses_actual_expires_in_not_fallback() {
+        // A non-zero expires_in (e.g. 600 s, GitHub's minimum) must use the
+        // actual value, not the fallback. Deadline is 600 + 30 = 630 s.
+        assert!(!poll_deadline_reached(629, 600));
+        assert!(poll_deadline_reached(630, 600));
+        // Must NOT use the fallback (900 + 30 = 930):
+        assert!(
+            poll_deadline_reached(700, 600),
+            "600-s code must expire well before fallback deadline"
+        );
     }
 }

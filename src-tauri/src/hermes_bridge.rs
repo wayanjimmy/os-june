@@ -2607,13 +2607,21 @@ where
     }
 }
 
-/// Resolve the installed-repo set for post-filtering search results. Returns
-/// (repos, truncated); on any error, fails open (returns empty set with
-/// truncated=true so filtering is skipped).
+/// Resolve the installed-repo set for post-filtering search results.
+///
+/// Returns `Ok((repos, truncated))` on success.
+/// - `truncated = false`: the set is complete; filtering must be enforced.
+/// - `truncated = true`: the 500-cap was reached on a *successful* fetch; fail
+///   open (skip filtering) so repos beyond position 500 are not hard-broken.
+///
+/// Returns `Err(AppError)` on a genuine fetch error (network failure, auth
+/// error, etc.). Callers must propagate this error rather than silently passing
+/// all results through — matching [`check_installed_repo`]'s `?` semantics so
+/// both read and search paths fail closed on connector errors.
 async fn installed_repo_set_for_filter(
     app: &AppHandle,
     account_id: &str,
-) -> (std::collections::HashSet<String>, bool) {
+) -> Result<(std::collections::HashSet<String>, bool), AppError> {
     // Try cache first.
     {
         let guard = installed_repo_cache()
@@ -2621,49 +2629,44 @@ async fn installed_repo_set_for_filter(
             .expect("installed_repo_cache lock poisoned");
         if let Some(entry) = guard.get(account_id) {
             if entry.fetched_at.elapsed().as_secs() < INSTALLED_REPO_CACHE_TTL_SECS {
-                return (entry.repos.clone(), entry.truncated);
+                return Ok((entry.repos.clone(), entry.truncated));
             }
         }
     }
 
-    // Fetch fresh.
-    match connector_github_call(app, account_id, |token| async move {
+    // Fetch fresh. Propagate any error so callers fail closed.
+    let list = connector_github_call(app, account_id, |token| async move {
         crate::connectors::github::list_repositories(&token).await
     })
-    .await
-    {
-        Ok(list) => {
-            let repos: std::collections::HashSet<String> = list
-                .repositories
-                .iter()
-                .map(|r| r.full_name.to_lowercase())
-                .collect();
-            let truncated = list.truncated;
-            {
-                let mut guard = installed_repo_cache()
-                    .lock()
-                    .expect("installed_repo_cache lock poisoned");
-                guard.insert(
-                    account_id.to_string(),
-                    InstalledRepoSet {
-                        repos: repos.clone(),
-                        truncated,
-                        fetched_at: Instant::now(),
-                    },
-                );
-            }
-            (repos, truncated)
-        }
-        Err(err) => {
-            tracing::warn!(
-                account_id,
-                error_code = err.code,
-                "github installed-repo fetch for search filter failed; failing open"
-            );
-            // Fail open: return empty set with truncated=true so caller skips filtering.
-            (std::collections::HashSet::new(), true)
-        }
+    .await?;
+
+    let repos: std::collections::HashSet<String> = list
+        .repositories
+        .iter()
+        .map(|r| r.full_name.to_lowercase())
+        .collect();
+    let truncated = list.truncated;
+    if truncated {
+        tracing::warn!(
+            account_id,
+            "github installed-repo set capped at 500 repos; \
+             search post-filter will be skipped (fail open for large installations)"
+        );
     }
+    {
+        let mut guard = installed_repo_cache()
+            .lock()
+            .expect("installed_repo_cache lock poisoned");
+        guard.insert(
+            account_id.to_string(),
+            InstalledRepoSet {
+                repos: repos.clone(),
+                truncated,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+    Ok((repos, truncated))
 }
 
 /// Apply June's native-memory toolset policy without requiring a live bridge
@@ -13827,14 +13830,11 @@ async fn dispatch_connector_route(
                 })
                 .await?;
             // Post-filter issue search results to the installed-repo set.
-            // When the set is truncated (>500 repos), skip filtering (fail open).
-            let (installed, truncated) = installed_repo_set_for_filter(app, account_id).await;
-            if truncated {
-                tracing::warn!(
-                    account_id,
-                    "github installed-repo set truncated; skipping search_issues post-filter"
-                );
-            }
+            // On a genuine fetch error, propagate it (fail closed) rather than
+            // silently passing all results through. The warn log for the
+            // truncated/fail-open case is emitted inside
+            // `installed_repo_set_for_filter` itself.
+            let (installed, truncated) = installed_repo_set_for_filter(app, account_id).await?;
             let filtered =
                 filter_to_installed_repos(results, &installed, truncated, |r| &r.repo_full_name);
             connector_json(serde_json::json!({
@@ -13950,14 +13950,11 @@ async fn dispatch_connector_route(
             })
             .await?;
             // Post-filter code search results to the installed-repo set.
-            // When the set is truncated (>500 repos), skip filtering (fail open).
-            let (installed, truncated) = installed_repo_set_for_filter(app, account_id).await;
-            if truncated {
-                tracing::warn!(
-                    account_id,
-                    "github installed-repo set truncated; skipping search_code post-filter"
-                );
-            }
+            // On a genuine fetch error, propagate it (fail closed) rather than
+            // silently passing all results through. The warn log for the
+            // truncated/fail-open case is emitted inside
+            // `installed_repo_set_for_filter` itself.
+            let (installed, truncated) = installed_repo_set_for_filter(app, account_id).await?;
             let filtered =
                 filter_to_installed_repos(results, &installed, truncated, |r| &r.repo_full_name);
             connector_json(serde_json::json!({
@@ -24716,5 +24713,73 @@ mcp_servers:
         let result = filter_to_installed_repos(items, &repos, false, |i| &i.repo);
         assert_eq!(result.items.len(), 0);
         assert_eq!(result.filtered_out, 0);
+    }
+
+    // ----- installed_repo_set_for_filter semantics distinction ------------------
+    //
+    // The pure-function layer directly exercises the two distinct outcomes that
+    // the route handler must handle differently:
+    //
+    //   (a) Genuine fetch ERROR  → Err(_)    → propagate; search fails closed.
+    //   (b) Successful fetch, truncated=true → Ok((_, true)) → skip filter (fail open).
+    //   (c) Successful fetch, truncated=false → Ok((set, false)) → enforce filter.
+    //
+    // `installed_repo_set_for_filter` itself is async and requires connector
+    // infrastructure, so we test the boundary semantics through
+    // `filter_to_installed_repos` (which IS pure) combined with the Err/Ok
+    // contract the function now signals.  The critical invariant is: the code
+    // that previously swallowed the error (returning empty-set + truncated=true)
+    // no longer exists — callers receive Err and must propagate it, which the
+    // `?` in the search_issues / search_code arms now enforces.
+
+    #[test]
+    fn filter_to_installed_repos_truncated_true_is_distinct_from_error_path() {
+        // truncated=true (successful over-500-cap fetch): all items pass through,
+        // filteredOut=0. This is the ONLY case where fail-open is correct.
+        let repos = make_repo_set(&["owner/a"]);
+        let items = vec![
+            FakeItem {
+                repo: "owner/a".to_string(),
+                value: 1,
+            },
+            FakeItem {
+                repo: "owner/public-elsewhere".to_string(),
+                value: 2,
+            },
+        ];
+        let result = filter_to_installed_repos(items, &repos, true, |i| &i.repo);
+        // All pass through; the truncation flag signals "set may be incomplete".
+        assert_eq!(result.items.len(), 2, "truncated=true must pass all items");
+        assert_eq!(
+            result.filtered_out, 0,
+            "truncated=true must report 0 filtered"
+        );
+    }
+
+    #[test]
+    fn filter_to_installed_repos_truncated_false_enforces_boundary() {
+        // truncated=false (successful complete fetch): items from non-installed
+        // repos must be filtered out.  This documents that the error path (Err
+        // from installed_repo_set_for_filter) must NOT land here with
+        // truncated=false + empty set, because that would silently filter
+        // everything rather than surfacing the error.
+        let repos = make_repo_set(&["owner/installed"]);
+        let items = vec![
+            FakeItem {
+                repo: "owner/installed".to_string(),
+                value: 1,
+            },
+            FakeItem {
+                repo: "owner/public-but-not-installed".to_string(),
+                value: 2,
+            },
+        ];
+        let result = filter_to_installed_repos(items, &repos, false, |i| &i.repo);
+        assert_eq!(result.items.len(), 1, "only installed repos pass through");
+        assert_eq!(
+            result.filtered_out, 1,
+            "non-installed repo counted as filtered"
+        );
+        assert_eq!(result.items[0].repo, "owner/installed");
     }
 }
