@@ -1,3 +1,4 @@
+import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EXPERIMENTAL_UNLOCK_WINDOW_MS,
@@ -80,5 +81,29 @@ describe("experimental flags", () => {
     await initializeExperimentalFlags();
 
     expect(firstUnlisten).toHaveBeenCalledOnce();
+  });
+
+  it("retries a transient load failure when the next subscriber mounts", async () => {
+    vi.resetModules();
+    mocks.invoke.mockReset();
+    mocks.listen.mockReset();
+    mocks.invoke
+      .mockRejectedValueOnce(new Error("bridge unavailable"))
+      .mockResolvedValueOnce({ unlocked: true, browser_use: true });
+    mocks.listen.mockResolvedValue(() => {});
+    const flags = await import("../lib/experimental-flags");
+
+    await flags.initializeExperimentalFlags();
+    expect(flags.getCachedExperimentalFlags()).toEqual({
+      unlocked: false,
+      browser_use: false,
+    });
+
+    const { result, unmount } = renderHook(() => flags.useExperimentalFlags());
+    await waitFor(() => expect(result.current.browser_use).toBe(true));
+
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(result.current.unlocked).toBe(true);
+    unmount();
   });
 });

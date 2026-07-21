@@ -1489,19 +1489,61 @@ pub fn unpack_bundled_extension(app: AppHandle) -> Result<String, AppError> {
     })?;
     crate::extension_host::validate_extension_manifest(&staging.join("manifest.json"))?;
 
-    if destination.exists() {
-        fs::remove_dir_all(&destination)
-            .map_err(|error| AppError::new("bundled_extension_unpack_failed", error.to_string()))?;
-    }
-    fs::rename(&staging, &destination).map_err(|error| {
-        let _ = fs::remove_dir_all(&staging);
-        AppError::new("bundled_extension_unpack_failed", error.to_string())
-    })?;
+    replace_directory_from_staging(&staging, &destination, |from, to| fs::rename(from, to))
+        .map_err(|error| AppError::new("bundled_extension_unpack_failed", error.to_string()))?;
 
     let destination_string = destination.to_string_lossy().into_owned();
     reveal_path(destination_string.clone())
         .map_err(|error| AppError::new("bundled_extension_reveal_failed", error))?;
     Ok(destination_string)
+}
+
+fn replace_directory_from_staging(
+    staging: &Path,
+    destination: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let destination_name = destination.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "extension destination has no file name",
+        )
+    })?;
+    let mut backup_name = destination_name.to_os_string();
+    backup_name.push(".backup");
+    let backup = destination.with_file_name(backup_name);
+
+    if backup.exists() {
+        if destination.exists() {
+            fs::remove_dir_all(&backup)?;
+        } else {
+            rename(&backup, destination)?;
+        }
+    }
+
+    let had_destination = destination.exists();
+    if had_destination {
+        rename(destination, &backup)?;
+    }
+
+    if let Err(replace_error) = rename(staging, destination) {
+        if had_destination {
+            rename(&backup, destination).map_err(|restore_error| {
+                std::io::Error::new(
+                    restore_error.kind(),
+                    format!(
+                        "failed to replace extension directory ({replace_error}); failed to restore backup ({restore_error})"
+                    ),
+                )
+            })?;
+        }
+        return Err(replace_error);
+    }
+
+    if had_destination {
+        fs::remove_dir_all(backup)?;
+    }
+    Ok(())
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -3381,8 +3423,9 @@ mod tests {
         capture_start_timeout_error, copy_directory, copy_directory_contents,
         create_memory_with_settings, delete_profile_records_with_share_revoker, is_share_not_found,
         load_memory_settings, persist_memory_settings, recovery_validation_expected_duration_ms,
-        should_probe_system_audio_permission, start_capture_with_timeout_and_cleanup,
-        update_memory_with_settings, validated_folder_instructions, MEMORY_SETTINGS_LOCK,
+        replace_directory_from_staging, should_probe_system_audio_permission,
+        start_capture_with_timeout_and_cleanup, update_memory_with_settings,
+        validated_folder_instructions, MEMORY_SETTINGS_LOCK,
     };
 
     #[test]
@@ -3457,6 +3500,37 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!outside.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn bundled_extension_replace_restores_backup_when_promotion_fails() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let destination = root.path().join("extension-unpacked");
+        let staging = root.path().join("extension-unpacked.tmp");
+        std::fs::create_dir(&destination).expect("create destination");
+        std::fs::create_dir(&staging).expect("create staging");
+        std::fs::write(destination.join("old.js"), b"old").expect("write old extension");
+        std::fs::write(staging.join("new.js"), b"new").expect("write new extension");
+
+        let mut rename_calls = 0;
+        let error = replace_directory_from_staging(&staging, &destination, |from, to| {
+            rename_calls += 1;
+            if rename_calls == 2 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "simulated promotion failure",
+                ));
+            }
+            std::fs::rename(from, to)
+        })
+        .expect_err("promotion must fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(rename_calls, 3);
+        assert!(destination.join("old.js").is_file());
+        assert!(!destination.join("new.js").exists());
+        assert!(staging.join("new.js").is_file());
+        assert!(!root.path().join("extension-unpacked.backup").exists());
     }
 
     async fn test_repositories() -> Repositories {

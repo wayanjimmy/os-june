@@ -50,10 +50,6 @@ function publish(flags: ExperimentalFlags, loaded = true) {
   for (const subscriber of subscribers) subscriber();
 }
 
-function markLoadedAfterFailure(revision: number) {
-  if (cacheRevision === revision) publish(cache, true);
-}
-
 export async function initializeExperimentalFlags() {
   if (initialization) return initialization;
   initialization = (async () => {
@@ -76,7 +72,8 @@ export async function initializeExperimentalFlags() {
       const flags = await invoke<ExperimentalFlags>("experimental_flags_get");
       if (cacheRevision === revision) publish(flags);
     } catch {
-      markLoadedAfterFailure(revision);
+      // Keep fail-closed defaults unloaded so the next subscriber can retry.
+      // A newer event or write still wins through cacheRevision and publish.
     }
   })().finally(() => {
     initialization = undefined;
