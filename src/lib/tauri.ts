@@ -744,6 +744,7 @@ export type BootstrapResponse = {
   folders: FolderDto[];
   notes: NoteListItemDto[];
   activeRecoveries: RecoverableRecordingDto[];
+  activeRecording?: RecordingStatusDto;
   providerConfigured: boolean;
 };
 
@@ -1042,6 +1043,21 @@ export async function sendAppNotification(input: {
  */
 export async function agentOpenReady() {
   return invoke<string | null>("agent_open_ready");
+}
+
+export type PendingMeetingStartRequest = {
+  requestId: string;
+  noteId: string;
+  requestedAtMs: number;
+  expired: boolean;
+};
+
+export async function pendingMeetingStartRequest() {
+  return invoke<PendingMeetingStartRequest | null>("pending_meeting_start_request");
+}
+
+export async function acknowledgeMeetingStartRequest(requestId: string) {
+  return invoke<boolean>("acknowledge_meeting_start_request", { requestId });
 }
 
 export async function createAgentTask(input: {
@@ -1749,6 +1765,26 @@ export async function startRecording(
 ) {
   return invoke<RecordingSessionDto>("start_recording", {
     request: { noteId, sourceMode },
+  });
+}
+
+export type MeetingStartRecordingOutcome =
+  | {
+      status: "started";
+      note: NoteDto;
+      recording: RecordingSessionDto;
+    }
+  | {
+      status: "failed";
+      error: { code: string; message: string };
+    };
+
+export async function startMeetingRecording(
+  requestId: string,
+  sourceMode: RecordingSourceMode = "microphoneOnly",
+) {
+  return invoke<MeetingStartRecordingOutcome>("start_meeting_recording", {
+    request: { requestId, sourceMode },
   });
 }
 
