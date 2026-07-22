@@ -136,8 +136,8 @@ describe("TabBar", () => {
       '.app-shell[data-platform="windows"][data-sidebar="expanded"]:has(> .sidebar[data-mode="default"]) > .chrome-sidebar-toggle',
     );
 
-    // Vertically aligned with the sidebar header (below the titlebar band).
-    expect(toggleRule).toContain("calc(var(--titlebar-h) + var(--sp-3))");
+    // Vertically aligned with the sidebar header (flush at the top, --sp-3).
+    expect(toggleRule).toContain("top: var(--sp-3)");
     // Horizontally rides the animated sidebar edge, floored at --sp-3.
     expect(toggleRule).toContain("var(--sidebar-w-current)");
     expect(toggleRule).toContain("var(--control-md)");
@@ -146,6 +146,18 @@ describe("TabBar", () => {
     // macOS keeps the fixed calc(var(--titlebar-controls-end) + …) left; the
     // Windows override must not reintroduce that token on the toggle.
     expect(toggleRule).not.toContain("--titlebar-controls-end");
+  });
+
+  it("reclaims the titlebar top padding on Windows so the sidebar sits flush", () => {
+    const sidebarRule = cssRuleFor('.app-shell[data-platform="windows"] .sidebar');
+
+    // No traffic lights on Windows — the 28px titlebar-h top padding is dead
+    // space. Override to --sp-3 so the header sits flush at the top.
+    expect(sidebarRule).toContain("padding-top: var(--sp-3)");
+    // Raise above the fixed titlebar-drag overlay (z-index 100) so the logo
+    // link and recording indicator remain interactive.
+    expect(sidebarRule).toContain("position: relative");
+    expect(sidebarRule).toContain("z-index: 101");
   });
 
   it("reserves a trailing header slot on Windows for the fixed sidebar toggle", () => {

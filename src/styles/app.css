@@ -8319,12 +8319,26 @@ button.agent-user-attachment:hover {
   --titlebar-controls-gap: var(--sp-3);
 }
 
+/* Windows has no traffic-light controls, so the titlebar-h (28px) of top
+ * padding baked into .sidebar is dead space above the June logo. Reclaim it
+ * so the sidebar header sits flush at the top. Raise the sidebar above the
+ * fixed titlebar-drag overlay (z-index 100) so the logo link and recording
+ * indicator remain interactive — same z-index as .tab-bar (101). position:
+ * relative doesn't affect grid layout, just creates a stacking context.
+ * macOS is untouched: no data-platform="windows" attribute. */
+.app-shell[data-platform="windows"] .sidebar {
+  padding-top: var(--sp-3);
+  position: relative;
+  z-index: 101;
+}
+
 /* Windows-only: when the sidebar is expanded and in default mode, visually
  * place the toggle in the sidebar header band — in line with the June logo,
  * floated to the right edge with space between. The toggle stays position:fixed
  * (owned by App.tsx) so it never unmounts; this is pure visual placement.
  *
- * Vertically: drop below the titlebar into the sidebar header band.
+ * Vertically: aligned with the sidebar header (now --sp-3 from the top, same
+ * as the horizontal padding).
  * Horizontally: right-align with the header's content edge, riding the
  * animated --sidebar-w-current so the toggle slides with the sidebar on the
  * same clock as the grid and tab strip.
@@ -8334,7 +8348,7 @@ button.agent-user-attachment:hover {
  * sidebar is display:none so the header doesn't exist, and Settings has no
  * sidebar-header. macOS is untouched: no data-platform="windows" attribute. */
 .app-shell[data-platform="windows"][data-sidebar="expanded"]:has(> .sidebar[data-mode="default"]) > .chrome-sidebar-toggle {
-  top: calc(var(--titlebar-h) + var(--sp-3));
+  top: var(--sp-3);
   left: max(
     var(--sp-3),
     calc(var(--sidebar-w-current) - var(--sp-3) - var(--sp-1) - var(--control-md))
