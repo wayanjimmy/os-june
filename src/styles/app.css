@@ -8353,7 +8353,8 @@ button.agent-user-attachment:hover {
  * falls back to the base rule (titlebar band, 8px from left) — the collapsed
  * sidebar is display:none so the header doesn't exist, and Settings has no
  * sidebar-header. macOS is untouched: no data-platform="windows" attribute. */
-.app-shell[data-platform="windows"][data-sidebar="expanded"]:has(> .sidebar[data-mode="default"]) > .chrome-sidebar-toggle {
+.app-shell[data-platform="windows"][data-sidebar="expanded"]:has(> .sidebar[data-mode="default"])
+> .chrome-sidebar-toggle {
   top: var(--sp-3);
   left: max(
     var(--sp-3),

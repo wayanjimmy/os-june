@@ -133,7 +133,7 @@ describe("TabBar", () => {
 
   it("places the Windows sidebar toggle in the sidebar header band when expanded", () => {
     const toggleRule = cssRuleFor(
-      '.app-shell[data-platform="windows"][data-sidebar="expanded"]:has(> .sidebar[data-mode="default"]) > .chrome-sidebar-toggle',
+      '.app-shell[data-platform="windows"][data-sidebar="expanded"]:has(> .sidebar[data-mode="default"])\n> .chrome-sidebar-toggle',
     );
 
     // Vertically aligned with the sidebar header (flush at the top, --sp-3).
