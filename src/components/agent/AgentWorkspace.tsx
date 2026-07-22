@@ -728,6 +728,27 @@ type AgentPanel = "chat" | "skills" | "messaging";
 // survives the workspace remounting on view switches.
 const UNRESTRICTED_ACK_KEY = "june.agent.unrestrictedAcknowledged";
 
+type BackgroundSessionTitleGuard = {
+  token: symbol;
+  deleting?: true;
+  title?: string;
+};
+
+// Background title requests can outlive an AgentWorkspace mount. Keep their
+// cancellation state at module scope so a delete or rename after remount still
+// invalidates the old closure before it writes to Hermes.
+const backgroundSessionTitleGuards = new Map<string, BackgroundSessionTitleGuard>();
+
+function supersedeBackgroundSessionTitle(sessionId: string, title: string) {
+  backgroundSessionTitleGuards.set(sessionId, { token: Symbol("session-title"), title });
+}
+
+function markBackgroundSessionTitleDeleting(sessionId: string) {
+  const guard = { token: Symbol("session-delete"), deleting: true as const };
+  backgroundSessionTitleGuards.set(sessionId, guard);
+  return guard;
+}
+
 function unrestrictedAcknowledged(): boolean {
   try {
     return window.sessionStorage.getItem(UNRESTRICTED_ACK_KEY) === "true";
@@ -6099,9 +6120,9 @@ export function AgentWorkspace({
       imageSlashBlockedByModel
     )
       return;
-    // This is the user-visible Send boundary. Skill expansion, file reads,
-    // title generation, and session resume can all await; a picker change
-    // during any of them belongs to the following run.
+    // This is the user-visible Send boundary. Skill expansion, file reads, and
+    // session resume can all await; a picker change during any of them belongs
+    // to the following run. Title generation starts here but stays backgrounded.
     const sentModelTarget = captureSessionModelTarget();
     const sentDispatchOrder = ++composerDispatchOrderRef.current;
     const sentDispatchReservation = sentModelTarget.targetStoredSessionId
@@ -7466,14 +7487,14 @@ export function AgentWorkspace({
       ),
       heldVideoContexts,
     );
-    // Issue reports skip title suggestion: the content is the wrapped
-    // investigation prompt, which would title the session after the wrapper.
-    const titlePromise =
-      targetStoredSessionId || options?.issueReport
+    // Start the AI title request early, but never put it on the prompt's
+    // critical path. The session starts with the deterministic fallback and
+    // the suggestion patches it in the background once a stored id exists.
+    // Issue reports and attachment-only sessions already have suitable titles.
+    const initialTitleSuggestionPromise =
+      targetStoredSessionId || options?.issueReport || attachmentOnlyTitle
         ? undefined
-        : attachmentOnlyTitle
-          ? Promise.resolve(attachmentOnlyTitle)
-          : agentSessionTitleForPrompt(titleContent).then((suggestion) => suggestion.title);
+        : agentSessionTitleForPrompt(titleContent);
     const listedTargetSession = targetStoredSessionId
       ? hermesSessionItemsRef.current.find((session) => session.id === targetStoredSessionId)
       : undefined;
@@ -7509,13 +7530,12 @@ export function AgentWorkspace({
     // session's follow-ups.
     const { created, createdUnderProfile, gateway, sessionTitle, storedSessionId } =
       await (async () => {
-        const [nextGateway, nextSessionTitle] = await Promise.all([
+        const [nextGateway] = await Promise.all([
           ensureHermesGateway(
             targetStoredSessionId
               ? sessionUnrestricted(targetStoredSessionId)
               : fullModeDraftRef.current,
           ),
-          titlePromise ?? Promise.resolve(undefined),
           // Re-read the sticky active profile for every brand-new session so an
           // out-of-band switch (Hermes CLI, upstream dashboard) is honored
           // without a workspace remount. Runs in parallel with gateway setup
@@ -7536,7 +7556,7 @@ export function AgentWorkspace({
         const nextCreated = targetStoredSessionId
           ? undefined
           : await nextGateway.request<HermesRuntimeSessionResponse>("session.create", {
-              title: nextSessionTitle ?? fallbackSessionTitle,
+              title: fallbackSessionTitle,
               cols: 96,
               // session.create treats `model` as a per-session override.
               // Under a named profile the override would silently bypass the
@@ -7558,11 +7578,14 @@ export function AgentWorkspace({
           created: nextCreated,
           createdUnderProfile: underProfile ? nextUnderProfileName : undefined,
           gateway: nextGateway,
-          sessionTitle: nextSessionTitle,
+          sessionTitle: fallbackSessionTitle,
           storedSessionId: nextStoredSessionId,
         };
       })().catch(rollbackOptimisticBeforePrompt);
     storedSessionIdForRollback = storedSessionId;
+    if (created) {
+      backgroundSessionTitleGuards.delete(storedSessionId);
+    }
     if (createdUnderProfile) {
       await assignSessionToProfile(storedSessionId, createdUnderProfile).catch(
         rollbackOptimisticBeforePrompt,
@@ -7618,7 +7641,7 @@ export function AgentWorkspace({
     if (!targetStoredSessionId) {
       rememberSessionMode(storedSessionId, fullModeDraftRef.current);
     }
-    const sessionDisplayTitle = sessionTitle || fallbackSessionTitle;
+    const sessionDisplayTitle = sessionTitle;
     const ensureStoredHermesSession = () =>
       ensureHermesBridgeSession({
         sessionId: storedSessionId,
@@ -7636,6 +7659,9 @@ export function AgentWorkspace({
         title: sessionDisplayTitle,
         toSessionId: storedSessionId,
       });
+    }
+    if (initialTitleSuggestionPromise) {
+      void applyInitialSessionTitleSuggestion(storedSessionId, initialTitleSuggestionPromise);
     }
     if (!targetStoredSessionId && !options?.skipPrompt && !createdUnderProfile) {
       const latestDefaultSelection: SessionModelSelection = {
@@ -7660,21 +7686,6 @@ export function AgentWorkspace({
       commitSessionModelSelections(
         rememberAppliedSessionModelSelection(storedSessionId, targetSessionModelSelection),
       );
-    }
-    if (sessionTitle) {
-      sessionTitleOverridesRef.current = {
-        ...sessionTitleOverridesRef.current,
-        [storedSessionId]: sessionTitle,
-      };
-      sessionTitleSourceRef.current = {
-        ...sessionTitleSourceRef.current,
-        [storedSessionId]: "prompt",
-      };
-      // The mount-time session load races this store: when its merge lands
-      // first, the fetched placeholder title is already rendered and nothing
-      // re-reads the override (the post-submit reload can no-op on a stale
-      // bridge closure). Re-map the current list so the order doesn't matter.
-      setHermesSessionItems((current) => applySessionTitleOverrides(current));
     }
     if (!optimisticSession) {
       await withTimeout(ensureStoredHermesSession(), 2500).catch(() => undefined);
@@ -10047,6 +10058,7 @@ export function AgentWorkspace({
     const next = title.trim();
     if (!next) return null;
     rememberSessionManuallyTitled(sessionId);
+    supersedeBackgroundSessionTitle(sessionId, next);
     titleSuggestionSessionIdsRef.current.add(sessionId);
     sessionTitleOverridesRef.current = {
       ...sessionTitleOverridesRef.current,
@@ -10082,6 +10094,7 @@ export function AgentWorkspace({
   // clears messages, pending sends, activity-store state, and live events so a
   // running session doesn't linger as phantom "working" work.
   function removeHermesSessionLocally(sessionId: string, selectNext = true) {
+    markBackgroundSessionTitleDeleting(sessionId);
     cancelAgentRunSettlement(sessionId);
     setHermesSessionItems((current) => {
       const next = current.filter((session) => session.id !== sessionId);
@@ -10109,14 +10122,30 @@ export function AgentWorkspace({
     commitSessionModelSelections(forgetSessionModelSelection(sessionId));
     // Same for the session's thinking-level record.
     forgetSessionThinkingLevel(sessionId);
+    sessionTitleOverridesRef.current = omitRecordKey(sessionTitleOverridesRef.current, sessionId);
+    sessionTitleSourceRef.current = omitRecordKey(sessionTitleSourceRef.current, sessionId);
+    titleSuggestionSessionIdsRef.current.delete(sessionId);
   }
 
   async function deleteSelectedHermesSession(sessionId: string) {
+    const previousTitleGuard = backgroundSessionTitleGuards.get(sessionId);
+    const deletionGuard = markBackgroundSessionTitleDeleting(sessionId);
     try {
       await deleteHermesSession(sessionId);
       // Clearing the selection falls the workspace back to empty.
       removeHermesSessionLocally(sessionId, false);
     } catch (err) {
+      if (backgroundSessionTitleGuards.get(sessionId)?.token === deletionGuard.token) {
+        if (previousTitleGuard) {
+          backgroundSessionTitleGuards.set(sessionId, previousTitleGuard);
+        } else {
+          backgroundSessionTitleGuards.delete(sessionId);
+        }
+      }
+      const latestMessages = hermesSessionMessagesRef.current[sessionId];
+      if (latestMessages) {
+        void suggestTitleForUntitledSession(sessionId, latestMessages);
+      }
       setError(messageFromError(err), { sessionId });
     }
   }
@@ -10127,6 +10156,69 @@ export function AgentWorkspace({
       const title = overrides[session.id];
       return title ? { ...session, title } : session;
     });
+  }
+
+  async function applyInitialSessionTitleSuggestion(
+    sessionId: string,
+    suggestionPromise: ReturnType<typeof agentSessionTitleForPrompt>,
+  ) {
+    const titleGuard = { token: Symbol("initial-session-title") };
+    backgroundSessionTitleGuards.set(sessionId, titleGuard);
+    titleSuggestionInFlightSessionIdsRef.current.add(sessionId);
+    try {
+      const suggestion = await suggestionPromise;
+      if (
+        backgroundSessionTitleGuards.get(sessionId)?.token !== titleGuard.token ||
+        !suggestion.fromModel ||
+        titleSuggestionSessionIdsRef.current.has(sessionId) ||
+        ["manual", "exchange", "rejected-final"].includes(
+          sessionTitleSourceRef.current[sessionId] ?? "",
+        )
+      ) {
+        return;
+      }
+      const title = suggestion.title;
+      sessionTitleOverridesRef.current = {
+        ...sessionTitleOverridesRef.current,
+        [sessionId]: title,
+      };
+      sessionTitleSourceRef.current = {
+        ...sessionTitleSourceRef.current,
+        [sessionId]: "prompt",
+      };
+      const applyTitle = (sessions: HermesSessionInfo[]) =>
+        sessions.map((item) => (item.id === sessionId ? { ...item, title } : item));
+      hermesSessionItemsRef.current = applyTitle(hermesSessionItemsRef.current);
+      setHermesSessionItems((current) => applyTitle(current));
+      await ensureHermesBridgeSession({ sessionId, title }).catch(() => undefined);
+      const latestGuard = backgroundSessionTitleGuards.get(sessionId);
+      if (latestGuard?.token !== titleGuard.token) {
+        if (latestGuard?.deleting) {
+          // The title PATCH raced a successful delete. Remove the session
+          // again in case Hermes handled the late write through its legacy
+          // create-or-update endpoint.
+          await deleteHermesSession(sessionId).catch((err) => {
+            setError(messageFromError(err), { sessionId });
+          });
+        } else if (latestGuard?.title && latestGuard.title !== title) {
+          // A rename or exchange title overtook this request, possibly from a
+          // newer AgentWorkspace mount. Re-assert the shared latest title.
+          await ensureHermesBridgeSession({
+            sessionId,
+            title: latestGuard.title,
+          }).catch(() => undefined);
+        }
+      }
+    } finally {
+      titleSuggestionInFlightSessionIdsRef.current.delete(sessionId);
+      if (backgroundSessionTitleGuards.get(sessionId)?.token === titleGuard.token) {
+        backgroundSessionTitleGuards.delete(sessionId);
+        const latestMessages = hermesSessionMessagesRef.current[sessionId];
+        if (latestMessages) {
+          void suggestTitleForUntitledSession(sessionId, latestMessages);
+        }
+      }
+    }
   }
 
   async function suggestTitleForUntitledSession(
@@ -10235,6 +10327,7 @@ export function AgentWorkspace({
               ? "rejected-final"
               : "rejected"
             : "prompt";
+      supersedeBackgroundSessionTitle(sessionId, title);
       sessionTitleOverridesRef.current = {
         ...sessionTitleOverridesRef.current,
         [sessionId]: title,
