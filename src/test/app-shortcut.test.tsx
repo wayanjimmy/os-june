@@ -1481,6 +1481,45 @@ describe("App shortcuts", () => {
     }
   });
 
+  it("opens a fresh agent session on Windows while preloading the first note", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    const staleSession = {
+      id: "session-1",
+      title: "Stored session",
+      preview: "Stored session preview",
+      last_active: now,
+    };
+    window.localStorage.setItem("june:agent:last-open-session", staleSession.id);
+    mocks.listHermesSessions.mockResolvedValue([staleSession]);
+
+    try {
+      render(<App />);
+
+      expect(await screen.findByRole("heading", { name: HERO_GREETING })).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "New session" })).toHaveAttribute(
+        "data-active",
+        "true",
+      );
+      expect(screen.getByRole("button", { name: "New session" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      expect(screen.getByRole("region", { name: "Sessions" })).toHaveAttribute(
+        "data-active",
+        "true",
+      );
+      expect(screen.queryByRole("button", { name: "New note" })).not.toBeInTheDocument();
+      expect(screen.queryByDisplayValue("First note")).not.toBeInTheDocument();
+      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    } finally {
+      window.localStorage.removeItem("june:agent:last-open-session");
+      restoreNavigator();
+    }
+  });
+
   it("returns to the note after opening its folder from the note header", async () => {
     const user = userEvent.setup();
     const first = note({
@@ -1540,7 +1579,7 @@ describe("App shortcuts", () => {
     expect(mocks.createNote).not.toHaveBeenCalled();
   });
 
-  it("uses Windows dictation sign-in copy and opens meeting notes after sign-in", async () => {
+  it("uses Windows dictation sign-in copy and opens a fresh agent session after sign-in", async () => {
     const user = userEvent.setup();
     const restoreNavigator = stubNavigatorPlatform(
       "Win32",
@@ -1562,8 +1601,15 @@ describe("App shortcuts", () => {
 
       await user.click(screen.getByRole("button", { name: "Continue with OpenSoftware" }));
 
-      expect(await screen.findByRole("button", { name: "New note" })).toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: HERO_GREETING })).not.toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: HERO_GREETING })).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "New session" })).toHaveAttribute(
+        "data-active",
+        "true",
+      );
+      expect(screen.getByRole("button", { name: "New session" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
     } finally {
       restoreNavigator();
     }
