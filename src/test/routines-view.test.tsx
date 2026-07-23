@@ -473,6 +473,20 @@ describe("RoutinesView templates and creation", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "New routine" })).toBeEnabled());
   });
 
+  it("allows retrying when native access support is missing from the status", async () => {
+    tauriMocks.hermesBridgeStatus.mockResolvedValueOnce({});
+    mocks.listRoutines.mockResolvedValue([]);
+    renderView();
+
+    expect(
+      await screen.findByText("June could not check routine access support. Try again."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New routine" })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "New routine" })).toBeEnabled());
+  });
+
   it("routes the describe path through the agent prompt, sandboxed by default", async () => {
     mocks.listRoutines.mockResolvedValue([]);
     const onCreateRoutine = vi.fn();

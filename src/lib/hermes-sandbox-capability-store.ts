@@ -79,6 +79,7 @@ export const loadSandboxModeSupported = sandboxModeSupportStore.load;
 export const seedSandboxModeSupported = sandboxModeSupportStore.seedStatus;
 
 export function resetSandboxModeSupportForTests() {
+  hermesBridgeStatus.resetForTests?.();
   sandboxModeSupportStore.resetForTests();
 }
 

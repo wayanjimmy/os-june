@@ -133,6 +133,26 @@ describe("Tauri command contracts", () => {
     expect(mocks.invoke).toHaveBeenCalledTimes(2);
   });
 
+  it("does not coalesce a status request across a test reset", async () => {
+    const resolvers: Array<(status: { running: boolean }) => void> = [];
+    mocks.invoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+
+    const beforeReset = hermesBridgeStatus();
+    hermesBridgeStatus.resetForTests();
+    const afterReset = hermesBridgeStatus();
+
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    resolvers[1]?.({ running: false });
+    await expect(afterReset).resolves.toEqual({ running: false });
+    resolvers[0]?.({ running: true });
+    await expect(beforeReset).resolves.toEqual({ running: true });
+  });
+
   it("opens the June community through a dedicated command", async () => {
     await juneOpenCommunityPage();
 

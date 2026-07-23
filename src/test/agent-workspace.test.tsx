@@ -45,6 +45,7 @@ import { readSessionModelSelections } from "../lib/hermes-session-model-selectio
 import { reserveHermesSessionDispatch } from "../lib/hermes-session-dispatch-mutex";
 import { resetHermesActiveSessionSnapshotsForTests } from "../lib/hermes-active-session-snapshots";
 import { resetSandboxModeSupportForTests } from "../lib/hermes-sandbox-capability-store";
+import { rememberSessionMode, sessionUnrestricted } from "../lib/agent-session-modes";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
 const HERO_GREETING = new RegExp(
@@ -7244,6 +7245,55 @@ describe("AgentWorkspace", () => {
     });
     // The fork opened instead of surfacing the raw 404.
     expect(await screen.findByText(/Branched from/)).toBeInTheDocument();
+  });
+
+  it("runs a Windows branch in Full mode without widening its stored preference", async () => {
+    rememberSessionMode("session-1", false);
+    rememberSessionMode("session-fork", false);
+    mocks.hermesBridgeStatus.mockResolvedValue({
+      running: true,
+      connection: {
+        port: 61234,
+        wsUrl: "ws://127.0.0.1:61234",
+        fullMode: true,
+      },
+      sandboxModeSupported: false,
+    });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "Draft the launch plan",
+        timestamp: "2026-06-12T10:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here is the launch plan.",
+        timestamp: "2026-06-12T10:00:05Z",
+      },
+    ]);
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.branch") {
+        return Promise.resolve({ new_session_id: "session-fork" });
+      }
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-fork" });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const answerTurn = (await screen.findByText("Here is the launch plan.")).closest("article");
+    expect(answerTurn).not.toBeNull();
+    await userEvent.click(
+      within(answerTurn as HTMLElement).getByRole("button", { name: "Branch from here" }),
+    );
+
+    expect(await screen.findByText(/Branched from/)).toBeInTheDocument();
+    expect(mocks.startHermesBridge).not.toHaveBeenCalled();
+    expect(sessionUnrestricted("session-fork")).toBe(false);
   });
 
   it("ignores duplicate branch clicks while the first fork is still in flight", async () => {

@@ -20,7 +20,7 @@ import { seedSandboxModeSupportedForTests } from "../lib/hermes-sandbox-capabili
 
 const SECRET_VALUE = secretFixture._secretValuePlaceholder;
 
-beforeEach(() => seedSandboxModeSupportedForTests(undefined));
+beforeEach(() => seedSandboxModeSupportedForTests(true));
 
 function sudoPart(
   overrides: Partial<Extract<AgentChatPart, { type: "sudo" }>> = {},

@@ -11,7 +11,11 @@ import {
   type BranchSessionResult,
 } from "../../lib/hermes-session-branch";
 import { messageFromError } from "../../lib/errors";
-import { effectiveSessionFullMode, rememberSessionMode } from "../../lib/agent-session-modes";
+import {
+  effectiveSessionFullMode,
+  rememberSessionMode,
+  sessionUnrestricted,
+} from "../../lib/agent-session-modes";
 import { isSessionGoneError } from "./agent-workspace-errors";
 import {
   rememberComposerDraft,
@@ -88,9 +92,10 @@ export function createBranchSessionAction(dependencies: createBranchSessionActio
       id: BRANCH_TOAST_ID,
     });
     let branched = false;
-    const unrestricted = effectiveSessionFullMode(modeSessionId, sandboxModeSupported);
+    const requestedUnrestricted = sessionUnrestricted(modeSessionId);
+    const effectiveFullMode = effectiveSessionFullMode(modeSessionId, sandboxModeSupported);
     try {
-      const gateway = await ensureHermesGateway(unrestricted);
+      const gateway = await ensureHermesGateway(effectiveFullMode);
       const methods = createHermesMethods(gateway);
       const sourceMessages = hermesSessionMessages[sessionId] ?? [];
       const sourcePendingMessages = pendingHermesMessagesRef.current[sessionId] ?? [];
@@ -231,7 +236,7 @@ export function createBranchSessionAction(dependencies: createBranchSessionActio
       });
       // Carry the source session's write-access mode onto the fork so its
       // follow-ups route to the matching runtime (mirrors session.create).
-      rememberSessionMode(result.sessionId, unrestricted);
+      rememberSessionMode(result.sessionId, requestedUnrestricted);
       const branchDraftKey = sessionComposerDraftKey(result.sessionId);
       composerDraftKeyRef.current = branchDraftKey;
       restoredComposerDraftKeyRef.current = branchDraftKey;

@@ -154,7 +154,9 @@ export function RoutinesView({
   const loadSandboxCapability = useCallback(async () => {
     try {
       const supported = await loadSandboxModeSupported();
-      setCapabilityError(null);
+      setCapabilityError(
+        supported === undefined ? "June could not check routine access support. Try again." : null,
+      );
       return supported;
     } catch {
       setCapabilityError("June could not check routine access support. Try again.");

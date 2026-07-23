@@ -47,10 +47,11 @@ export function useAgentSessionEvents(dependencies: useAgentSessionEventsDepende
     void (async () => {
       try {
         let status = await hermesBridgeStatus();
-        seedSandboxModeSupported(status);
         if (cancelled) return;
+        seedSandboxModeSupported(status);
         if (!status.running) {
           status = await startHermesBridge(undefined, false);
+          if (cancelled) return;
           seedSandboxModeSupported(status);
         }
         if (cancelled) return;

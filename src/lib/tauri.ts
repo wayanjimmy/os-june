@@ -1209,6 +1209,10 @@ export async function hermesBridgeStatus() {
   return request;
 }
 
+hermesBridgeStatus.resetForTests = () => {
+  pendingHermesBridgeStatus = undefined;
+};
+
 export async function ensureHermesBridgeGateway() {
   return invoke<void>("ensure_hermes_bridge_gateway");
 }
