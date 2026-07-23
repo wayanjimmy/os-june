@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AgentCliAccessCard,
   ApprovalPart,
@@ -19,6 +19,8 @@ import secretFixture from "../lib/hermes-control-plane/fixtures/secret-request-r
 import { seedSandboxModeSupportedForTests } from "../lib/hermes-sandbox-capability-store";
 
 const SECRET_VALUE = secretFixture._secretValuePlaceholder;
+
+beforeEach(() => seedSandboxModeSupportedForTests(undefined));
 
 function sudoPart(
   overrides: Partial<Extract<AgentChatPart, { type: "sudo" }>> = {},
