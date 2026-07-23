@@ -148,6 +148,8 @@ import { SetupSnapshotSection } from "./SetupSnapshotSection";
 import { SkillBundlesSection } from "./SkillBundlesSection";
 import { SkillsHubSection } from "./SkillsHubSection";
 import { TeamTapsSection } from "./TeamTapsSection";
+import { SETTINGS_TABS, type SettingsTab } from "./settings-config";
+export { SETTINGS_TABS, type SettingsTab } from "./settings-config";
 import { ToolsetsSection } from "./ToolsetsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MemorySettingsSection } from "./MemorySettingsSection";
@@ -347,61 +349,6 @@ async function activeProfileTextModel(profileName: string): Promise<string | und
 }
 
 const MIC_TEST_DURATION_SECONDS = 5;
-
-export type SettingsTab =
-  | "general"
-  | "appearance"
-  | "billing"
-  | "shortcuts"
-  | "dictation"
-  | "audio"
-  | "models"
-  | "agent"
-  | "memory"
-  | "connectors"
-  | "skills"
-  | "external-dirs"
-  | "skill-review"
-  | "mcp"
-  | "mcp-catalog"
-  | "mcp-diagnostics"
-  | "mcp-security"
-  | "skills-hub"
-  | "taps"
-  | "toolsets"
-  | "bundles"
-  | "profile-builder"
-  | "integrations-health"
-  | "import-export"
-  | "about";
-
-export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
-  { id: "general", label: "General" },
-  { id: "appearance", label: "Appearance" },
-  { id: "billing", label: "Billing" },
-  { id: "shortcuts", label: "Shortcuts" },
-  { id: "dictation", label: "Dictation" },
-  { id: "audio", label: "Audio" },
-  { id: "models", label: "Models" },
-  { id: "agent", label: "Agent" },
-  { id: "memory", label: "Memory" },
-  { id: "connectors", label: "Plugins" },
-  { id: "skills", label: "Installed skills" },
-  { id: "external-dirs", label: "External skill directories" },
-  { id: "skill-review", label: "Pending skill changes" },
-  { id: "mcp", label: "MCP servers" },
-  { id: "mcp-catalog", label: "MCP catalog" },
-  { id: "mcp-diagnostics", label: "MCP diagnostics" },
-  { id: "mcp-security", label: "MCP security" },
-  { id: "skills-hub", label: "Skills hub" },
-  { id: "taps", label: "Team skill taps" },
-  { id: "toolsets", label: "Toolsets" },
-  { id: "bundles", label: "Bundles" },
-  { id: "profile-builder", label: "Profiles" },
-  { id: "integrations-health", label: "Integrations health" },
-  { id: "import-export", label: "Import / export" },
-  { id: "about", label: "About" },
-];
 
 /**
  * The shared settings page header (Codex-app style): a large serif page title
@@ -2238,6 +2185,7 @@ export function AppSettings({
                 <div className="settings-rows">
                   <ModelRow
                     mode="transcription"
+                    beforeDivider
                     title="Transcription"
                     description="Speech-to-text for note recordings and dictation."
                     value={modelValueForMode("transcription")}
@@ -2323,6 +2271,7 @@ export function AppSettings({
                 <div className="settings-rows">
                   <ModelRow
                     mode="generation"
+                    beforeDivider={providerSettings.generationModel !== "open-software/auto"}
                     title="Text"
                     description="Used for generated notes and agent responses."
                     value={modelValueForMode("generation")}
@@ -2350,7 +2299,7 @@ export function AppSettings({
                     readOnly={showingActiveProfileModels}
                   />
                   {providerSettings.generationModel === "open-software/auto" ? (
-                    <div className="settings-row">
+                    <div className="settings-row settings-row-before-divider">
                       <div className="settings-row-info">
                         <span className="settings-row-title">Auto preference</span>
                         <span className="settings-row-description">
@@ -2583,6 +2532,7 @@ export function AppSettings({
                     {IMAGE_GENERATION_ENABLED ? (
                       <ModelRow
                         mode="image"
+                        beforeDivider={!VIDEO_GENERATION_ENABLED}
                         title="Image"
                         description="Used when you generate an image from chat."
                         value={modelValueForMode("image")}
@@ -2606,6 +2556,7 @@ export function AppSettings({
                     {VIDEO_GENERATION_ENABLED ? (
                       <ModelRow
                         mode="video"
+                        beforeDivider
                         title="Video"
                         description="Used when you generate a video from chat."
                         value={modelValueForMode("video")}
@@ -3280,6 +3231,7 @@ function numericPayload(value: unknown) {
 
 function ModelRow({
   mode,
+  beforeDivider = false,
   title,
   description,
   value,
@@ -3301,6 +3253,7 @@ function ModelRow({
   summarySuppressed,
 }: {
   mode: ProviderModelMode;
+  beforeDivider?: boolean;
   title: string;
   description: string;
   value: string;
@@ -3324,7 +3277,11 @@ function ModelRow({
   const model = selectedModel(options, value);
   const modelLabel = `${title.toLowerCase()} model`;
   return (
-    <div className="settings-row settings-model-row">
+    <div
+      className={`settings-row settings-model-row${
+        beforeDivider ? " settings-row-before-divider" : ""
+      }`}
+    >
       <div className="settings-row-info">
         <h3 className="settings-row-title">{title}</h3>
         <p className="settings-row-description">{description}</p>

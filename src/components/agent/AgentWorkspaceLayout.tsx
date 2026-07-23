@@ -35,11 +35,11 @@ export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLay
     compactSessionId,
     composer,
     composerClearance,
+    composerHasContent,
     compressSessionContext,
     deleteSelectedHermesSession,
     detailContent,
     downloadArtifact,
-    draft,
     fetchSessionUsage,
     galleryErrors,
     generationModel,
@@ -279,7 +279,7 @@ export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLay
               <div
                 className="agent-hero-chips"
                 data-phase={heroChipPhase}
-                data-hidden={draft.trim() ? "true" : undefined}
+                data-hidden={composerHasContent ? "true" : undefined}
                 onMouseEnter={() => {
                   heroChipsHoverRef.current = true;
                 }}

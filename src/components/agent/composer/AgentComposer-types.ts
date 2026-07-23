@@ -31,6 +31,8 @@ export type RenderAgentComposerDependencies = {
   composerBoxRef: React.MutableRefObject<HTMLDivElement | null>;
   composerDraftKeyRef: React.MutableRefObject<string | null>;
   composerEditorRef: React.MutableRefObject<ComposerEditorHandle | null>;
+  composerHasContent: boolean;
+  setComposerHasContent: React.Dispatch<React.SetStateAction<boolean>>;
   onComposerFocusChange: (focused: boolean) => void;
   composerInSteerState: boolean;
   composerModelFlyout: ModelPickerFlyout;
@@ -44,7 +46,6 @@ export type RenderAgentComposerDependencies = {
   composerTiptapEditorRef: React.MutableRefObject<TiptapEditor | null>;
   confirmUnrestricted: boolean;
   creditActionsDisabledReason: string | undefined;
-  draft: string;
   draftRef: React.MutableRefObject<string>;
   dropActive: boolean;
   editOversizeComposerInput: () => void;
