@@ -1,8 +1,9 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentActivityDrawer } from "../components/agent/AgentActivityDrawer";
 import type { AgentActivityRecord } from "../lib/hermes-activity-store";
+import { seedSandboxModeSupportedForTests } from "../lib/hermes-sandbox-capability-store";
 
 const NOW = Date.UTC(2026, 5, 24, 12, 0, 30);
 
@@ -28,7 +29,6 @@ function renderDrawer(props: Partial<Parameters<typeof AgentActivityDrawer>[0]> 
       open
       records={[]}
       status="ready"
-      sandboxModeSupported
       now={NOW}
       titleForSession={() => undefined}
       onOpenSession={vi.fn()}
@@ -41,9 +41,11 @@ function renderDrawer(props: Partial<Parameters<typeof AgentActivityDrawer>[0]> 
 }
 
 describe("AgentActivityDrawer", () => {
+  beforeEach(() => seedSandboxModeSupportedForTests(true));
+
   it("hides mode pills when sandbox mode is unsupported", () => {
+    seedSandboxModeSupportedForTests(false);
     renderDrawer({
-      sandboxModeSupported: false,
       records: [record({ sessionId: "s1", mode: "unrestricted" })],
     });
     expect(screen.queryByText("Unrestricted")).not.toBeInTheDocument();

@@ -9,6 +9,7 @@ import type { AgentChatPart, AgentChatTurn } from "../../../lib/agent-chat-runti
 import { isBranchableMessageId } from "../../../lib/hermes-session-branch";
 import { isSensitiveKey, type HermesMode } from "../../../lib/hermes-control-plane";
 import type { HermesSessionMessage } from "../../../lib/tauri";
+import { useSandboxModeSupported } from "../../../lib/use-hermes-sandbox-capability";
 import { DotSpinner } from "../../DotSpinner";
 import { HoverTip } from "../../ui/HoverTip";
 import { InlineNotice } from "../../ui/InlineNotice";
@@ -153,14 +154,13 @@ export function BranchFromHereAction({
 export function SudoPart({
   onSudo,
   part,
-  sandboxModeSupported,
   submitting,
 }: {
   onSudo: (part: Extract<AgentChatPart, { type: "sudo" }>, approved: boolean) => void;
   part: Extract<AgentChatPart, { type: "sudo" }>;
-  sandboxModeSupported?: boolean;
   submitting?: "approve" | "deny";
 }) {
+  const sandboxModeSupported = useSandboxModeSupported();
   const disabled = Boolean(submitting) || part.status !== "pending";
   // A card that has actually resolved collapses to a receipt row. A submission
   // still in flight (submitting set, status pending) keeps the card.

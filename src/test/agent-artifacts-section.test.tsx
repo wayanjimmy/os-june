@@ -1,8 +1,9 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentArtifactsSection } from "../components/agent/AgentActivityDrawer";
 import type { AgentArtifact } from "../lib/hermes-artifact-store";
+import { seedSandboxModeSupportedForTests } from "../lib/hermes-sandbox-capability-store";
 
 function artifact(
   partial: Partial<AgentArtifact> & Pick<AgentArtifact, "id" | "path">,
@@ -19,17 +20,12 @@ function artifact(
 }
 
 function renderSection(props: Partial<Parameters<typeof AgentArtifactsSection>[0]> = {}) {
-  return render(
-    <AgentArtifactsSection
-      artifacts={[]}
-      onOpenArtifact={vi.fn()}
-      sandboxModeSupported
-      {...props}
-    />,
-  );
+  return render(<AgentArtifactsSection artifacts={[]} onOpenArtifact={vi.fn()} {...props} />);
 }
 
 describe("AgentArtifactsSection", () => {
+  beforeEach(() => seedSandboxModeSupportedForTests(true));
+
   it("renders nothing when there are no artifacts", () => {
     const { container } = renderSection({ artifacts: [] });
     expect(container).toBeEmptyDOMElement();
@@ -70,8 +66,8 @@ describe("AgentArtifactsSection", () => {
   });
 
   it("labels files as local paths when sandbox mode is unsupported", () => {
+    seedSandboxModeSupportedForTests(false);
     renderSection({
-      sandboxModeSupported: false,
       artifacts: [artifact({ id: "a1", path: "/tmp/x.txt", mode: "sandboxed" })],
     });
     expect(screen.getByText("Local path")).toBeInTheDocument();

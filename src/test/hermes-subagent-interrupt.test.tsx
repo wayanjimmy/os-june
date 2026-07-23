@@ -1,9 +1,10 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentActivityDrawer } from "../components/agent/AgentActivityDrawer";
 import type { AgentActivityRecord } from "../lib/hermes-activity-store";
 import type { BackgroundHermesActivity } from "../lib/hermes-control-plane";
+import { seedSandboxModeSupportedForTests } from "../lib/hermes-sandbox-capability-store";
 
 /**
  * Feature 13 — subagent interrupt / stop control. Feature 12 ships the
@@ -51,7 +52,6 @@ function renderDrawer(props: Partial<Parameters<typeof AgentActivityDrawer>[0]> 
       open
       records={[]}
       status="ready"
-      sandboxModeSupported
       now={NOW}
       titleForSession={() => undefined}
       onOpenSession={vi.fn()}
@@ -70,6 +70,8 @@ function subagentRow(container: HTMLElement, id: string): HTMLElement {
 }
 
 describe("AgentActivityDrawer — subagent interrupt (feature 13)", () => {
+  beforeEach(() => seedSandboxModeSupportedForTests(true));
+
   it("renders no stop button on a subagent row when no handler is wired", () => {
     const { container } = renderDrawer({
       records: [

@@ -130,7 +130,6 @@ export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLay
         </button>
       ) : null}
       <AgentActivityDrawer
-        sandboxModeSupported={sandboxModeSupported}
         open={activityDrawerOpen}
         records={activityRecords}
         status={activityStatus}
@@ -145,7 +144,6 @@ export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLay
         onClose={() => setActivityDrawerOpen(false)}
         footer={
           <AgentArtifactsSection
-            sandboxModeSupported={sandboxModeSupported}
             artifacts={timelineArtifacts}
             onOpenArtifact={openTimelineArtifact}
           />

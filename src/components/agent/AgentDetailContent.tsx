@@ -5,6 +5,7 @@ import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import type { AgentChatTurn } from "../../lib/agent-chat-runtime";
 import { hermesTraceBuffer } from "../../lib/hermes-trace-buffer";
 import { upstreamProviderRecoveryStore } from "../../lib/upstream-provider-recovery";
+import { useSandboxModeSupported } from "../../lib/use-hermes-sandbox-capability";
 import { AgentThinking } from "./AgentThinking";
 import type { RenderAgentDetailContentDependencies } from "./AgentDetailContent-types";
 import { HermesTracePanel } from "./HermesTracePanel";
@@ -94,7 +95,6 @@ function AgentChatTranscriptRows({
 export function AgentDetailContent(dependencies: RenderAgentDetailContentDependencies) {
   const {
     activeThinkingKey,
-    sandboxModeSupported,
     approvalSubmitting,
     branchFromMessage,
     branchingMessageId,
@@ -148,6 +148,7 @@ export function AgentDetailContent(dependencies: RenderAgentDetailContentDepende
     workingSessionIds,
     workingTaskIds,
   } = dependencies;
+  const sandboxModeSupported = useSandboxModeSupported();
 
   const stableBranchFromMessage = useStableEvent(branchFromMessage);
   const stableCancelTask = useStableEvent(cancelTask);
@@ -307,7 +308,6 @@ export function AgentDetailContent(dependencies: RenderAgentDetailContentDepende
         <AgentChatTurnRow
           key={turn.id}
           turn={turn}
-          sandboxModeSupported={sandboxModeSupported}
           activeThinkingKey={activeThinkingKey}
           artifacts={turnArtifacts.get(turn.id)}
           approvalSubmitting={approvalSubmitting}
@@ -442,7 +442,6 @@ export function AgentDetailContent(dependencies: RenderAgentDetailContentDepende
       <AgentChatTurnRow
         key={turn.id}
         turn={turn}
-        sandboxModeSupported={sandboxModeSupported}
         activeThinkingKey={activeThinkingKey}
         artifacts={turnArtifacts.get(turn.id)}
         approvalSubmitting={approvalSubmitting}
@@ -479,7 +478,6 @@ export function AgentDetailContent(dependencies: RenderAgentDetailContentDepende
       onTaskSecret,
       onTaskSudo,
       pinTranscriptAfterVisibleReveal,
-      sandboxModeSupported,
       secretSubmitting,
       setThinkingOpen,
       stableDownloadArtifact,

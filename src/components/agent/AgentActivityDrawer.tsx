@@ -32,6 +32,7 @@ import { nonEmpty } from "../../lib/hermes-control-plane";
 import type { AgentActivityPhase, AgentActivityRecord } from "../../lib/hermes-activity-store";
 import { toolActivityLabel } from "../../lib/agent-tool-labels";
 import type { AgentArtifact, ArtifactAction, ArtifactKind } from "../../lib/hermes-artifact-store";
+import { useSandboxModeSupported } from "../../lib/use-hermes-sandbox-capability";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { fileTypeIconComponent } from "./FileTypeIcon";
 
@@ -67,7 +68,6 @@ export type SubagentStopTarget = { sessionId: string; subagentId: string };
  * store's extension notes.
  */
 export function AgentActivityDrawer({
-  sandboxModeSupported,
   open,
   records,
   status,
@@ -82,7 +82,6 @@ export function AgentActivityDrawer({
   onClose,
   footer,
 }: {
-  sandboxModeSupported?: boolean;
   /** Whether the drawer is visible. Closed → renders nothing. */
   open: boolean;
   /** Aggregated session rows, newest-first (already sorted by the store). */
@@ -129,6 +128,7 @@ export function AgentActivityDrawer({
    */
   footer?: JSX.Element | null;
 }) {
+  const sandboxModeSupported = useSandboxModeSupported();
   // Feature 13: optimistic "stopping" overlay + destructive-confirm flow for
   // per-subagent interrupts. Lives here (not per row) so the overlay survives
   // re-renders/reordering and a single dialog mounts for the whole drawer.
@@ -745,14 +745,13 @@ function formatAge(lastEventAt: number, now: number): string {
 export function AgentArtifactsSection({
   artifacts,
   onOpenArtifact,
-  sandboxModeSupported,
 }: {
   /** This session's artifacts, newest-first (already sorted by the store). */
   artifacts: AgentArtifact[];
   /** Open the artifact in the host's existing preview/download flow. */
   onOpenArtifact: (artifact: AgentArtifact) => void;
-  sandboxModeSupported?: boolean;
 }) {
+  const sandboxModeSupported = useSandboxModeSupported();
   if (artifacts.length === 0) return null;
 
   return (

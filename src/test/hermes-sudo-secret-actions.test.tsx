@@ -16,6 +16,7 @@ import {
 import type { AgentChatPart, AgentChatTurn } from "../lib/agent-chat-runtime";
 import { createHermesMethods } from "../lib/hermes-control-plane";
 import secretFixture from "../lib/hermes-control-plane/fixtures/secret-request-response.json";
+import { seedSandboxModeSupportedForTests } from "../lib/hermes-sandbox-capability-store";
 
 const SECRET_VALUE = secretFixture._secretValuePlaceholder;
 
@@ -50,6 +51,7 @@ function secretPart(
 
 describe("SudoPart card", () => {
   it("does not claim a sandbox mode before capability resolves", async () => {
+    seedSandboxModeSupportedForTests(undefined);
     render(<SudoPart part={sudoPart({ mode: "sandboxed" })} onSudo={() => {}} />);
 
     expect(screen.queryByText(/sandboxed|unrestricted|full access/i)).not.toBeInTheDocument();
@@ -58,13 +60,8 @@ describe("SudoPart card", () => {
   });
 
   it("shows the Windows full-access warning without a mode badge when sandbox mode is unsupported", async () => {
-    render(
-      <SudoPart
-        part={sudoPart({ mode: "unrestricted" })}
-        onSudo={() => {}}
-        sandboxModeSupported={false}
-      />,
-    );
+    seedSandboxModeSupportedForTests(false);
+    render(<SudoPart part={sudoPart({ mode: "unrestricted" })} onSudo={() => {}} />);
     expect(screen.queryByText("Unrestricted")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /details/i }));
     expect(
@@ -73,7 +70,8 @@ describe("SudoPart card", () => {
   });
 
   it("blocks the session with an explicit approve/deny card showing the reason and mode", async () => {
-    render(<SudoPart part={sudoPart()} onSudo={() => {}} sandboxModeSupported />);
+    seedSandboxModeSupportedForTests(true);
+    render(<SudoPart part={sudoPart()} onSudo={() => {}} />);
 
     // The prose reason and the exact command both show by default — SECURITY:
     // the command must be visible at the decision point, since Approve is live
@@ -489,13 +487,8 @@ describe("ClarifyPart", () => {
 
 describe("SudoPart resolved", () => {
   it("collapses to a one-line receipt row that expands to the command and mode", () => {
-    render(
-      <SudoPart
-        part={sudoPart({ status: "resolved", approved: true })}
-        onSudo={() => {}}
-        sandboxModeSupported
-      />,
-    );
+    seedSandboxModeSupportedForTests(true);
+    render(<SudoPart part={sudoPart({ status: "resolved", approved: true })} onSudo={() => {}} />);
     const row = resolvedRow();
     expect(row).not.toBeNull();
     expect(within(row as HTMLElement).getByText("Approved")).toBeInTheDocument();
@@ -636,11 +629,12 @@ describe("action card refinements", () => {
   });
 
   it("surfaces the sudo execution mode on the COLLAPSED card, before the full notice is expanded", () => {
+    seedSandboxModeSupportedForTests(true);
     // Blast radius must read at the decision point: the collapsed unrestricted
     // card carries a warning badge even though the full InlineNotice lives in the
     // body.
     const { unmount } = render(
-      <SudoPart part={sudoPart({ mode: "unrestricted" })} onSudo={() => {}} sandboxModeSupported />,
+      <SudoPart part={sudoPart({ mode: "unrestricted" })} onSudo={() => {}} />,
     );
     // The header is a plain row; the Details disclosure owns the collapsed state.
     expect(screen.queryByRole("button", { name: /privilege escalation requested/i })).toBeNull();
@@ -660,15 +654,14 @@ describe("action card refinements", () => {
 
     // Sandboxed is the safe default: no collapsed badge (the full mode line still
     // appears in Details).
-    render(
-      <SudoPart part={sudoPart({ mode: "sandboxed" })} onSudo={() => {}} sandboxModeSupported />,
-    );
+    render(<SudoPart part={sudoPart({ mode: "sandboxed" })} onSudo={() => {}} />);
     expect(document.querySelector(".agent-sudo-mode-badge")).toBeNull();
   });
 
   it("pending sudo shows the execution mode as a tone-aware InlineNotice in the expanded body", async () => {
+    seedSandboxModeSupportedForTests(true);
     const { unmount } = render(
-      <SudoPart part={sudoPart({ mode: "unrestricted" })} onSudo={() => {}} sandboxModeSupported />,
+      <SudoPart part={sudoPart({ mode: "unrestricted" })} onSudo={() => {}} />,
     );
     await userEvent.click(screen.getByRole("button", { name: /details/i }));
     const warnNotice = document.querySelector(".agent-sudo-mode-notice");
@@ -676,9 +669,7 @@ describe("action card refinements", () => {
     expect(warnNotice?.textContent).toMatch(/unrestricted/i);
     unmount();
 
-    render(
-      <SudoPart part={sudoPart({ mode: "sandboxed" })} onSudo={() => {}} sandboxModeSupported />,
-    );
+    render(<SudoPart part={sudoPart({ mode: "sandboxed" })} onSudo={() => {}} />);
     await userEvent.click(screen.getByRole("button", { name: /details/i }));
     const infoNotice = document.querySelector(".agent-sudo-mode-notice");
     expect(infoNotice?.getAttribute("data-tone")).toBe("info");
@@ -686,13 +677,8 @@ describe("action card refinements", () => {
   });
 
   it("the resolved sudo receipt shows the mode as plain text (no notice chrome)", () => {
-    render(
-      <SudoPart
-        part={sudoPart({ status: "resolved", approved: true })}
-        onSudo={() => {}}
-        sandboxModeSupported
-      />,
-    );
+    seedSandboxModeSupportedForTests(true);
+    render(<SudoPart part={sudoPart({ status: "resolved", approved: true })} onSudo={() => {}} />);
     const row = resolvedRow();
     // Receipts stay quiet: plain text mode line, never an InlineNotice.
     expect(row?.querySelector(".agent-sudo-mode-notice")).toBe(null);

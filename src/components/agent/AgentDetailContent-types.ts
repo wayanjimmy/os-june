@@ -14,7 +14,6 @@ import type * as React from "react";
 
 export type RenderAgentDetailContentDependencies = {
   activeThinkingKey: string | undefined;
-  sandboxModeSupported?: boolean;
   approvalSubmitting: Partial<Record<string, AgentApprovalChoice>>;
   branchFromMessage: (
     sessionId: string | undefined,

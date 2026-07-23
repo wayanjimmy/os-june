@@ -2984,7 +2984,6 @@ export function AgentWorkspace({
     <AgentDetailContent
       {...{
         activeThinkingKey,
-        sandboxModeSupported,
         approvalSubmitting,
         branchFromMessage,
         branchingMessageId,

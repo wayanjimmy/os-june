@@ -14,6 +14,7 @@ import {
 } from "../../../lib/agent-cli-access";
 import { hasBrowserAccessRequest, stripBrowserAccessRequest } from "../../../lib/browser-access";
 import { hermesBridgeFilePreview } from "../../../lib/tauri";
+import { useSandboxModeSupported } from "../../../lib/use-hermes-sandbox-capability";
 import type { FundingTier } from "../../account/FundingNotice";
 import { CopyStateIcon } from "../../ui/CopyStateIcon";
 import { HoverTip } from "../../ui/HoverTip";
@@ -93,7 +94,6 @@ export type AgentChatTurnRowProps = {
   /** The message id a branch is currently in flight for, so its action shows a
    * working/disabled state. */
   branchingMessageId?: string | null;
-  sandboxModeSupported?: boolean;
   turn: AgentChatTurn;
 };
 
@@ -129,9 +129,9 @@ export const AgentChatTurnRow = memo(function AgentChatTurnRow({
   onVisibleMarkdownChange,
   onBranch,
   branchingMessageId,
-  sandboxModeSupported,
   turn,
 }: AgentChatTurnRowProps) {
+  const sandboxModeSupported = useSandboxModeSupported();
   const textParts = turn.parts.filter(
     (part): part is Extract<AgentChatPart, { type: "text" }> => part.type === "text",
   );
@@ -421,7 +421,7 @@ export const AgentChatTurnRow = memo(function AgentChatTurnRow({
                     repairProse
                   />
                 ) : null}
-                {hasAgentCliAccessRequest(part.text) && sandboxModeSupported !== false ? (
+                {hasAgentCliAccessRequest(part.text) && sandboxModeSupported === true ? (
                   <AgentCliAccessCard
                     cliAccess={cliAccess}
                     dismissed={dismissedAccessRequestCards.has(
@@ -475,7 +475,6 @@ export const AgentChatTurnRow = memo(function AgentChatTurnRow({
               part={part}
               submitting={sudoSubmitting[part.id]}
               onSudo={onSudo}
-              sandboxModeSupported={sandboxModeSupported}
             />
           ) : part.type === "secret" ? (
             <SecretPart
