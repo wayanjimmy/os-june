@@ -19,6 +19,7 @@ import {
 import { DATE_FORMAT_STORAGE_KEY } from "../lib/date-format";
 import { setStoredFontScale } from "../lib/font-scale";
 import { setExperimentalFlags } from "../lib/experimental-flags";
+import { resetSandboxModeSupportForTests } from "../lib/hermes-sandbox-capability-store";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -300,6 +301,7 @@ describe("AppSettings", () => {
   beforeEach(() => {
     clearMaxGrantWait();
     vi.clearAllMocks();
+    resetSandboxModeSupportForTests();
     localStorage.clear();
     resetActiveHermesProfileForTests();
     localState = { baseUrl: "", modelId: "", apiKey: "", enabled: false };
@@ -4864,6 +4866,30 @@ describe("AppSettings", () => {
     await user.click(cliSwitch);
     await waitFor(() => expect(mocks.setHermesAgentCliAccess).toHaveBeenCalledWith(false));
     expect(cliSwitch).toHaveAttribute("aria-checked", "false");
+  });
+
+  it.each([
+    ["unsupported", { running: true, sandboxModeSupported: false }],
+    ["unresolved", { running: true }],
+  ])("hides Agent CLI access when sandbox mode support is %s", async (_state, status) => {
+    const user = userEvent.setup();
+    mocks.hermesBridgeStatus.mockResolvedValue(status);
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Agent" }));
+    await waitFor(() => expect(mocks.hermesBridgeStatus).toHaveBeenCalled());
+    expect(screen.queryByText("Agent CLI access", { selector: "h3" })).not.toBeInTheDocument();
   });
 
   it("retries the Agent CLI access status after a transient load failure", async () => {

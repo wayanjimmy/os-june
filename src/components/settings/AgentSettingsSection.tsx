@@ -10,7 +10,6 @@ import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { HoverTip } from "../ui/HoverTip";
 import {
   hermesAgentCliAccess,
-  hermesBridgeStatus,
   hermesBridgeFilesystemSnapshot,
   hermesBridgeMessagingPlatforms,
   agentHudHide,
@@ -25,6 +24,7 @@ import {
   type JuneCharacterStatus,
   type FolderDto,
 } from "../../lib/tauri";
+import { useSandboxModeSupported } from "../../lib/use-hermes-sandbox-capability";
 import {
   AGENT_HUD_VISIBILITY_CHANGED_EVENT,
   getAgentHudEnabled,
@@ -89,19 +89,7 @@ export function AgentSettingsSection({
   const [cliAccessEnabled, setCliAccessEnabled] = useState<boolean | null>(null);
   const [cliAccessSaving, setCliAccessSaving] = useState(false);
   const [cliAccessLoadFailed, setCliAccessLoadFailed] = useState(false);
-  const [sandboxModeSupported, setSandboxModeSupported] = useState<boolean>();
-
-  useEffect(() => {
-    let cancelled = false;
-    void hermesBridgeStatus()
-      .then((status) => {
-        if (!cancelled) setSandboxModeSupported(status.sandboxModeSupported);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const sandboxModeSupported = useSandboxModeSupported();
   const [projectImportOpen, setProjectImportOpen] = useState(false);
   const linkedProjectCount = folders.filter((folder) => folder.localPath).length;
 
