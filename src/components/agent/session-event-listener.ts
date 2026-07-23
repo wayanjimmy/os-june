@@ -1,9 +1,10 @@
-import { dispatchAgentSessionStatus } from "../../lib/agent-events";
+import { dispatchAgentSessionStatus, type AgentSessionStatusDetail } from "../../lib/agent-events";
 import { markAgentRunSucceeded } from "../../lib/agent-run-monitor";
 import { HermesGatewayClient } from "../../lib/hermes-gateway";
 import {
   classifyHermesEvent,
   hermesModeFor,
+  isHermesStreamDelta,
   isTerminalHermesEvent,
 } from "../../lib/hermes-control-plane";
 import { unsupportedEventStore } from "../../lib/hermes-unsupported-events";
@@ -24,13 +25,6 @@ import { createLeadingTrailingMicrobatch } from "../../lib/trailing-microbatch";
 import type { createSessionEventListenerDependencies } from "./session-event-listener-types";
 
 const HERMES_STREAM_STATE_BATCH_INTERVAL_MS = 50;
-
-function isHermesStreamDelta(event: ReturnType<typeof classifyHermesEvent>) {
-  return (
-    (event.kind === "transcript" && !event.complete && event.delta !== undefined) ||
-    (event.kind === "reasoning" && !event.full)
-  );
-}
 
 export function createSessionEventListener(dependencies: createSessionEventListenerDependencies) {
   const {
@@ -73,6 +67,12 @@ export function createSessionEventListener(dependencies: createSessionEventListe
       () => setLiveEvents(liveEventsRef.current),
       HERMES_STREAM_STATE_BATCH_INTERVAL_MS,
     );
+    let pendingStreamStatus: AgentSessionStatusDetail | undefined;
+    const streamStatusBatch = createLeadingTrailingMicrobatch(() => {
+      const detail = pendingStreamStatus;
+      pendingStreamStatus = undefined;
+      if (detail) dispatchAgentSessionStatus(detail);
+    }, HERMES_STREAM_STATE_BATCH_INTERVAL_MS);
     const removeListener = gateway.onEvent((event) => {
       if (event.session_id !== runtimeSessionId && event.session_id !== storedSessionId) return;
       const liveEvent = { ...event, receivedAt: new Date().toISOString() };
@@ -174,10 +174,15 @@ export function createSessionEventListener(dependencies: createSessionEventListe
       // same burst that the streamed-markdown presenter reveals in batches.
       // Action, lifecycle, and terminal frames still paint immediately and
       // flush any text already waiting in the batch.
-      if (isHermesStreamDelta(classified)) {
+      const streamDelta = isHermesStreamDelta(classified);
+      if (streamDelta) {
         liveEventsBatch.schedule();
       } else {
         liveEventsBatch.flush();
+        // Menu-bar and Agent HUD status subscribers share the stream boundary.
+        // A semantic frame first publishes any pending "running" summary, then
+        // dispatches its own status immediately below.
+        streamStatusBatch.flushPending();
       }
       const toolEventPhase = classified.kind === "tool" ? classified.phase : undefined;
       if (toolEventPhase === "complete") {
@@ -214,13 +219,19 @@ export function createSessionEventListener(dependencies: createSessionEventListe
         } else if (status === "failed" || status === "cancelled") {
           cancelAgentRunSettlement(storedSessionId);
         }
-        dispatchAgentSessionStatus({
+        const detail = {
           sessionId: storedSessionId,
           title: sessionDisplayTitle,
           status,
           summary: agentStatusSummaryFromHermesEvent(classified, status),
           ...activityCounts,
-        });
+        };
+        if (streamDelta) {
+          pendingStreamStatus = detail;
+          streamStatusBatch.schedule();
+        } else {
+          dispatchAgentSessionStatus(detail);
+        }
       }
       if (isTerminalHermesEvent(classified)) {
         if (!computerUseRunLeaseId) {
@@ -270,6 +281,9 @@ export function createSessionEventListener(dependencies: createSessionEventListe
       // converge here. Publish any trailing delta before cancelling its timer
       // so React never remains behind the authoritative event ref.
       liveEventsBatch.flushPending();
+      // The menu bar and Agent HUD must not remain behind the authoritative
+      // activity projection when a listener is replaced or torn down.
+      streamStatusBatch.flushPending();
       if (sessionGatewayUnlistenRef.current.get(storedSessionId) === unlisten) {
         sessionGatewayUnlistenRef.current.delete(storedSessionId);
       }
