@@ -44,8 +44,12 @@ import {
 import { compactScheduleLabel, humanizeSchedule } from "../../lib/routine-schedule";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import {
+  getSandboxModeSupported,
+  loadSandboxModeSupported,
+} from "../../lib/hermes-sandbox-capability-store";
+import { useSandboxModeSupported } from "../../lib/use-hermes-sandbox-capability";
+import {
   connectorTriggerSet,
-  hermesBridgeStatus,
   routineTrustRecordRun,
   routineTrustSet,
   type HermesSessionInfo,
@@ -110,7 +114,7 @@ export function RoutinesView({
   onOpenRun,
   creditActionsDisabledReason,
 }: RoutinesViewProps) {
-  const [sandboxModeSupported, setSandboxModeSupported] = useState<boolean>();
+  const sandboxModeSupported = useSandboxModeSupported();
   const [allRoutines, setRoutines] = useState<RoutineJob[]>([]);
   const [loadingState, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -149,12 +153,10 @@ export function RoutinesView({
 
   const loadSandboxCapability = useCallback(async () => {
     try {
-      const status = await hermesBridgeStatus();
-      setSandboxModeSupported(status.sandboxModeSupported);
+      const supported = await loadSandboxModeSupported();
       setCapabilityError(null);
-      return status.sandboxModeSupported;
+      return supported;
     } catch {
-      setSandboxModeSupported(undefined);
       setCapabilityError("June could not check routine access support. Try again.");
       return undefined;
     }
@@ -331,7 +333,7 @@ export function RoutinesView({
   async function submitCreate(input: RoutineCreateInput) {
     setCreating(true);
     try {
-      const supported = sandboxModeSupported ?? (await loadSandboxCapability());
+      const supported = getSandboxModeSupported() ?? (await loadSandboxCapability());
       if (supported === undefined) return;
       const eventTrigger = input.trigger.source !== "schedule" ? input.trigger : null;
       const unrestricted = supported === false ? true : input.unrestricted;
@@ -442,7 +444,7 @@ export function RoutinesView({
     if (creditActionsDisabledReason) return;
     const description = describeDraft.trim();
     if (!description) return;
-    const supported = sandboxModeSupported ?? (await loadSandboxCapability());
+    const supported = getSandboxModeSupported() ?? (await loadSandboxCapability());
     if (supported === undefined) return;
     setDescribeDraft("");
     // routineCreationPrompt is async: for an unrestricted routine it strips the
@@ -499,7 +501,6 @@ export function RoutinesView({
     <DescribeBar
       draft={describeDraft}
       unrestricted={describeUnrestricted}
-      sandboxModeSupported={sandboxModeSupported}
       disabledReason={creditActionsDisabledReason}
       onDraftChange={setDescribeDraft}
       onUnrestrictedChange={setDescribeUnrestricted}
@@ -525,7 +526,6 @@ export function RoutinesView({
     return (
       <>
         <RoutineCreate
-          sandboxModeSupported={sandboxModeSupported}
           template={page.template}
           creating={creating}
           error={createError}
@@ -543,7 +543,6 @@ export function RoutinesView({
     return (
       <>
         <RoutineDetail
-          sandboxModeSupported={sandboxModeSupported}
           key={detailRoutine.job_id}
           routine={detailRoutine}
           runs={routineRuns}
@@ -635,7 +634,7 @@ export function RoutinesView({
         </div>
       ) : routines.length === 0 ? (
         <div className="routines-hero">
-          <TemplateGrid sandboxModeSupported={sandboxModeSupported} onPick={openCreate} />
+          <TemplateGrid onPick={openCreate} />
         </div>
       ) : filtered.length === 0 ? (
         <div className="folders-empty">
@@ -645,7 +644,6 @@ export function RoutinesView({
         <ul className="routines-list" role="list" aria-label="Routines">
           {filtered.map((routine) => (
             <RoutineRow
-              sandboxModeSupported={sandboxModeSupported}
               key={routine.job_id}
               routine={routine}
               busy={busyIds.has(routine.job_id)}
@@ -696,7 +694,7 @@ export function RoutinesView({
           <header className="routines-section-header">
             <h2>Starter routines</h2>
           </header>
-          <TemplateGrid sandboxModeSupported={sandboxModeSupported} onPick={openCreate} />
+          <TemplateGrid onPick={openCreate} />
         </section>
       ) : null}
 
@@ -706,13 +704,8 @@ export function RoutinesView({
   );
 }
 
-function TemplateGrid({
-  sandboxModeSupported,
-  onPick,
-}: {
-  sandboxModeSupported?: boolean;
-  onPick: (template: RoutineTemplate) => void;
-}) {
+function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void }) {
+  const sandboxModeSupported = useSandboxModeSupported();
   return (
     <ul className="routines-template-grid" role="list">
       {ROUTINE_TEMPLATES.map((template) => (
@@ -764,7 +757,6 @@ function TemplateGrid({
 }
 
 function RoutineRow({
-  sandboxModeSupported,
   routine,
   busy,
   onOpen,
@@ -772,7 +764,6 @@ function RoutineRow({
   runNowDisabledReason,
   onDelete,
 }: {
-  sandboxModeSupported?: boolean;
   routine: RoutineJob;
   busy: boolean;
   onOpen: () => void;
@@ -780,6 +771,7 @@ function RoutineRow({
   runNowDisabledReason?: string;
   onDelete: () => void;
 }) {
+  const sandboxModeSupported = useSandboxModeSupported();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const paused = routine.state === "paused";
@@ -996,7 +988,6 @@ const DEJUNE_MODE_OPTIONS = [
 function DescribeBar({
   draft,
   unrestricted,
-  sandboxModeSupported,
   disabledReason,
   onDraftChange,
   onUnrestrictedChange,
@@ -1004,7 +995,6 @@ function DescribeBar({
 }: {
   draft: string;
   unrestricted: boolean;
-  sandboxModeSupported?: boolean;
   /** Set while funding blocks metered actions: send disables with this as
    * its tooltip (the draft itself stays editable, like the chat composers). */
   disabledReason?: string;
@@ -1012,6 +1002,7 @@ function DescribeBar({
   onUnrestrictedChange: (unrestricted: boolean) => void;
   onSubmit: () => void;
 }) {
+  const sandboxModeSupported = useSandboxModeSupported();
   const [menuOpen, setMenuOpen] = useState(false);
   const rootRef = useRef<HTMLFormElement>(null);
 

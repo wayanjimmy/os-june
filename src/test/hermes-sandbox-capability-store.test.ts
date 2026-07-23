@@ -48,6 +48,19 @@ describe("sandbox mode support store", () => {
     expect(loadStatus).toHaveBeenCalledTimes(3);
   });
 
+  it("does not automatically retry a failed load for each new subscriber", async () => {
+    const loadStatus = vi.fn().mockRejectedValue(new Error("bridge unavailable"));
+    const store = createSandboxModeSupportStore(loadStatus);
+
+    const unsubscribeFirst = store.subscribe(() => undefined);
+    await expect(store.load()).rejects.toThrow("bridge unavailable");
+    unsubscribeFirst();
+    const unsubscribeSecond = store.subscribe(() => undefined);
+
+    expect(loadStatus).toHaveBeenCalledTimes(1);
+    unsubscribeSecond();
+  });
+
   it("keeps the first defined capability when a pending load settles later", async () => {
     let resolveStatus: (status: { running: boolean; sandboxModeSupported: boolean }) => void = () =>
       undefined;

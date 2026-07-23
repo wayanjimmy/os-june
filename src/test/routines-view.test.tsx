@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RoutinesView } from "../components/routines/RoutinesView";
 import type { RoutineJob } from "../lib/hermes-routines";
+import { resetSandboxModeSupportForTests } from "../lib/hermes-sandbox-capability-store";
 import type { HermesSessionInfo } from "../lib/tauri";
 import appCss from "../styles/app.css?raw";
 
@@ -151,6 +152,7 @@ async function openDetail(name: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetSandboxModeSupportForTests();
   mocks.routineDetailOnRunNow = undefined;
   mocks.pauseRoutine.mockResolvedValue({});
   mocks.resumeRoutine.mockResolvedValue({});

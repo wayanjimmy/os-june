@@ -9,6 +9,7 @@ import {
   type TriggerDraft,
 } from "../../lib/connectors";
 import { messageFromError } from "../../lib/errors";
+import { useSandboxModeSupported } from "../../lib/use-hermes-sandbox-capability";
 import {
   draftFromSchedule,
   scheduleFromDraft,
@@ -47,7 +48,6 @@ export type RoutineCreateInput = {
 };
 
 type RoutineCreateProps = {
-  sandboxModeSupported?: boolean;
   /** Prefills the editor; the user still reviews and saves explicitly. */
   template?: RoutineTemplate;
   creating: boolean;
@@ -56,14 +56,8 @@ type RoutineCreateProps = {
   onCreate: (input: RoutineCreateInput) => void;
 };
 
-export function RoutineCreate({
-  template,
-  sandboxModeSupported,
-  creating,
-  error,
-  onBack,
-  onCreate,
-}: RoutineCreateProps) {
+export function RoutineCreate({ template, creating, error, onBack, onCreate }: RoutineCreateProps) {
+  const sandboxModeSupported = useSandboxModeSupported();
   const [name, setName] = useState(template?.name ?? "");
   const [draft, setDraft] = useState<ScheduleDraft>(() =>
     template ? draftFromSchedule(template.schedule) : { kind: "daily", time: "09:00" },

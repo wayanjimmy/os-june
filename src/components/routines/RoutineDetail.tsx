@@ -17,6 +17,7 @@ import {
   type TriggerDraft,
 } from "../../lib/connectors";
 import { useExperimentalFlags } from "../../lib/experimental-flags";
+import { useSandboxModeSupported } from "../../lib/use-hermes-sandbox-capability";
 import {
   pauseRoutine,
   resumeRoutine,
@@ -81,7 +82,6 @@ function triggerDraftFromStored(stored: ConnectorTrigger): TriggerDraft {
 }
 
 type RoutineDetailProps = {
-  sandboxModeSupported?: boolean;
   routine: RoutineJob;
   /** Past runs of this routine only. */
   runs: HermesSessionInfo[];
@@ -105,7 +105,6 @@ type RoutineDetailProps = {
  * draft fields initialize from the routine once and reconcile through the
  * dirty comparison after saves refresh the prop. */
 export function RoutineDetail({
-  sandboxModeSupported,
   routine,
   runs,
   busy,
@@ -121,6 +120,7 @@ export function RoutineDetail({
   onRetryLoad,
   retrying,
 }: RoutineDetailProps) {
+  const sandboxModeSupported = useSandboxModeSupported();
   const { browserUseEnabled } = useExperimentalFlags();
   const [name, setName] = useState(routine.name);
   const [draft, setDraft] = useState<ScheduleDraft>(() => draftFromSchedule(routine.schedule));

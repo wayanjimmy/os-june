@@ -15,6 +15,7 @@ export function createSandboxModeSupportStore(
 ): SandboxModeSupportStore {
   let snapshot: SandboxModeSupported;
   let pendingLoad: Promise<SandboxModeSupported> | undefined;
+  let automaticLoadAttempted = false;
   let generation = 0;
   const listeners = new Set<() => void>();
 
@@ -49,7 +50,10 @@ export function createSandboxModeSupportStore(
     },
     subscribe(listener) {
       listeners.add(listener);
-      if (snapshot === undefined) void load().catch(() => undefined);
+      if (snapshot === undefined && !automaticLoadAttempted) {
+        automaticLoadAttempted = true;
+        void load().catch(() => undefined);
+      }
       return () => listeners.delete(listener);
     },
     load,
@@ -61,6 +65,7 @@ export function createSandboxModeSupportStore(
     resetForTests() {
       generation += 1;
       pendingLoad = undefined;
+      automaticLoadAttempted = false;
       snapshot = undefined;
       for (const listener of listeners) listener();
     },
