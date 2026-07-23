@@ -11,9 +11,9 @@ export function hermesGatewayFullMode(gateway: object): boolean | undefined {
   return gatewayModes.get(gateway);
 }
 
-/** The live connection serving the given write-access mode, if any. The
- * bridge runs up to one runtime process per mode side by side; mode-aware
- * callers pick their process here instead of assuming a single runtime. */
+/** The live connection serving the requested effective write-access mode, if
+ * any. Supported platforms can run one process per mode; Windows maps both
+ * compatibility aliases to its sole Full-mode process. */
 export function hermesConnectionForMode(
   status: HermesBridgeStatus | undefined,
   fullMode: boolean,

@@ -591,10 +591,11 @@ export type HermesBridgeConnection = {
 export type HermesBridgeStatus = {
   /** True when any runtime process is up. */
   running: boolean;
-  /** Primary connection (the requested mode for a start call, otherwise
-   * sandboxed-first). Mode-aware callers should use `connections`. */
+  /** Primary connection: the requested effective mode for a start call,
+   * otherwise the first live process. Mode-aware callers should use
+   * `connections` together with `sandboxModeSupported`. */
   connection?: HermesBridgeConnection;
-  /** Every live runtime process — at most one per write-access mode. */
+  /** Every live runtime process - at most one per effective write-access mode. */
   connections?: HermesBridgeConnection[];
   /** True where June preserves separate sandboxed and Full product modes.
    * `connection.sandboxed` reports whether the OS write jail is enforced. */
