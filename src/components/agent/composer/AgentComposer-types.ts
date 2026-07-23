@@ -31,6 +31,7 @@ export type RenderAgentComposerDependencies = {
   composerBoxRef: React.MutableRefObject<HTMLDivElement | null>;
   composerDraftKeyRef: React.MutableRefObject<string | null>;
   composerEditorRef: React.MutableRefObject<ComposerEditorHandle | null>;
+  onComposerFocusChange: (focused: boolean) => void;
   composerInSteerState: boolean;
   composerModelFlyout: ModelPickerFlyout;
   composerModelOpen: boolean;
