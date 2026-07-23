@@ -10638,6 +10638,49 @@ describe("AgentWorkspace", () => {
     }
   });
 
+  it("reconciles a legacy sandboxed session against the sole Windows lifecycle snapshot", async () => {
+    const connection = {
+      port: 61234,
+      wsUrl: "ws://127.0.0.1:61234",
+      fullMode: true,
+      sandboxed: false,
+    };
+    mocks.hermesBridgeStatus.mockResolvedValue({
+      running: true,
+      connection,
+      connections: [connection],
+      sandboxModeSupported: false,
+    });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m1",
+        role: "user" as const,
+        content: "still waiting on Windows",
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.active_list") return Promise.resolve({ sessions: [] });
+      return Promise.resolve({});
+    });
+
+    vi.useFakeTimers();
+    try {
+      render(<AgentWorkspace />);
+      await settleUnderFakeTimers(() => expect(screen.getByText("Thinking…")).toBeInTheDocument());
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.active_list", {});
+      expect(screen.queryByText("Thinking…")).toBeNull();
+      expect(screen.getByText("June stopped before replying.")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps disappeared working sessions quiet when an assistant reply persisted", async () => {
     const statusDetails: AgentSessionStatusDetail[] = [];
     const handleStatus = (event: Event) => {

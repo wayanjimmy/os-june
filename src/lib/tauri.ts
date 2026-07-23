@@ -1476,18 +1476,19 @@ export async function updateHermesBridgeMessagingPlatform(input: {
   });
 }
 
-/** `fullMode` is an explicit mode choice: passing it restarts a running
- * runtime whose mode differs (the sandbox is applied at spawn). Omit it to
- * reuse whatever is running — fresh starts are always sandboxed. */
+/** `fullMode` is an explicit mode choice on supported platforms: passing it
+ * ensures that mode without disturbing the other process. Omission defaults
+ * to sandboxed there. Windows accepts every form for compatibility but routes
+ * all of them to its sole Full-mode process. */
 export async function startHermesBridge(cwd?: string, fullMode?: boolean) {
   return invoke<HermesBridgeStatus>("start_hermes_bridge", {
     request: { cwd, fullMode },
   });
 }
 
-/** Stops the Hermes runtime. With `mode`, stops ONLY that runtime (the MCP
- * page's restart flow targets one mode and must not take down a live session
- * in the other); without it, stops everything (historical behavior). */
+/** Stops the Hermes runtime. On supported platforms, `mode` stops only that
+ * mode and omission stops everything. On Windows, either mode alias targets
+ * the sole Full-mode process. */
 export async function stopHermesBridge(mode?: "sandboxed" | "unrestricted") {
   return invoke<HermesBridgeStatus>("stop_hermes_bridge", { mode });
 }

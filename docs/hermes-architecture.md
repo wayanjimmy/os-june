@@ -43,7 +43,9 @@ classified events into `AgentChatTurn` / `AgentChatPart[]` for rendering.
 
 1. Composer text → `AgentWorkspace.submit`.
 2. `ensureHermesGateway(unrestricted?)` picks/creates a `HermesGatewayClient`
-   from `gatewaysRef` — **one gateway per write-mode**.
+   from `gatewaysRef` - one gateway per effective write mode. macOS keeps its
+   two mode partitions; Windows maps both compatibility aliases to one
+   Full-mode gateway.
 3. `gateway.request("session.create")` returns **both** a `stored_session_id`
    (June's persistent id) and a `session_id` (the live runtime id);
    `ensureHermesBridgeSession` persists the mapping.

@@ -177,13 +177,16 @@ export function SudoPart({
   const modeCopy =
     sandboxModeSupported === false
       ? "Will run with full access to files available to your Windows account."
-      : unrestricted
-        ? "Will run unrestricted (full write access)"
-        : "Will run sandboxed (limited write access)";
+      : sandboxModeSupported === true
+        ? unrestricted
+          ? "Will run unrestricted (full write access)"
+          : "Will run sandboxed (limited write access)"
+        : undefined;
 
   // Pending: the blast radius shows as an InlineNotice — warning chrome for
-  // unrestricted, neutral for sandboxed.
-  const modeNotice = (
+  // unrestricted, neutral for sandboxed. Until capability resolves, omit mode
+  // claims rather than briefly describing an unsupported Windows sandbox.
+  const modeNotice = modeCopy ? (
     <InlineNotice
       className="agent-sudo-mode-notice"
       tone={sandboxModeSupported === false || unrestricted ? "warning" : "info"}
@@ -196,15 +199,15 @@ export function SudoPart({
       }
       body={modeCopy}
     />
-  );
+  ) : null;
 
   // Receipt: the same mode line, but as quiet plain text — receipts carry no
   // notice chrome.
-  const modeReceiptLine = (
+  const modeReceiptLine = modeCopy ? (
     <p className="agent-sudo-mode-receipt" data-mode={mode}>
       {modeCopy}
     </p>
-  );
+  ) : null;
 
   // Collapsed pending: the full InlineNotice lives behind Details, so the header
   // still has to carry the blast radius at the moment of decision — but only for
@@ -212,7 +215,7 @@ export function SudoPart({
   // row does it. Sandboxed is the safe default and shows no collapsed badge (the
   // full mode line still appears in Details for both).
   const modeBadge =
-    sandboxModeSupported !== false && unrestricted ? (
+    sandboxModeSupported === true && unrestricted ? (
       <span className="agent-sudo-mode-badge">
         <IconExclamationTriangle size={12} aria-hidden />
         Unrestricted
