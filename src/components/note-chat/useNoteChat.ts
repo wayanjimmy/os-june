@@ -102,14 +102,15 @@ function attachmentPromptPath(path: string) {
 const LIVE_EVENT_CAP = 200;
 
 /* One gateway client for every note chat, module-scoped so panels across
- * note switches share the socket instead of re-handshaking. Note chats are
- * always sandboxed — the panel is a reading/asking surface; escalation to
- * the full agent view is where mode choices live. The client is a SEPARATE
+ * note switches share the socket instead of re-handshaking. Note chats request
+ * sandboxed mode; the native connection remains authoritative on platforms
+ * with one canonical mode. The client is a SEPARATE
  * connection from AgentWorkspace's on purpose: the gateway serves multiple
  * sockets, and sharing the workspace's client would couple the panel to the
  * monolith's ref-managed lifecycle. */
 let sharedGateway: HermesGatewayClient | null = null;
 let sharedGatewayConnecting: Promise<HermesGatewayClient> | null = null;
+let sharedGatewayFullMode = false;
 const eventSubscribers = new Set<(event: JuneHermesEvent) => void>();
 
 function terminalAgentStatus(
@@ -137,6 +138,7 @@ async function connectGateway(startIfNeeded: boolean): Promise<HermesGatewayClie
     await refreshActiveHermesProfile({ status, mode: "sandboxed" });
     const wsUrl = connection?.wsUrl;
     if (!wsUrl) throw new Error("Hermes bridge did not return a gateway URL.");
+    sharedGatewayFullMode = Boolean(connection?.fullMode);
     if (!sharedGateway) {
       const gateway = new HermesGatewayClient();
       gateway.onEvent((raw) => {
@@ -494,7 +496,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         terminal &&
         (!workingRef.current ||
           !storedSessionIdRef.current ||
-          !canAttributeUntaggedAgentRun(storedSessionIdRef.current, false))
+          !canAttributeUntaggedAgentRun(storedSessionIdRef.current, sharedGatewayFullMode))
       ) {
         return;
       }
@@ -756,7 +758,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
             storedSessionId: activeStoredSessionId,
             runtimeSessionId,
             title: noteTitle.trim() || "Note chat",
-            fullMode: false,
+            fullMode: sharedGatewayFullMode,
             settlementHeld: false,
           });
           stoppedRuntimeSessionIdRef.current = undefined;

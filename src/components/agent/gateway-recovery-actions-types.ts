@@ -30,6 +30,7 @@ export type createGatewayRecoveryActionsDependencies = {
   }) => () => void;
   captureSessionModelTarget: (explicitSession?: HermesSessionInfo) => CapturedSessionModelTarget;
   ensureHermesGateway: (fullMode?: boolean) => Promise<HermesGatewayClient>;
+  sandboxModeSupported?: boolean;
   gatewayRecoveringRef: React.MutableRefObject<Set<boolean>>;
   hermesSessionItemsRef: React.MutableRefObject<HermesSessionInfo[]>;
   liveEventsRef: React.MutableRefObject<Record<string, JuneHermesEvent[]>>;

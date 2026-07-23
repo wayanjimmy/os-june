@@ -581,6 +581,9 @@ export type HermesBridgeStatus = {
   connection?: HermesBridgeConnection;
   /** Every live runtime process — at most one per write-access mode. */
   connections?: HermesBridgeConnection[];
+  /** True where June preserves separate sandboxed and Full product modes.
+   * `connection.sandboxed` reports whether the OS write jail is enforced. */
+  sandboxModeSupported?: boolean;
   message?: string;
 };
 

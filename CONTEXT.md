@@ -221,10 +221,13 @@ classifier never emits.
 _Avoid_: gateway, adapter.
 
 **Runtime mode**:
-The write-access mode of a spawned Hermes process: `sandboxed` (a Seatbelt
-write-jail, default) or `unrestricted`. Opt-in is per session; June keeps one
-gateway per mode so an unrestricted session can't un-sandbox others.
-_Avoid_: permission, profile.
+The local-system access boundary for Hermes. On macOS, `sandboxed` applies the
+Seatbelt write-jail by default and `unrestricted` opts a session into Full mode;
+June keeps one gateway per mode. Windows has no supported OS sandbox, so both
+historical mode aliases route to one Full-mode process while stored session
+mode metadata remains unchanged.
+_Avoid_: permission, profile, claiming a Windows session is sandboxed,
+conflating Runtime mode with connector trust mode.
 
 **Profile** (Hermes profile):
 A named Hermes configuration (its own home subtree, SOUL, model default,

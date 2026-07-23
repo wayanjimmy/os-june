@@ -41,6 +41,7 @@ describe("admin targeting — profile/mode must be explicit", () => {
   it("selects the matching mode from a multi-connection status", () => {
     const status: HermesBridgeStatus = {
       running: true,
+      sandboxModeSupported: true,
       connections: [
         connection({ baseUrl: "http://127.0.0.1:1000", fullMode: false }),
         connection({
@@ -60,6 +61,7 @@ describe("admin targeting — profile/mode must be explicit", () => {
     // first connection" bug this whole design forbids.
     const status: HermesBridgeStatus = {
       running: true,
+      sandboxModeSupported: true,
       connections: [connection({ fullMode: false })],
     };
     expect(adminTargetForMode(status, "unrestricted")).toBeUndefined();
@@ -73,6 +75,7 @@ describe("admin targeting — profile/mode must be explicit", () => {
     // proving selection is by mode, not by position.
     const status: HermesBridgeStatus = {
       running: true,
+      sandboxModeSupported: true,
       connections: [
         connection({
           baseUrl: "http://127.0.0.1:9000",
@@ -83,6 +86,18 @@ describe("admin targeting — profile/mode must be explicit", () => {
       ],
     };
     expect(adminTargetForMode(status, "sandboxed")?.baseUrl).toBe("http://127.0.0.1:8000");
+  });
+
+  it("maps both compatibility modes to the sole Full-mode target when sandboxing is unsupported", () => {
+    const status: HermesBridgeStatus = {
+      running: true,
+      sandboxModeSupported: false,
+      connections: [
+        connection({ baseUrl: "http://127.0.0.1:2000", fullMode: true, sandboxed: false }),
+      ],
+    };
+    expect(adminTargetForMode(status, "sandboxed")?.baseUrl).toBe("http://127.0.0.1:2000");
+    expect(adminTargetForMode(status, "unrestricted")?.baseUrl).toBe("http://127.0.0.1:2000");
   });
 
   it("targetKey is profile- and mode-scoped, so two targets cannot collide", () => {

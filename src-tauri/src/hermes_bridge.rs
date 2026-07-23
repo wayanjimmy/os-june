@@ -1038,7 +1038,26 @@ pub struct HermesBridgeStatus {
     /// callers pick by `full_mode`.
     #[serde(default)]
     pub connections: Vec<HermesBridgeConnection>,
+    /// Whether this platform preserves June's sandboxed/Full product-mode
+    /// partition. Windows has only one canonical Full-mode process; macOS and
+    /// Linux retain separate modes even when `connection.sandboxed` is false.
+    pub sandbox_mode_supported: bool,
     pub message: Option<String>,
+}
+
+/// Windows has no Hermes OS sandbox. Keep accepting both historical mode
+/// spellings at the command boundary, but route both to the sole Full-mode
+/// process. Other platforms retain their existing mode split.
+fn canonical_full_mode(requested: bool, target_is_windows: bool) -> bool {
+    target_is_windows || requested
+}
+
+fn effective_full_mode(requested: bool) -> bool {
+    canonical_full_mode(requested, cfg!(target_os = "windows"))
+}
+
+fn sandbox_mode_supported(target_is_windows: bool) -> bool {
+    !target_is_windows
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1394,6 +1413,7 @@ fn status_for(
     HermesBridgeStatus {
         running,
         connection: primary,
+        sandbox_mode_supported: sandbox_mode_supported(cfg!(target_os = "windows")),
         message: if running {
             None
         } else {
@@ -1650,7 +1670,7 @@ async fn start_hermes_bridge_inner(
     // mode's process — if one is up — is deliberately untouched: the pair
     // runs side by side so a session in one mode never kills the other's
     // in-flight work.
-    let full_mode = request.full_mode.unwrap_or(false);
+    let full_mode = effective_full_mode(request.full_mode.unwrap_or(false));
     let connections = live_connections(bridge)?;
     if connections
         .iter()
@@ -2432,6 +2452,7 @@ pub async fn stop_hermes_bridge(
             running: false,
             connection: None,
             connections: Vec::new(),
+            sandbox_mode_supported: sandbox_mode_supported(cfg!(target_os = "windows")),
             message: Some("Hermes bridge stopped.".to_string()),
         });
     };
@@ -2445,7 +2466,7 @@ pub async fn stop_hermes_bridge(
             ));
         }
     };
-    stop_hermes_mode(&bridge, full_mode)?;
+    stop_hermes_mode(&bridge, effective_full_mode(full_mode))?;
     let connections = live_connections(&bridge)?;
     Ok(status_for(connections, None))
 }
@@ -4128,7 +4149,7 @@ fn stop_hermes_mode(bridge: &HermesBridge, full_mode: bool) -> Result<(), AppErr
         let mut guard = bridge.processes.lock().map_err(|_| {
             AppError::new("hermes_bridge_unavailable", "Hermes bridge lock failed.")
         })?;
-        guard.remove(&full_mode)
+        guard.remove(&effective_full_mode(full_mode))
     };
     shutdown_hermes_process(process);
     Ok(())
@@ -5231,7 +5252,7 @@ pub async fn hermes_admin_request(
     path: String,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, AppError> {
-    let full_mode = match mode.as_str() {
+    let full_mode = effective_full_mode(match mode.as_str() {
         "unrestricted" => true,
         "sandboxed" => false,
         other => {
@@ -5240,7 +5261,7 @@ pub async fn hermes_admin_request(
                 format!("Unknown Hermes admin mode \"{other}\"."),
             ));
         }
-    };
+    });
     let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
         .map_err(|_| AppError::new("hermes_admin_invalid_method", "Unsupported HTTP method."))?;
 
@@ -5643,7 +5664,7 @@ pub async fn hermes_mcp_oauth_login(
     bridge: State<'_, HermesBridge>,
     request: HermesMcpOauthLoginRequest,
 ) -> Result<HermesMcpOauthLoginResult, AppError> {
-    let full_mode = match request.mode.as_str() {
+    let full_mode = effective_full_mode(match request.mode.as_str() {
         "unrestricted" => true,
         "sandboxed" => false,
         other => {
@@ -5652,7 +5673,7 @@ pub async fn hermes_mcp_oauth_login(
                 format!("Unknown Hermes admin mode \"{other}\"."),
             ));
         }
-    };
+    });
     if !is_safe_mcp_server_name(&request.server) {
         return Err(AppError::new(
             "hermes_mcp_oauth_invalid_server",
@@ -5783,7 +5804,7 @@ pub async fn hermes_reset_bundled_skill(
     bridge: State<'_, HermesBridge>,
     request: ResetHermesSkillRequest,
 ) -> Result<ResetHermesSkillResult, AppError> {
-    let full_mode = match request.mode.as_str() {
+    let full_mode = effective_full_mode(match request.mode.as_str() {
         "unrestricted" => true,
         "sandboxed" => false,
         other => {
@@ -5792,7 +5813,7 @@ pub async fn hermes_reset_bundled_skill(
                 format!("Unknown Hermes admin mode \"{other}\"."),
             ));
         }
-    };
+    });
     if !is_safe_skill_name(&request.name) {
         return Err(AppError::new(
             "hermes_skill_reset_invalid_name",
@@ -6040,7 +6061,7 @@ fn tap_connection_for_mode(
     bridge: &State<'_, HermesBridge>,
     mode: &str,
 ) -> Result<HermesBridgeConnection, AppError> {
-    let full_mode = match mode {
+    let full_mode = effective_full_mode(match mode {
         "unrestricted" => true,
         "sandboxed" => false,
         other => {
@@ -6049,7 +6070,7 @@ fn tap_connection_for_mode(
                 format!("Unknown Hermes admin mode \"{other}\"."),
             ));
         }
-    };
+    });
     let connections = live_connections(bridge)?;
     connections
         .iter()
@@ -6590,7 +6611,7 @@ fn bundle_connection(
     bridge: &State<'_, HermesBridge>,
     mode: &str,
 ) -> Result<HermesBridgeConnection, AppError> {
-    let full_mode = match mode {
+    let full_mode = effective_full_mode(match mode {
         "unrestricted" => true,
         "sandboxed" => false,
         other => {
@@ -6599,7 +6620,7 @@ fn bundle_connection(
                 format!("Unknown Hermes admin mode \"{other}\"."),
             ));
         }
-    };
+    });
     let connections = live_connections(bridge)?;
     connections
         .iter()
@@ -7897,7 +7918,7 @@ pub async fn open_hermes_tui_debug(
     // otherwise prepare the Seatbelt profile (None when the jail can't engage
     // on this machine). The token is fresh and unused by the TUI's local
     // session store, but kept for env parity with the dashboard runtime.
-    let full_mode = request.unrestricted;
+    let full_mode = effective_full_mode(request.unrestricted);
     let agent_cli_access = agent_cli_access_enabled(&app);
     let sandbox_profile = if full_mode {
         None
@@ -20638,6 +20659,20 @@ assert capped["has_more"] is True, capped
         let request: StartHermesBridgeRequest =
             serde_json::from_str(r#"{"fullMode":false}"#).expect("sandboxed request");
         assert_eq!(request.full_mode, Some(false));
+    }
+
+    #[test]
+    fn windows_canonicalizes_both_runtime_modes_to_full() {
+        assert!(canonical_full_mode(false, true));
+        assert!(canonical_full_mode(true, true));
+        assert!(!sandbox_mode_supported(true));
+    }
+
+    #[test]
+    fn non_windows_preserves_runtime_modes() {
+        assert!(!canonical_full_mode(false, false));
+        assert!(canonical_full_mode(true, false));
+        assert!(sandbox_mode_supported(false));
     }
 
     #[test]

@@ -21,6 +21,7 @@ import type { RenderAgentWorkspaceLayoutDependencies } from "./AgentWorkspaceLay
 
 export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLayoutDependencies) {
   const {
+    sandboxModeSupported,
     ACTIVITY_DRAWER_ENABLED,
     activeAgentCount,
     activePanel,
@@ -129,6 +130,7 @@ export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLay
         </button>
       ) : null}
       <AgentActivityDrawer
+        sandboxModeSupported={sandboxModeSupported}
         open={activityDrawerOpen}
         records={activityRecords}
         status={activityStatus}
@@ -143,6 +145,7 @@ export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLay
         onClose={() => setActivityDrawerOpen(false)}
         footer={
           <AgentArtifactsSection
+            sandboxModeSupported={sandboxModeSupported}
             artifacts={timelineArtifacts}
             onOpenArtifact={openTimelineArtifact}
           />
@@ -161,6 +164,7 @@ export function renderAgentWorkspaceLayout(dependencies: RenderAgentWorkspaceLay
           // runtime from another session is still up. The hero composer's
           // picker covers the new-session draft.
           fullMode={
+            sandboxModeSupported === true &&
             !newSessionMode &&
             !selectedHermesSessionIsProvisional &&
             sessionUnrestricted(selectedHermesSessionId)

@@ -79,6 +79,7 @@ export function AgentChatTurnRow({
   onVisibleMarkdownChange,
   onBranch,
   branchingMessageId,
+  sandboxModeSupported,
   turn,
 }: {
   activeThinkingKey?: string;
@@ -126,6 +127,7 @@ export function AgentChatTurnRow({
   /** The message id a branch is currently in flight for, so its action shows a
    * working/disabled state. */
   branchingMessageId?: string | null;
+  sandboxModeSupported?: boolean;
   turn: AgentChatTurn;
 }) {
   const textParts = turn.parts.filter(
@@ -381,7 +383,7 @@ export function AgentChatTurnRow({
                     repairProse
                   />
                 ) : null}
-                {hasAgentCliAccessRequest(part.text) ? (
+                {hasAgentCliAccessRequest(part.text) && sandboxModeSupported !== false ? (
                   <AgentCliAccessCard cliAccess={cliAccess} />
                 ) : null}
                 {hasBrowserAccessRequest(part.text) ? (
@@ -423,6 +425,7 @@ export function AgentChatTurnRow({
               part={part}
               submitting={sudoSubmitting[part.id]}
               onSudo={onSudo}
+              sandboxModeSupported={sandboxModeSupported}
             />
           ) : part.type === "secret" ? (
             <SecretPart

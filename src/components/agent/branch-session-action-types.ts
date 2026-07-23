@@ -17,6 +17,7 @@ export type createBranchSessionActionDependencies = {
   composerEditorRef: React.MutableRefObject<ComposerEditorHandle | null>;
   draftRef: React.MutableRefObject<string>;
   ensureHermesGateway: (fullMode?: boolean) => Promise<HermesGatewayClient>;
+  sandboxModeSupported?: boolean;
   hermesSessionItems: HermesSessionInfo[];
   hermesSessionMessages: Record<string, HermesSessionMessage[]>;
   hermesSessionMessagesRef: React.MutableRefObject<Record<string, HermesSessionMessage[]>>;

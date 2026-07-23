@@ -634,6 +634,7 @@ describe("AgentWorkspace", () => {
     mocks.hermesBridgeStatus.mockResolvedValue({
       running: true,
       connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
+      sandboxModeSupported: true,
     });
     // Mirrors the backend: starting a mode yields a status that contains
     // that mode's connection (alongside any other live mode).
@@ -643,7 +644,12 @@ describe("AgentWorkspace", () => {
         wsUrl: "ws://127.0.0.1:61234",
         fullMode: Boolean(fullMode),
       };
-      return { running: true, connection, connections: [connection] };
+      return {
+        running: true,
+        connection,
+        connections: [connection],
+        sandboxModeSupported: true,
+      };
     });
     mocks.listHermesSessions.mockResolvedValue([existingSession]);
     mocks.listSessionProfiles.mockResolvedValue([]);
@@ -14479,6 +14485,41 @@ describe("AgentWorkspace", () => {
 
     expect(await screen.findByText("Unrestricted")).toBeInTheDocument();
     expect(screen.getByLabelText(/Unrestricted - This session runs without/)).toBeInTheDocument();
+  });
+
+  it("uses the sole Windows runtime without exposing mode controls or badges", async () => {
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({ createdAt: Date.now() }),
+    );
+    const connection = {
+      port: 61234,
+      wsUrl: "ws://127.0.0.1:61234",
+      fullMode: true,
+      sandboxed: false,
+    };
+    mocks.hermesBridgeStatus.mockResolvedValue({
+      running: true,
+      connection,
+      connections: [connection],
+      sandboxModeSupported: false,
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+
+    await screen.findByRole("textbox", { name: "Message June" });
+    expect(screen.queryByRole("button", { name: "Sandboxed" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Unrestricted" })).toBeNull();
+
+    await user.type(screen.getByRole("textbox"), "Windows task");
+    await user.click(screen.getByRole("button", { name: "Start session" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith(
+        "prompt.submit",
+        expect.objectContaining({ text: "Windows task" }),
+      ),
+    );
+    expect(screen.queryByText("Unrestricted")).toBeNull();
   });
 
   it("keeps the badge off a sandboxed session even while the runtime is unsandboxed", async () => {

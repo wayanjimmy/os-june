@@ -153,10 +153,12 @@ export function BranchFromHereAction({
 export function SudoPart({
   onSudo,
   part,
+  sandboxModeSupported,
   submitting,
 }: {
   onSudo: (part: Extract<AgentChatPart, { type: "sudo" }>, approved: boolean) => void;
   part: Extract<AgentChatPart, { type: "sudo" }>;
+  sandboxModeSupported?: boolean;
   submitting?: "approve" | "deny";
 }) {
   const disabled = Boolean(submitting) || part.status !== "pending";
@@ -172,18 +174,21 @@ export function SudoPart({
   const unrestricted = mode === "unrestricted";
   const decided = part.approved ?? (submitting ? submitting === "approve" : undefined);
 
-  const modeCopy = unrestricted
-    ? "Will run unrestricted (full write access)"
-    : "Will run sandboxed (limited write access)";
+  const modeCopy =
+    sandboxModeSupported === false
+      ? "Will run with full access to files available to your Windows account."
+      : unrestricted
+        ? "Will run unrestricted (full write access)"
+        : "Will run sandboxed (limited write access)";
 
   // Pending: the blast radius shows as an InlineNotice — warning chrome for
   // unrestricted, neutral for sandboxed.
   const modeNotice = (
     <InlineNotice
       className="agent-sudo-mode-notice"
-      tone={unrestricted ? "warning" : "info"}
+      tone={sandboxModeSupported === false || unrestricted ? "warning" : "info"}
       icon={
-        unrestricted ? (
+        sandboxModeSupported === false || unrestricted ? (
           <IconShieldCrossed size={14} aria-hidden />
         ) : (
           <IconShieldCheck size={14} aria-hidden />
@@ -206,12 +211,13 @@ export function SudoPart({
   // the unrestricted (elevated) case. A small warning badge pinned in the header
   // row does it. Sandboxed is the safe default and shows no collapsed badge (the
   // full mode line still appears in Details for both).
-  const modeBadge = unrestricted ? (
-    <span className="agent-sudo-mode-badge">
-      <IconExclamationTriangle size={12} aria-hidden />
-      Unrestricted
-    </span>
-  ) : null;
+  const modeBadge =
+    sandboxModeSupported !== false && unrestricted ? (
+      <span className="agent-sudo-mode-badge">
+        <IconExclamationTriangle size={12} aria-hidden />
+        Unrestricted
+      </span>
+    ) : null;
 
   // Resolved collapses to a quiet receipt row: "Approved"/"Denied" plus the
   // command, expandable to the reason, command, and execution mode.

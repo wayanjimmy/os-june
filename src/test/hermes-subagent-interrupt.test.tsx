@@ -51,6 +51,7 @@ function renderDrawer(props: Partial<Parameters<typeof AgentActivityDrawer>[0]> 
       open
       records={[]}
       status="ready"
+      sandboxModeSupported
       now={NOW}
       titleForSession={() => undefined}
       onOpenSession={vi.fn()}

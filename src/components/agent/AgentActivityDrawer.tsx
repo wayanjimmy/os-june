@@ -67,6 +67,7 @@ export type SubagentStopTarget = { sessionId: string; subagentId: string };
  * store's extension notes.
  */
 export function AgentActivityDrawer({
+  sandboxModeSupported,
   open,
   records,
   status,
@@ -81,6 +82,7 @@ export function AgentActivityDrawer({
   onClose,
   footer,
 }: {
+  sandboxModeSupported?: boolean;
   /** Whether the drawer is visible. Closed → renders nothing. */
   open: boolean;
   /** Aggregated session rows, newest-first (already sorted by the store). */
@@ -170,6 +172,7 @@ export function AgentActivityDrawer({
         <ul className="agent-activity-drawer-list">
           {records.map((record) => (
             <ActivityRow
+              sandboxModeSupported={sandboxModeSupported}
               key={record.id}
               record={record}
               title={titleForSession(record.sessionId)}
@@ -318,6 +321,7 @@ function useSubagentStop(
 }
 
 function ActivityRow({
+  sandboxModeSupported,
   record,
   title,
   model,
@@ -328,6 +332,7 @@ function ActivityRow({
   onStop,
   subagentStop,
 }: {
+  sandboxModeSupported?: boolean;
   record: AgentActivityRecord;
   title: string | undefined;
   model: { model?: string; provider?: string } | undefined;
@@ -354,7 +359,7 @@ function ActivityRow({
       <div className="agent-activity-row-body">
         <div className="agent-activity-row-line">
           <span className="agent-activity-row-title">{sessionLabel}</span>
-          <ModePill mode={record.mode} />
+          {sandboxModeSupported === true ? <ModePill mode={record.mode} /> : null}
         </div>
         <div className="agent-activity-row-meta">
           <span className="agent-activity-row-phase" data-phase={record.phase}>
@@ -740,11 +745,13 @@ function formatAge(lastEventAt: number, now: number): string {
 export function AgentArtifactsSection({
   artifacts,
   onOpenArtifact,
+  sandboxModeSupported,
 }: {
   /** This session's artifacts, newest-first (already sorted by the store). */
   artifacts: AgentArtifact[];
   /** Open the artifact in the host's existing preview/download flow. */
   onOpenArtifact: (artifact: AgentArtifact) => void;
+  sandboxModeSupported?: boolean;
 }) {
   if (artifacts.length === 0) return null;
 
@@ -765,6 +772,7 @@ export function AgentArtifactsSection({
             key={artifact.id}
             artifact={artifact}
             onOpen={() => onOpenArtifact(artifact)}
+            sandboxModeSupported={sandboxModeSupported}
           />
         ))}
       </ul>
@@ -772,10 +780,21 @@ export function AgentArtifactsSection({
   );
 }
 
-function ArtifactRow({ artifact, onOpen }: { artifact: AgentArtifact; onOpen: () => void }) {
+function ArtifactRow({
+  artifact,
+  onOpen,
+  sandboxModeSupported,
+}: {
+  artifact: AgentArtifact;
+  onOpen: () => void;
+  sandboxModeSupported?: boolean;
+}) {
   const name = nonEmpty(artifact.displayName) ?? nonEmpty(artifact.path) ?? "File";
   const action = actionMeta(artifact.action);
-  const safety = pathSafetyMeta(artifact);
+  const safety =
+    sandboxModeSupported === false && artifact.kind !== "url"
+      ? { key: "local" as const, label: "Local path", title: "File on your computer", icon: null }
+      : pathSafetyMeta(artifact);
 
   return (
     <li className="agent-artifacts-row" data-action={artifact.action} data-kind={artifact.kind}>

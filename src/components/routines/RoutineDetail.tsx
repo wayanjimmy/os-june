@@ -81,6 +81,7 @@ function triggerDraftFromStored(stored: ConnectorTrigger): TriggerDraft {
 }
 
 type RoutineDetailProps = {
+  sandboxModeSupported?: boolean;
   routine: RoutineJob;
   /** Past runs of this routine only. */
   runs: HermesSessionInfo[];
@@ -104,6 +105,7 @@ type RoutineDetailProps = {
  * draft fields initialize from the routine once and reconcile through the
  * dirty comparison after saves refresh the prop. */
 export function RoutineDetail({
+  sandboxModeSupported,
   routine,
   runs,
   busy,
@@ -621,7 +623,7 @@ export function RoutineDetail({
           {routine.state === "scheduled" ? (
             <span className="routine-meta-pill routine-meta-pill-warm">Active</span>
           ) : null}
-          {routineUnrestricted(routine) ? (
+          {sandboxModeSupported === true && routineUnrestricted(routine) ? (
             <HoverTip
               tip="This routine runs with full access: when it fires, June can run commands and change any file your account can. Routines without this badge run sandboxed and cannot touch your files."
               className="routine-meta-pill routine-meta-pill-warm"
@@ -754,7 +756,9 @@ export function RoutineDetail({
                 Access
               </h2>
               <div className="settings-card">
-                <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
+                {sandboxModeSupported === true ? (
+                  <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
+                ) : null}
                 {browserUseEnabled ? (
                   <div className="settings-row">
                     <div className="settings-row-info">
@@ -775,7 +779,7 @@ export function RoutineDetail({
                     </div>
                   </div>
                 ) : null}
-                {routine.script ? (
+                {sandboxModeSupported === true && routine.script ? (
                   <p className="routine-detail-script-note">
                     This routine has an attached script ({routine.script}) that runs outside the
                     sandbox, so it always has full access. Switching it to Sandboxed removes the

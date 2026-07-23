@@ -92,7 +92,7 @@ export function adminTargetForMode(
   profile: string | null = DEFAULT_HERMES_PROFILE,
 ): HermesAdminTarget | undefined {
   if (profile === null) return undefined;
-  const wantFull = mode === "unrestricted";
+  const wantFull = status.sandboxModeSupported === false || mode === "unrestricted";
   // A connection is only targetable once it carries a base URL. Production
   // connections always do, but a partially-populated status (e.g. a runtime
   // still coming up) must yield "no target" rather than crash a render-path

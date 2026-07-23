@@ -49,7 +49,7 @@ import {
 } from "../../lib/agent-composer-slash-commands";
 import { type ComposerEditorHandle, stripPlaceholder } from "./composer/ComposerEditor";
 import { type NoteReferenceInput } from "./composer/noteReference";
-import { sessionUnrestricted } from "../../lib/agent-session-modes";
+import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import { type AgentChatPart, type AgentChatTurn } from "../../lib/agent-chat-runtime";
 import { ProjectContextSignatureStore } from "../../lib/agent-project-context";
 import { type AgentChatGallerySection } from "../../lib/agent-chat-gallery";
@@ -709,7 +709,9 @@ export function AgentWorkspace({
         const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
         if (!runtimeSessionId) continue;
         try {
-          const gateway = await ensureHermesGateway(sessionUnrestricted(sessionId));
+          const gateway = await ensureHermesGateway(
+            effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+          );
           if (cancelled || !workingSessionIdsRef.current.has(sessionId)) {
             continue;
           }
@@ -1304,6 +1306,7 @@ export function AgentWorkspace({
     reconcileWorkingSessionsAgainstRuntime,
   } = createRuntimeReconciliation({
     ensureHermesGateway,
+    sandboxModeSupported: bridge.sandboxModeSupported,
     hermesSessionItems,
     pendingAttachmentPreparationsRef,
     pendingSteerBySessionIdRef,
@@ -1765,7 +1768,9 @@ export function AgentWorkspace({
       return;
     }
     try {
-      const gateway = await ensureHermesGateway(sessionUnrestricted(sessionId));
+      const gateway = await ensureHermesGateway(
+        effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+      );
       await createHermesMethods(gateway).setSessionReasoningEffort({
         sessionId: runtimeSessionId,
         effort,
@@ -2109,6 +2114,7 @@ export function AgentWorkspace({
     creditActionsDisabledReason,
     defaultGenerationModelIdRef,
     ensureHermesGateway,
+    sandboxModeSupported: bridge.sandboxModeSupported,
     fullModeDraftRef,
     generationCostQualityRef,
     generationModelsRef,
@@ -2154,6 +2160,7 @@ export function AgentWorkspace({
     attachHermesSessionEventListener,
     captureSessionModelTarget,
     ensureHermesGateway,
+    sandboxModeSupported: bridge.sandboxModeSupported,
     gatewayRecoveringRef,
     hermesSessionItemsRef,
     liveEventsRef,
@@ -2269,6 +2276,7 @@ export function AgentWorkspace({
     composerEditorRef,
     draftRef,
     ensureHermesGateway,
+    sandboxModeSupported: bridge.sandboxModeSupported,
     hermesSessionItems,
     hermesSessionMessages,
     hermesSessionMessagesRef,
@@ -2322,7 +2330,9 @@ export function AgentWorkspace({
     if (!instruction) return;
     // The instruction is shown as a read-only steer card tacked to the composer
     // (see the submit path) rather than a transcript line.
-    const gateway = await ensureHermesGateway(sessionUnrestricted(sessionId));
+    const gateway = await ensureHermesGateway(
+      effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+    );
     await createHermesMethods(gateway).steerSession({
       sessionId,
       text: instruction,
@@ -2382,6 +2392,7 @@ export function AgentWorkspace({
     clearSubmittedSteers,
     computerUseRunLeasesRef,
     ensureHermesGateway,
+    sandboxModeSupported: bridge.sandboxModeSupported,
     hermesSessionItems,
     refreshHermesSession,
     runtimeSessionIds,
@@ -2639,6 +2650,7 @@ export function AgentWorkspace({
   });
 
   const composer = renderAgentComposer({
+    sandboxModeSupported: bridge.sandboxModeSupported,
     SESSION_BUSY_NOTICE,
     activeGenerationCostQuality,
     activePanel,
@@ -2771,6 +2783,7 @@ export function AgentWorkspace({
 
   const detailContent = renderAgentDetailContent({
     activeThinkingKey,
+    sandboxModeSupported: bridge.sandboxModeSupported,
     approvalSubmitting,
     branchFromMessage,
     branchingMessageId,
@@ -2826,6 +2839,7 @@ export function AgentWorkspace({
   });
 
   return renderAgentWorkspaceLayout({
+    sandboxModeSupported: bridge.sandboxModeSupported,
     ACTIVITY_DRAWER_ENABLED,
     activeAgentCount,
     activePanel,

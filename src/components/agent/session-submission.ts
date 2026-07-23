@@ -6,12 +6,13 @@ import {
 import { dispatchAgentSessionStatus } from "../../lib/agent-events";
 import { prepareProjectPrompt } from "../../lib/agent-project-context";
 import { startAgentRunMonitoring } from "../../lib/agent-run-monitor";
-import { rememberSessionMode, sessionUnrestricted } from "../../lib/agent-session-modes";
+import { effectiveSessionFullMode, rememberSessionMode } from "../../lib/agent-session-modes";
 import { withTimeout } from "../../lib/async-timeout";
 import { messageFromError } from "../../lib/errors";
 import { titleFromPrompt } from "../../lib/hermes-adapter";
 import { createHermesMethods, hermesModeFor } from "../../lib/hermes-control-plane";
 import { isSessionBusyError } from "../../lib/hermes-gateway";
+import { hermesGatewayFullMode } from "../../lib/hermes-connection";
 import { pendingImageAttachments } from "../../lib/hermes-image-attach";
 import { applySessionModelWhenIdle } from "../../lib/hermes-next-prompt-model";
 import {
@@ -72,6 +73,7 @@ export function createSubmitHermesSession(dependencies: SubmitHermesSessionDepen
     defaultGenerationModelIdRef,
     ensureHermesGateway,
     fullModeDraftRef,
+    sandboxModeSupported,
     generationCostQualityRef,
     generationModelsRef,
     generationSelectionIntentRevisionRef,
@@ -291,7 +293,7 @@ export function createSubmitHermesSession(dependencies: SubmitHermesSessionDepen
         const [nextGateway] = await Promise.all([
           ensureHermesGateway(
             targetStoredSessionId
-              ? sessionUnrestricted(targetStoredSessionId)
+              ? effectiveSessionFullMode(targetStoredSessionId, sandboxModeSupported)
               : fullModeDraftRef.current,
           ),
           // Re-read the sticky active profile for every brand-new session so an
@@ -397,6 +399,9 @@ export function createSubmitHermesSession(dependencies: SubmitHermesSessionDepen
       pendingIssueReportsRef.current.set(storedSessionId, options.issueReport);
     }
     if (!targetStoredSessionId) {
+      // Persist the user's requested preference, not the platform's effective
+      // fallback. If Windows gains a real sandbox later, today's default
+      // sessions should remain eligible for that safer default.
       rememberSessionMode(storedSessionId, fullModeDraftRef.current);
     }
     const sessionDisplayTitle = sessionTitle;
@@ -691,7 +696,9 @@ export function createSubmitHermesSession(dependencies: SubmitHermesSessionDepen
           storedSessionId,
           runtimeSessionId,
           title: sessionDisplayTitle,
-          fullMode: sessionUnrestricted(storedSessionId),
+          fullMode:
+            hermesGatewayFullMode(gateway) ??
+            effectiveSessionFullMode(storedSessionId, sandboxModeSupported),
           settlementHeld: true,
         });
         projectContextSignaturesBySessionId.set(

@@ -44,3 +44,12 @@ never as Hermes.
   so a runtime upgrade that adds events is visible rather than silently dropped.
 - See [docs/hermes-architecture.md](../hermes-architecture.md) for the full
   bridge / gateway / control-plane layering.
+
+## Addendum (2026-07-23): Windows runs one unrestricted runtime
+
+The write-jail in this decision is a macOS Seatbelt boundary. Windows has no
+equivalent Hermes OS sandbox, so June canonicalizes both compatibility mode
+aliases (`sandboxed` and `unrestricted`) to one effective Full-mode process on
+Windows. The bridge reports this capability explicitly; Windows UI must not
+offer or claim a sandbox. Stored per-session mode metadata is historical and is
+not rewritten. A Windows sandbox, including Job Objects, remains out of scope.

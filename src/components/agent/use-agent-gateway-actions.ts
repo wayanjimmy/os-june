@@ -7,8 +7,8 @@ import {
   type CompressSessionResult,
 } from "../../lib/hermes-session-compress";
 import { messageFromError } from "../../lib/errors";
-import { hermesConnectionForMode } from "../../lib/hermes-connection";
-import { sessionUnrestricted } from "../../lib/agent-session-modes";
+import { hermesConnectionForMode, rememberHermesGatewayMode } from "../../lib/hermes-connection";
+import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import { COMPACTED_CONTEXT_SIGNATURE } from "../../lib/agent-project-context";
 import { isSessionGoneError } from "./agent-workspace-errors";
 import { type HermesRuntimeSessionResponse } from "./agent-session-continuity";
@@ -26,21 +26,30 @@ export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDepen
   } = dependencies;
 
   async function ensureHermesGateway(fullMode = false) {
-    let connection = hermesConnectionForMode(bridge.running ? bridge : undefined, fullMode);
+    // The native capability is authoritative. On unsupported Windows both
+    // historical session modes share the sole Full-mode client and process.
+    // Until status resolves, preserve strict supported-platform routing.
+    const effectiveFullMode = bridge.sandboxModeSupported === false ? true : fullMode;
+    let connection = hermesConnectionForMode(
+      bridge.running ? bridge : undefined,
+      effectiveFullMode,
+    );
     if (!connection) {
-      const next = await startBridge(fullMode);
-      connection = hermesConnectionForMode(next, fullMode);
+      const next = await startBridge(effectiveFullMode);
+      connection = hermesConnectionForMode(next, effectiveFullMode);
     }
-    const wsUrl = connection?.wsUrl;
-    if (!wsUrl) throw new Error("Hermes bridge did not return a gateway URL.");
-    let gateway = gatewaysRef.current.get(fullMode);
+    if (!connection?.wsUrl) throw new Error("Hermes bridge did not return a gateway URL.");
+    const wsUrl = connection.wsUrl;
+    const connectionFullMode = Boolean(connection.fullMode);
+    let gateway = gatewaysRef.current.get(connectionFullMode);
     if (!gateway) {
       gateway = new HermesGatewayClient();
-      gatewaysRef.current.set(fullMode, gateway);
+      gatewaysRef.current.set(connectionFullMode, gateway);
       // Fires only on unexpected drops — the unmount close() detaches the
       // socket first, and a superseded socket never notifies.
-      gateway.onClose(() => gatewayCloseHandlerRef.current(fullMode));
+      gateway.onClose(() => gatewayCloseHandlerRef.current(connectionFullMode));
     }
+    rememberHermesGatewayMode(gateway, connectionFullMode);
     await gateway.connect(wsUrl);
     return gateway;
   }
@@ -52,7 +61,9 @@ export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDepen
   // feature 11's activity drawer.
   const fetchSessionUsage = useCallback(
     async (storedSessionId: string): Promise<SessionUsage> => {
-      const gateway = await ensureHermesGateway(sessionUnrestricted(storedSessionId));
+      const gateway = await ensureHermesGateway(
+        effectiveSessionFullMode(storedSessionId, bridge.sandboxModeSupported),
+      );
       const methods = createHermesMethods(gateway);
       const usageFor = async (runtimeId: string) =>
         parseSessionUsage(storedSessionId, await methods.getSessionUsage({ sessionId: runtimeId }));
@@ -95,7 +106,9 @@ export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDepen
   // stays decoupled from the gateway, mirroring fetchSessionUsage.
   const compressSessionContext = useCallback(
     async (sessionId: string): Promise<CompressSessionResult> => {
-      const gateway = await ensureHermesGateway(sessionUnrestricted(sessionId));
+      const gateway = await ensureHermesGateway(
+        effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+      );
       const raw = await createHermesMethods(gateway).compressSession({
         sessionId,
       });

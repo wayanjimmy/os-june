@@ -71,6 +71,7 @@ export type SubmitHermesSessionDependencies = {
   creditActionsDisabledReason: string | undefined;
   defaultGenerationModelIdRef: React.MutableRefObject<string>;
   ensureHermesGateway: (fullMode?: boolean) => Promise<HermesGatewayClient>;
+  sandboxModeSupported?: boolean;
   fullModeDraftRef: React.MutableRefObject<boolean>;
   generationCostQualityRef: React.MutableRefObject<number | undefined>;
   generationModelsRef: React.MutableRefObject<VeniceModelDto[]>;

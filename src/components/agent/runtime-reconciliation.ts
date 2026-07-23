@@ -1,6 +1,6 @@
 import { dispatchAgentSessionStatus } from "../../lib/agent-events";
 import { cancelAgentRunMonitoring, releaseAgentRunSettlement } from "../../lib/agent-run-monitor";
-import { sessionUnrestricted } from "../../lib/agent-session-modes";
+import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import {
   agentActivityCountsFromStore,
   sessionHasAssistantAfterLatestUser,
@@ -10,6 +10,7 @@ import type { createRuntimeReconciliationDependencies } from "./runtime-reconcil
 export function createRuntimeReconciliation(dependencies: createRuntimeReconciliationDependencies) {
   const {
     ensureHermesGateway,
+    sandboxModeSupported,
     hermesSessionItems,
     pendingAttachmentPreparationsRef,
     pendingSteerBySessionIdRef,
@@ -89,13 +90,19 @@ export function createRuntimeReconciliation(dependencies: createRuntimeReconcili
     // has one and union the answers. A mode we can't reach keeps its
     // sessions' current state rather than guessing — so a one-gateway
     // failure must not mark the other mode's sessions dead either.
-    const modes = Array.from(new Set(working.map((sessionId) => sessionUnrestricted(sessionId))));
+    const modes = Array.from(
+      new Set(
+        working.map((sessionId) => effectiveSessionFullMode(sessionId, sandboxModeSupported)),
+      ),
+    );
     const snapshot = await liveRuntimeSessionsForModes(modes);
     if (snapshot.reachableModes.size === 0) return;
     for (const sessionId of working) {
       // Sessions of an unreachable mode were not in any answer we got;
       // counting them as misses would mark live work dead.
-      if (!snapshot.reachableModes.has(sessionUnrestricted(sessionId))) continue;
+      if (!snapshot.reachableModes.has(effectiveSessionFullMode(sessionId, sandboxModeSupported))) {
+        continue;
+      }
       if (runtimeSnapshotHasSession(snapshot, sessionId)) {
         misses.delete(sessionId);
         continue;

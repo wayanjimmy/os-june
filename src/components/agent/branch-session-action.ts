@@ -11,7 +11,7 @@ import {
   type BranchSessionResult,
 } from "../../lib/hermes-session-branch";
 import { messageFromError } from "../../lib/errors";
-import { rememberSessionMode, sessionUnrestricted } from "../../lib/agent-session-modes";
+import { effectiveSessionFullMode, rememberSessionMode } from "../../lib/agent-session-modes";
 import { isSessionGoneError } from "./agent-workspace-errors";
 import {
   rememberComposerDraft,
@@ -36,6 +36,7 @@ export function createBranchSessionAction(dependencies: createBranchSessionActio
     composerEditorRef,
     draftRef,
     ensureHermesGateway,
+    sandboxModeSupported,
     hermesSessionItems,
     hermesSessionMessages,
     hermesSessionMessagesRef,
@@ -87,7 +88,7 @@ export function createBranchSessionAction(dependencies: createBranchSessionActio
       id: BRANCH_TOAST_ID,
     });
     let branched = false;
-    const unrestricted = sessionUnrestricted(modeSessionId);
+    const unrestricted = effectiveSessionFullMode(modeSessionId, sandboxModeSupported);
     try {
       const gateway = await ensureHermesGateway(unrestricted);
       const methods = createHermesMethods(gateway);

@@ -45,6 +45,21 @@ function secretPart(
 }
 
 describe("SudoPart card", () => {
+  it("shows the Windows full-access warning without a mode badge when sandbox mode is unsupported", async () => {
+    render(
+      <SudoPart
+        part={sudoPart({ mode: "unrestricted" })}
+        onSudo={() => {}}
+        sandboxModeSupported={false}
+      />,
+    );
+    expect(screen.queryByText("Unrestricted")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /details/i }));
+    expect(
+      screen.getByText("Will run with full access to files available to your Windows account."),
+    ).toBeInTheDocument();
+  });
+
   it("blocks the session with an explicit approve/deny card showing the reason and mode", async () => {
     render(<SudoPart part={sudoPart()} onSudo={() => {}} />);
 

@@ -28,6 +28,7 @@ function renderDrawer(props: Partial<Parameters<typeof AgentActivityDrawer>[0]> 
       open
       records={[]}
       status="ready"
+      sandboxModeSupported
       now={NOW}
       titleForSession={() => undefined}
       onOpenSession={vi.fn()}
@@ -40,6 +41,14 @@ function renderDrawer(props: Partial<Parameters<typeof AgentActivityDrawer>[0]> 
 }
 
 describe("AgentActivityDrawer", () => {
+  it("hides mode pills when sandbox mode is unsupported", () => {
+    renderDrawer({
+      sandboxModeSupported: false,
+      records: [record({ sessionId: "s1", mode: "unrestricted" })],
+    });
+    expect(screen.queryByText("Unrestricted")).not.toBeInTheDocument();
+  });
+
   it("renders nothing when closed", () => {
     const { container } = renderDrawer({ open: false });
     expect(container).toBeEmptyDOMElement();

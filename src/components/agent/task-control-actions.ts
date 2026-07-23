@@ -2,7 +2,7 @@ import { cancelAgentTask, computerUseStop, retryAgentTask } from "../../lib/taur
 import { dispatchAgentSessionStatus } from "../../lib/agent-events";
 import { createHermesMethods } from "../../lib/hermes-control-plane";
 import { messageFromError } from "../../lib/errors";
-import { sessionUnrestricted } from "../../lib/agent-session-modes";
+import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import type { createTaskControlActionsDependencies } from "./task-control-actions-types";
 
 export function createTaskControlActions(dependencies: createTaskControlActionsDependencies) {
@@ -12,6 +12,7 @@ export function createTaskControlActions(dependencies: createTaskControlActionsD
     clearSubmittedSteers,
     computerUseRunLeasesRef,
     ensureHermesGateway,
+    sandboxModeSupported,
     hermesSessionItems,
     refreshHermesSession,
     runtimeSessionIds,
@@ -72,7 +73,9 @@ export function createTaskControlActions(dependencies: createTaskControlActionsD
       await computerUseStopRequest;
       const runtimeSessionId = runtimeSessionIds[sessionId];
       if (runtimeSessionId) {
-        const gateway = await ensureHermesGateway(sessionUnrestricted(sessionId));
+        const gateway = await ensureHermesGateway(
+          effectiveSessionFullMode(sessionId, sandboxModeSupported),
+        );
         await gateway.request("session.interrupt", {
           session_id: runtimeSessionId,
         });
@@ -109,7 +112,9 @@ export function createTaskControlActions(dependencies: createTaskControlActionsD
     subagentId: string;
   }): Promise<unknown> {
     const runtimeSessionId = runtimeSessionIds[sessionId] ?? sessionId;
-    const gateway = await ensureHermesGateway(sessionUnrestricted(sessionId));
+    const gateway = await ensureHermesGateway(
+      effectiveSessionFullMode(sessionId, sandboxModeSupported),
+    );
     return createHermesMethods(gateway).interruptSubagent({
       sessionId: runtimeSessionId,
       subagentId,

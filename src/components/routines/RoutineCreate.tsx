@@ -47,6 +47,7 @@ export type RoutineCreateInput = {
 };
 
 type RoutineCreateProps = {
+  sandboxModeSupported?: boolean;
   /** Prefills the editor; the user still reviews and saves explicitly. */
   template?: RoutineTemplate;
   creating: boolean;
@@ -55,7 +56,14 @@ type RoutineCreateProps = {
   onCreate: (input: RoutineCreateInput) => void;
 };
 
-export function RoutineCreate({ template, creating, error, onBack, onCreate }: RoutineCreateProps) {
+export function RoutineCreate({
+  template,
+  sandboxModeSupported,
+  creating,
+  error,
+  onBack,
+  onCreate,
+}: RoutineCreateProps) {
   const [name, setName] = useState(template?.name ?? "");
   const [draft, setDraft] = useState<ScheduleDraft>(() =>
     template ? draftFromSchedule(template.schedule) : { kind: "daily", time: "09:00" },
@@ -116,7 +124,8 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
   const triggerScopeSatisfied =
     triggerBundles.length === 0 ||
     (connectedAccount != null && scopesCoverBundles(connectedAccount.scopes, triggerBundles));
-  const blocked = !scopeGateSatisfied || !triggerScopeSatisfied;
+  const blocked =
+    sandboxModeSupported === undefined || !scopeGateSatisfied || !triggerScopeSatisfied;
 
   async function connectForTemplate() {
     if (!requiredScopes || connectBusy) return;
@@ -250,7 +259,9 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
               Access
             </h2>
             <div className="settings-card">
-              <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
+              {sandboxModeSupported === true ? (
+                <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
+              ) : null}
             </div>
           </section>
 

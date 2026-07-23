@@ -35,6 +35,7 @@ import type { RenderAgentComposerDependencies } from "./AgentComposer-types";
 
 export function renderAgentComposer(dependencies: RenderAgentComposerDependencies) {
   const {
+    sandboxModeSupported,
     SESSION_BUSY_NOTICE,
     activeGenerationCostQuality,
     activePanel,
@@ -454,7 +455,7 @@ export function renderAgentComposer(dependencies: RenderAgentComposerDependencie
           >
             <IconPlusMedium size={18} />
           </button>
-          {heroMode ? (
+          {heroMode && sandboxModeSupported === true ? (
             // Unrestricted only applies to the session being created, so
             // the picker lives in the hero composer's toolbar and nowhere
             // else. The menu itself renders as a sibling of the box (below)
@@ -700,7 +701,7 @@ export function renderAgentComposer(dependencies: RenderAgentComposerDependencie
           }}
         />
       ) : null}
-      {heroMode && sandboxMenuOpen ? (
+      {heroMode && sandboxModeSupported === true && sandboxMenuOpen ? (
         <div
           ref={sandboxMenuRef}
           className="agent-sandbox-menu"
@@ -741,7 +742,7 @@ export function renderAgentComposer(dependencies: RenderAgentComposerDependencie
         </div>
       ) : null}
       <Dialog
-        open={confirmUnrestricted}
+        open={sandboxModeSupported === true && confirmUnrestricted}
         onClose={() => setConfirmUnrestricted(false)}
         title="Turn on Unrestricted?"
         description="June will be able to change any file your account can, not just its own workspace. This comes with risks like data loss if something goes wrong."

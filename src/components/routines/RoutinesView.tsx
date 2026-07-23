@@ -45,6 +45,7 @@ import { compactScheduleLabel, humanizeSchedule } from "../../lib/routine-schedu
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import {
   connectorTriggerSet,
+  hermesBridgeStatus,
   routineTrustRecordRun,
   routineTrustSet,
   type HermesSessionInfo,
@@ -109,6 +110,7 @@ export function RoutinesView({
   onOpenRun,
   creditActionsDisabledReason,
 }: RoutinesViewProps) {
+  const [sandboxModeSupported, setSandboxModeSupported] = useState<boolean>();
   const [allRoutines, setRoutines] = useState<RoutineJob[]>([]);
   const [loadingState, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -129,6 +131,7 @@ export function RoutinesView({
   // sandboxed on every open: like the chat picker, Unrestricted is a
   // deliberate per-creation opt-in, never a sticky preference.
   const [describeUnrestricted, setDescribeUnrestricted] = useState(false);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [allRuns, setRuns] = useState<HermesSessionInfo[]>([]);
   const [runsUnavailableState, setRunsUnavailable] = useState(false);
   const runLoadSequenceRef = useRef(0);
@@ -143,6 +146,29 @@ export function RoutinesView({
   const runs = forcedEmpty ? NO_RUNS : allRuns;
   const loading = !forcedEmpty && loadingState;
   const runsUnavailable = !forcedEmpty && runsUnavailableState;
+
+  const loadSandboxCapability = useCallback(async () => {
+    try {
+      const status = await hermesBridgeStatus();
+      setSandboxModeSupported(status.sandboxModeSupported);
+      setCapabilityError(null);
+      return status.sandboxModeSupported;
+    } catch {
+      setSandboxModeSupported(undefined);
+      setCapabilityError("June could not check routine access support. Try again.");
+      return undefined;
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadSandboxCapability().then((supported) => {
+      if (cancelled || supported !== undefined) return;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSandboxCapability]);
 
   // `loading` gates the whole list and only covers the first fetch;
   // `refreshing` covers every fetch so reloads keep the list visible while
@@ -305,7 +331,10 @@ export function RoutinesView({
   async function submitCreate(input: RoutineCreateInput) {
     setCreating(true);
     try {
+      const supported = sandboxModeSupported ?? (await loadSandboxCapability());
+      if (supported === undefined) return;
       const eventTrigger = input.trigger.source !== "schedule" ? input.trigger : null;
+      const unrestricted = supported === false ? true : input.unrestricted;
       // A routine is connector-aware when anything about it touches Google:
       // a non-default trust mode, an event trigger, or a connector template's
       // scope requirements. Plain routines keep the legacy create path
@@ -324,14 +353,14 @@ export function RoutinesView({
               schedule: eventTrigger ? eventTriggerScheduleDraft().schedule : input.schedule,
               name: input.name,
               enabledToolsets: routineToolsetsFor(input.trustMode, {
-                unrestricted: input.unrestricted,
+                unrestricted,
               }),
             }
           : {
               prompt: input.prompt,
               schedule: input.schedule,
               name: input.name,
-              unrestricted: input.unrestricted,
+              unrestricted,
             },
       );
       if (connectorAware) {
@@ -406,19 +435,21 @@ export function RoutinesView({
     }
   }
 
-  function submitDescribe() {
+  async function submitDescribe() {
     // Describing a routine runs a Hermes session, so it's metered like every
     // other composer; the guard backs the disabled send button (Enter still
     // submits the form).
     if (creditActionsDisabledReason) return;
     const description = describeDraft.trim();
     if (!description) return;
+    const supported = sandboxModeSupported ?? (await loadSandboxCapability());
+    if (supported === undefined) return;
     setDescribeDraft("");
     // routineCreationPrompt is async: for an unrestricted routine it strips the
     // native memory toolset from the list it embeds when Memory is off, so the
     // describe path can't grant Hermes' unscoped store behind the off switch.
     void routineCreationPrompt(description, {
-      unrestricted: describeUnrestricted,
+      unrestricted: supported === false ? true : describeUnrestricted,
     }).then(onCreateRoutine);
   }
 
@@ -468,10 +499,11 @@ export function RoutinesView({
     <DescribeBar
       draft={describeDraft}
       unrestricted={describeUnrestricted}
+      sandboxModeSupported={sandboxModeSupported}
       disabledReason={creditActionsDisabledReason}
       onDraftChange={setDescribeDraft}
       onUnrestrictedChange={setDescribeUnrestricted}
-      onSubmit={submitDescribe}
+      onSubmit={() => void submitDescribe()}
     />
   );
 
@@ -493,6 +525,7 @@ export function RoutinesView({
     return (
       <>
         <RoutineCreate
+          sandboxModeSupported={sandboxModeSupported}
           template={page.template}
           creating={creating}
           error={createError}
@@ -510,6 +543,7 @@ export function RoutinesView({
     return (
       <>
         <RoutineDetail
+          sandboxModeSupported={sandboxModeSupported}
           key={detailRoutine.job_id}
           routine={detailRoutine}
           runs={routineRuns}
@@ -541,7 +575,12 @@ export function RoutinesView({
           </h1>
           <p className="folders-subtitle">Automations June runs for you on a schedule.</p>
         </div>
-        <button type="button" className="primary-action primary-solid" onClick={() => openCreate()}>
+        <button
+          type="button"
+          className="primary-action primary-solid"
+          disabled={sandboxModeSupported === undefined}
+          onClick={() => openCreate()}
+        >
           <IconPlusMedium size={13} />
           New routine
         </button>
@@ -583,6 +622,12 @@ export function RoutinesView({
           retrying={refreshing}
         />
       ) : null}
+      {capabilityError ? (
+        <RoutineErrorBanner
+          message={capabilityError}
+          onRetry={() => void loadSandboxCapability()}
+        />
+      ) : null}
 
       {loading ? (
         <div className="folders-empty">
@@ -590,7 +635,7 @@ export function RoutinesView({
         </div>
       ) : routines.length === 0 ? (
         <div className="routines-hero">
-          <TemplateGrid onPick={openCreate} />
+          <TemplateGrid sandboxModeSupported={sandboxModeSupported} onPick={openCreate} />
         </div>
       ) : filtered.length === 0 ? (
         <div className="folders-empty">
@@ -600,6 +645,7 @@ export function RoutinesView({
         <ul className="routines-list" role="list" aria-label="Routines">
           {filtered.map((routine) => (
             <RoutineRow
+              sandboxModeSupported={sandboxModeSupported}
               key={routine.job_id}
               routine={routine}
               busy={busyIds.has(routine.job_id)}
@@ -650,7 +696,7 @@ export function RoutinesView({
           <header className="routines-section-header">
             <h2>Starter routines</h2>
           </header>
-          <TemplateGrid onPick={openCreate} />
+          <TemplateGrid sandboxModeSupported={sandboxModeSupported} onPick={openCreate} />
         </section>
       ) : null}
 
@@ -660,7 +706,13 @@ export function RoutinesView({
   );
 }
 
-function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void }) {
+function TemplateGrid({
+  sandboxModeSupported,
+  onPick,
+}: {
+  sandboxModeSupported?: boolean;
+  onPick: (template: RoutineTemplate) => void;
+}) {
   return (
     <ul className="routines-template-grid" role="list">
       {ROUTINE_TEMPLATES.map((template) => (
@@ -671,7 +723,7 @@ function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void 
           <div className="routines-template-body">
             <span className="routines-template-name">
               {template.name}
-              {template.unrestricted ? (
+              {sandboxModeSupported === true && template.unrestricted ? (
                 // The list rows spell the badge out; cards just flash the
                 // warm shield and let the tip carry the explanation.
                 <HoverTip
@@ -712,6 +764,7 @@ function TemplateGrid({ onPick }: { onPick: (template: RoutineTemplate) => void 
 }
 
 function RoutineRow({
+  sandboxModeSupported,
   routine,
   busy,
   onOpen,
@@ -719,6 +772,7 @@ function RoutineRow({
   runNowDisabledReason,
   onDelete,
 }: {
+  sandboxModeSupported?: boolean;
   routine: RoutineJob;
   busy: boolean;
   onOpen: () => void;
@@ -769,7 +823,7 @@ function RoutineRow({
         <span className="routines-item-body">
           <span className="routines-item-title">
             <span className="routines-item-name">{routine.name}</span>
-            {routineUnrestricted(routine) ? (
+            {sandboxModeSupported === true && routineUnrestricted(routine) ? (
               <HoverTip
                 tip="This routine runs with full access: when it fires, June can run commands and change any file your account can. Routines without this badge run sandboxed and cannot touch your files."
                 className="routines-item-badge routines-item-badge-warm"
@@ -942,6 +996,7 @@ const DEJUNE_MODE_OPTIONS = [
 function DescribeBar({
   draft,
   unrestricted,
+  sandboxModeSupported,
   disabledReason,
   onDraftChange,
   onUnrestrictedChange,
@@ -949,6 +1004,7 @@ function DescribeBar({
 }: {
   draft: string;
   unrestricted: boolean;
+  sandboxModeSupported?: boolean;
   /** Set while funding blocks metered actions: send disables with this as
    * its tooltip (the draft itself stays editable, like the chat composers). */
   disabledReason?: string;
@@ -1005,28 +1061,32 @@ function DescribeBar({
             }}
           />
           <div className="agent-composer-toolbar">
-            <button
-              type="button"
-              className="agent-sandbox-trigger"
-              data-unrestricted={unrestricted ? "true" : undefined}
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              title="Change what this routine can touch"
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              {unrestricted ? (
-                <IconShieldCrossed size={14} aria-hidden />
-              ) : (
-                <IconShieldCheck size={14} aria-hidden />
-              )}
-              {unrestricted ? "Unrestricted" : "Sandboxed"}
-              <IconChevronDownSmall size={12} aria-hidden />
-            </button>
+            {sandboxModeSupported === true ? (
+              <button
+                type="button"
+                className="agent-sandbox-trigger"
+                data-unrestricted={unrestricted ? "true" : undefined}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                title="Change what this routine can touch"
+                onClick={() => setMenuOpen((open) => !open)}
+              >
+                {unrestricted ? (
+                  <IconShieldCrossed size={14} aria-hidden />
+                ) : (
+                  <IconShieldCheck size={14} aria-hidden />
+                )}
+                {unrestricted ? "Unrestricted" : "Sandboxed"}
+                <IconChevronDownSmall size={12} aria-hidden />
+              </button>
+            ) : null}
             <div className="agent-composer-actions">
               <button
                 type="submit"
                 className="agent-composer-send"
-                disabled={!draft.trim() || Boolean(disabledReason)}
+                disabled={
+                  sandboxModeSupported === undefined || !draft.trim() || Boolean(disabledReason)
+                }
                 aria-label="Ask June to set it up"
                 title={disabledReason}
               >
@@ -1035,7 +1095,7 @@ function DescribeBar({
             </div>
           </div>
         </div>
-        {menuOpen ? (
+        {sandboxModeSupported === true && menuOpen ? (
           <div
             className="agent-sandbox-menu"
             role="menu"

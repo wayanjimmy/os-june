@@ -45,6 +45,15 @@ export function sessionUnrestricted(sessionId: string | undefined): boolean {
   return readStore()[sessionId] === true;
 }
 
+/** Runtime routing mode for a stored session. The stored bit remains historical
+ * metadata; unsupported platforms route every session to the sole Full process. */
+export function effectiveSessionFullMode(
+  sessionId: string | undefined,
+  sandboxModeSupported: boolean | undefined,
+): boolean {
+  return sandboxModeSupported === false ? true : sessionUnrestricted(sessionId);
+}
+
 export function rememberSessionMode(sessionId: string, unrestricted: boolean) {
   const store = readStore();
   if (unrestricted) {

@@ -10,6 +10,7 @@ import type * as React from "react";
 
 export type createRuntimeReconciliationDependencies = {
   ensureHermesGateway: (fullMode?: boolean) => Promise<HermesGatewayClient>;
+  sandboxModeSupported?: boolean;
   hermesSessionItems: HermesSessionInfo[];
   pendingAttachmentPreparationsRef: React.MutableRefObject<
     Record<string, Map<number, PendingAttachmentPreparation>>

@@ -25,6 +25,7 @@ import { type AgentArtifact, type AgentArtifactPanelState } from "./chat-turns/A
 import type * as React from "react";
 
 export type RenderAgentWorkspaceLayoutDependencies = {
+  sandboxModeSupported?: boolean;
   ACTIVITY_DRAWER_ENABLED: false;
   activeAgentCount: number;
   activePanel: AgentPanel;

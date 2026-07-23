@@ -57,10 +57,13 @@ classified events into `AgentChatTurn` / `AgentChatPart[]` for rendering.
 
 ## Key concepts
 
-- **Two runtimes keyed by write-mode.** `gatewaysRef: Map<boolean, client>`;
+- **Runtimes keyed by effective write-mode.** On macOS,
+  `gatewaysRef: Map<boolean, client>` keeps two runtimes;
   `sandboxed` (default) vs `unrestricted` (per-session opt-in). Follow-ups route
   to the runtime matching the session's original mode, so one unrestricted
-  session cannot un-sandbox others.
+  session cannot un-sandbox others. Windows has no OS sandbox and canonicalizes
+  both compatibility aliases to one Full-mode process. Stored session mode
+  metadata is left untouched.
 - **Stored vs runtime session id.** The UI keys everything on the persistent
   **stored** id; RPCs target the live **runtime** id. Sessions render
   optimistically before the first message persists, with rollback/migrate paths.

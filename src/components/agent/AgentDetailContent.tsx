@@ -5,7 +5,7 @@ import { hermesTraceBuffer } from "../../lib/hermes-trace-buffer";
 import { UnsupportedEventNotice } from "./UnsupportedEventNotice";
 import { HermesTracePanel } from "./HermesTracePanel";
 import { PrivacyModeBadge } from "./composer/ModelPicker";
-import { sessionUnrestricted } from "../../lib/agent-session-modes";
+import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import { upstreamProviderRecoveryStore } from "../../lib/upstream-provider-recovery";
 import { setGalleryDesired } from "./agent-dev-tools";
 import { AgentResponseGallery } from "./chat-turns/TranscriptViews";
@@ -16,6 +16,7 @@ import type { RenderAgentDetailContentDependencies } from "./AgentDetailContent-
 export function renderAgentDetailContent(dependencies: RenderAgentDetailContentDependencies) {
   const {
     activeThinkingKey,
+    sandboxModeSupported,
     approvalSubmitting,
     branchFromMessage,
     branchingMessageId,
@@ -115,6 +116,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
         <AgentChatTurnRow
           key={turn.id}
           turn={turn}
+          sandboxModeSupported={sandboxModeSupported}
           activeThinkingKey={activeThinkingKey}
           artifacts={turnArtifacts.get(turn.id)}
           approvalSubmitting={approvalSubmitting}
@@ -165,7 +167,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
               part.sessionId ?? selectedHermesSessionId,
               part.id,
               choice,
-              sessionUnrestricted(selectedHermesSessionId),
+              effectiveSessionFullMode(selectedHermesSessionId, sandboxModeSupported),
             )
           }
           onTopUp={handleTopUp}
@@ -176,7 +178,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
               selectedHermesSessionId,
               part.id,
               answer,
-              sessionUnrestricted(selectedHermesSessionId),
+              effectiveSessionFullMode(selectedHermesSessionId, sandboxModeSupported),
             )
           }
           onSudo={(part, approved) =>
@@ -186,7 +188,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
               part.id,
               approved,
               part.mode,
-              sessionUnrestricted(selectedHermesSessionId),
+              effectiveSessionFullMode(selectedHermesSessionId, sandboxModeSupported),
             )
           }
           onSecret={(part, value) =>
@@ -195,7 +197,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
               part.sessionId ?? selectedHermesSessionId,
               part.id,
               value,
-              sessionUnrestricted(selectedHermesSessionId),
+              effectiveSessionFullMode(selectedHermesSessionId, sandboxModeSupported),
             )
           }
           onBranch={(messageId, sessionId) =>
@@ -254,6 +256,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
           <AgentChatTurnRow
             key={turn.id}
             turn={turn}
+            sandboxModeSupported={sandboxModeSupported}
             activeThinkingKey={activeThinkingKey}
             artifacts={turnArtifacts.get(turn.id)}
             approvalSubmitting={approvalSubmitting}
@@ -287,7 +290,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
                 sessionId,
                 part.id,
                 choice,
-                sessionUnrestricted(selectedTask.hermesSessionId),
+                effectiveSessionFullMode(selectedTask.hermesSessionId, sandboxModeSupported),
               );
             }}
             onClarify={(part, answer) =>
@@ -295,7 +298,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
                 selectedTask.id,
                 part.id,
                 answer,
-                sessionUnrestricted(selectedTask.hermesSessionId),
+                effectiveSessionFullMode(selectedTask.hermesSessionId, sandboxModeSupported),
               )
             }
             onSudo={(part, approved) => {
@@ -307,7 +310,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
                 part.id,
                 approved,
                 part.mode,
-                sessionUnrestricted(selectedTask.hermesSessionId),
+                effectiveSessionFullMode(selectedTask.hermesSessionId, sandboxModeSupported),
               );
             }}
             onSecret={(part, value) => {
@@ -318,7 +321,7 @@ export function renderAgentDetailContent(dependencies: RenderAgentDetailContentD
                 sessionId,
                 part.id,
                 value,
-                sessionUnrestricted(selectedTask.hermesSessionId),
+                effectiveSessionFullMode(selectedTask.hermesSessionId, sandboxModeSupported),
               );
             }}
           />

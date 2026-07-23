@@ -10,6 +10,7 @@ import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { HoverTip } from "../ui/HoverTip";
 import {
   hermesAgentCliAccess,
+  hermesBridgeStatus,
   hermesBridgeFilesystemSnapshot,
   hermesBridgeMessagingPlatforms,
   agentHudHide,
@@ -88,6 +89,19 @@ export function AgentSettingsSection({
   const [cliAccessEnabled, setCliAccessEnabled] = useState<boolean | null>(null);
   const [cliAccessSaving, setCliAccessSaving] = useState(false);
   const [cliAccessLoadFailed, setCliAccessLoadFailed] = useState(false);
+  const [sandboxModeSupported, setSandboxModeSupported] = useState<boolean>();
+
+  useEffect(() => {
+    let cancelled = false;
+    void hermesBridgeStatus()
+      .then((status) => {
+        if (!cancelled) setSandboxModeSupported(status.sandboxModeSupported);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [projectImportOpen, setProjectImportOpen] = useState(false);
   const linkedProjectCount = folders.filter((folder) => folder.localPath).length;
 
@@ -408,57 +422,59 @@ export function AgentSettingsSection({
                 />
               </div>
             </div>
-            <div className="settings-row">
-              <div className="settings-row-info">
-                <h3 className="settings-row-title settings-row-title-with-info">
-                  Agent CLI access
-                  <HoverTip
-                    className="settings-row-info-tip"
-                    tip={
-                      <>
-                        Sandboxed sessions gain write access to those CLIs' own settings and session
-                        folders. Some CLIs (Codex among them) will not even start without it; others
-                        lose their login. Those folders configure software that also runs outside
-                        June's sandbox, so leave this off unless you want June operating your CLIs.
-                        Applies to new sessions.
-                      </>
-                    }
-                    width={320}
-                  >
-                    <span
-                      className="settings-row-info-affordance"
-                      tabIndex={0}
-                      role="note"
-                      aria-label="Agent CLI access details"
+            {sandboxModeSupported === true ? (
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <h3 className="settings-row-title settings-row-title-with-info">
+                    Agent CLI access
+                    <HoverTip
+                      className="settings-row-info-tip"
+                      tip={
+                        <>
+                          Sandboxed sessions gain write access to those CLIs' own settings and
+                          session folders. Some CLIs (Codex among them) will not even start without
+                          it; others lose their login. Those folders configure software that also
+                          runs outside June's sandbox, so leave this off unless you want June
+                          operating your CLIs. Applies to new sessions.
+                        </>
+                      }
+                      width={320}
                     >
-                      <IconCircleInfo size={13} ariaHidden />
-                    </span>
-                  </HoverTip>
-                </h3>
-                <p className="settings-row-description">
-                  Let June drive the coding CLIs you already use, like Claude Code and Codex.
-                </p>
+                      <span
+                        className="settings-row-info-affordance"
+                        tabIndex={0}
+                        role="note"
+                        aria-label="Agent CLI access details"
+                      >
+                        <IconCircleInfo size={13} ariaHidden />
+                      </span>
+                    </HoverTip>
+                  </h3>
+                  <p className="settings-row-description">
+                    Let June drive the coding CLIs you already use, like Claude Code and Codex.
+                  </p>
+                </div>
+                <div className="settings-row-control">
+                  {cliAccessLoadFailed ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={cliAccessSaving}
+                      onClick={() => void handleCliAccessRetry()}
+                    >
+                      {cliAccessSaving ? "Trying again..." : "Try again"}
+                    </button>
+                  ) : (
+                    <Switch
+                      checked={cliAccessEnabled === true}
+                      disabled={cliAccessEnabled === null || cliAccessSaving}
+                      onCheckedChange={(enabled) => void handleCliAccessChange(enabled)}
+                      aria-label="Allow agent CLI access"
+                    />
+                  )}
+                </div>
               </div>
-              <div className="settings-row-control">
-                {cliAccessLoadFailed ? (
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    disabled={cliAccessSaving}
-                    onClick={() => void handleCliAccessRetry()}
-                  >
-                    {cliAccessSaving ? "Trying again..." : "Try again"}
-                  </button>
-                ) : (
-                  <Switch
-                    checked={cliAccessEnabled === true}
-                    disabled={cliAccessEnabled === null || cliAccessSaving}
-                    onCheckedChange={(enabled) => void handleCliAccessChange(enabled)}
-                    aria-label="Allow agent CLI access"
-                  />
-                )}
-              </div>
-            </div>
+            ) : null}
             <div className="settings-row">
               <div className="settings-row-info">
                 <h3 className="settings-row-title">Claude Code projects</h3>

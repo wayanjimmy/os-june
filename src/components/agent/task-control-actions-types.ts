@@ -16,6 +16,7 @@ export type createTaskControlActionsDependencies = {
   clearSubmittedSteers: (sessionId: string, options?: { preserveReservations?: boolean }) => void;
   computerUseRunLeasesRef: React.MutableRefObject<Map<string, Set<string>>>;
   ensureHermesGateway: (fullMode?: boolean) => Promise<HermesGatewayClient>;
+  sandboxModeSupported?: boolean;
   hermesSessionItems: HermesSessionInfo[];
   refreshHermesSession: (sessionId: string) => Promise<HermesSessionMessage[] | undefined>;
   runtimeSessionIds: Record<string, string>;

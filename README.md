@@ -68,7 +68,8 @@ verifiable.
   recording again.
 - **Agent.** A local agent, built on the open source Hermes framework, that
   helps with files, research, drafts, and scheduled routines. Sessions are
-  sandboxed by default and risky actions wait for your approval. Extend it
+  sandboxed by default on macOS; Windows sessions run with the access of your
+  Windows account. Risky actions wait for your approval. Extend it
   with skills, toolsets, and MCP servers.
 - **Image generation.** Create images from a prompt, through the same private
   routing as everything else.

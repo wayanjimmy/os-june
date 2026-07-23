@@ -19,7 +19,14 @@ function artifact(
 }
 
 function renderSection(props: Partial<Parameters<typeof AgentArtifactsSection>[0]> = {}) {
-  return render(<AgentArtifactsSection artifacts={[]} onOpenArtifact={vi.fn()} {...props} />);
+  return render(
+    <AgentArtifactsSection
+      artifacts={[]}
+      onOpenArtifact={vi.fn()}
+      sandboxModeSupported
+      {...props}
+    />,
+  );
 }
 
 describe("AgentArtifactsSection", () => {
@@ -60,6 +67,15 @@ describe("AgentArtifactsSection", () => {
     });
     const row = screen.getByRole("listitem");
     expect(within(row).getByText(/unrestricted/i)).toBeInTheDocument();
+  });
+
+  it("labels files as local paths when sandbox mode is unsupported", () => {
+    renderSection({
+      sandboxModeSupported: false,
+      artifacts: [artifact({ id: "a1", path: "/tmp/x.txt", mode: "sandboxed" })],
+    });
+    expect(screen.getByText("Local path")).toBeInTheDocument();
+    expect(screen.queryByText("Sandboxed copy")).not.toBeInTheDocument();
   });
 
   it("labels a url artifact as remote", () => {

@@ -17,6 +17,7 @@ import { type ComposerInputSizeWarning } from "./composer-input-helpers";
 import type * as React from "react";
 
 export type RenderAgentComposerDependencies = {
+  sandboxModeSupported?: boolean;
   SESSION_BUSY_NOTICE: "June is still working on the previous message.";
   activeGenerationCostQuality: number | undefined;
   activePanel: AgentPanel;

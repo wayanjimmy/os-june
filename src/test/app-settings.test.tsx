@@ -325,6 +325,7 @@ describe("AppSettings", () => {
     mocks.localAudioFileSrc.mockImplementation((path) => `asset://${path}`);
     mocks.hermesBridgeStatus.mockResolvedValue({
       running: true,
+      sandboxModeSupported: true,
       connections: [
         {
           baseUrl: "http://127.0.0.1:54321",

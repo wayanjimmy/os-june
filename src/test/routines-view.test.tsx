@@ -52,6 +52,7 @@ vi.mock("../lib/hermes-adapter", async (importOriginal) => ({
 // Connector commands the create/detail pages call. Defaults mimic a build
 // with the connectors module present but nothing connected.
 const tauriMocks = vi.hoisted(() => ({
+  hermesBridgeStatus: vi.fn(),
   connectorsList: vi.fn(),
   connectorsConnect: vi.fn(),
   connectorsApplyRuntime: vi.fn(),
@@ -158,6 +159,7 @@ beforeEach(() => {
   mocks.createRoutine.mockResolvedValue(job());
   mocks.updateRoutine.mockResolvedValue(job());
   adapterMocks.listScheduledRunSessions.mockResolvedValue([]);
+  tauriMocks.hermesBridgeStatus.mockResolvedValue({ sandboxModeSupported: true });
   tauriMocks.connectorsList.mockResolvedValue([]);
   tauriMocks.connectorsConnect.mockResolvedValue(googleAccount());
   tauriMocks.connectorsApplyRuntime.mockResolvedValue(undefined);
@@ -414,6 +416,59 @@ describe("RoutinesView templates and creation", () => {
     expect(await screen.findByRole("textbox", { name: "Routine name" })).toHaveValue(
       "Morning summary",
     );
+  });
+
+  it("forces new Windows routines to use full local access without a mode picker", async () => {
+    tauriMocks.hermesBridgeStatus.mockResolvedValue({ sandboxModeSupported: false });
+    mocks.listRoutines.mockResolvedValueOnce([]);
+    renderView();
+    await screen.findByText("Morning brief");
+
+    expect(screen.queryByText("Unrestricted")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "New routine" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Instructions" }), "Check my files.");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(mocks.createRoutine).toHaveBeenCalledWith({
+        prompt: "Check my files.",
+        schedule: "0 9 * * *",
+        name: undefined,
+        unrestricted: true,
+      }),
+    );
+  });
+
+  it("describes new Windows routines with the full local toolset", async () => {
+    tauriMocks.hermesBridgeStatus.mockResolvedValue({ sandboxModeSupported: false });
+    mocks.listRoutines.mockResolvedValue([]);
+    const onCreateRoutine = vi.fn();
+    renderView({ onCreateRoutine });
+    await screen.findByText("Morning brief");
+
+    const composer = screen.getByRole("form", { name: "Describe a routine to June" });
+    expect(within(composer).queryByRole("button", { name: /sandboxed|unrestricted/i })).toBeNull();
+    await userEvent.type(within(composer).getByRole("textbox"), "check my files every morning");
+    await userEvent.click(within(composer).getByRole("button", { name: "Ask June to set it up" }));
+
+    await waitFor(() => expect(onCreateRoutine).toHaveBeenCalled());
+    expect(onCreateRoutine.mock.calls[0][0]).toContain(
+      "Create the job with enabled_toolsets set to exactly: terminal, file, code_execution",
+    );
+  });
+
+  it("blocks routine creation until native access support can be retried", async () => {
+    tauriMocks.hermesBridgeStatus.mockRejectedValueOnce(new Error("bridge unavailable"));
+    mocks.listRoutines.mockResolvedValue([]);
+    renderView();
+
+    expect(
+      await screen.findByText("June could not check routine access support. Try again."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New routine" })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "New routine" })).toBeEnabled());
   });
 
   it("routes the describe path through the agent prompt, sandboxed by default", async () => {
@@ -716,6 +771,25 @@ describe("RoutinesView connector templates", () => {
     );
   });
 
+  it("composes connector-aware Windows routines from the full local toolset", async () => {
+    tauriMocks.hermesBridgeStatus.mockResolvedValue({ sandboxModeSupported: false });
+    tauriMocks.connectorsList.mockResolvedValue([googleAccount()]);
+    mocks.listRoutines.mockResolvedValueOnce([]);
+    renderView();
+    await screen.findByText("Morning briefing");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add Morning briefing" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(mocks.createRoutine).toHaveBeenCalled());
+    const createArgs = (mocks.createRoutine.mock.calls[0] as unknown[])[0] as {
+      enabledToolsets?: string[];
+    };
+    expect(createArgs.enabledToolsets).toEqual(
+      expect.arrayContaining(["terminal", "file", "code_execution", "june_gmail", "june_gcal"]),
+    );
+  });
+
   it("does not report a still-running or failed run", async () => {
     mocks.listRoutines.mockResolvedValue([job()]);
     adapterMocks.listScheduledRunSessions.mockResolvedValue([
@@ -812,6 +886,24 @@ describe("RoutinesView detail", () => {
     const instructions = await openDetail("Morning summary");
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
 
+    await userEvent.clear(instructions);
+    await userEvent.type(instructions, "List my unread notes only.");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mocks.updateRoutine).toHaveBeenCalledWith("abc123", {
+        prompt: "List my unread notes only.",
+      }),
+    );
+  });
+
+  it("does not widen an existing restricted Windows routine during an unrelated save", async () => {
+    tauriMocks.hermesBridgeStatus.mockResolvedValue({ sandboxModeSupported: false });
+    mocks.listRoutines.mockResolvedValue([job({ enabled_toolsets: ["web"] })]);
+    renderView();
+
+    const instructions = await openDetail("Morning summary");
+    expect(screen.queryByText("Unrestricted")).toBeNull();
     await userEvent.clear(instructions);
     await userEvent.type(instructions, "List my unread notes only.");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));

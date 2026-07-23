@@ -120,3 +120,10 @@ overrides command rejects it. Configuring a profile happens after creation by
 switching to it and using the profile-scoped settings surfaces. Hermes has no
 profile rename endpoint (the name is the slug every scoped store keys on), so
 rename stays a potential Hermes-side follow-up.
+
+## Addendum (2026-07-23): mode count is platform-qualified
+
+The one-runtime-per-mode language above applies where the sandbox mode is
+supported. Windows has one effective Full-mode Hermes process; both historical
+mode aliases target that process. Profile targeting remains per session and
+does not create additional processes.

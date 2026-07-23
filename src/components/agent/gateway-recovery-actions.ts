@@ -4,7 +4,7 @@ import { dispatchAgentSessionStatus, type AgentSessionStatusKind } from "../../l
 import { type JuneHermesEvent } from "../../lib/hermes-control-plane";
 import { pendingActionStore } from "../../lib/hermes-pending-actions";
 import { describeHermesError, messageFromError } from "../../lib/errors";
-import { sessionUnrestricted } from "../../lib/agent-session-modes";
+import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import { UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT } from "../../lib/agent-chat-runtime";
 import { upstreamProviderRecoveryStore } from "../../lib/upstream-provider-recovery";
 import { isProvisionalHermesSessionId } from "./agent-workspace-config";
@@ -25,6 +25,7 @@ export function createGatewayRecoveryActions(
     attachHermesSessionEventListener,
     captureSessionModelTarget,
     ensureHermesGateway,
+    sandboxModeSupported,
     gatewayRecoveringRef,
     hermesSessionItemsRef,
     liveEventsRef,
@@ -116,7 +117,7 @@ export function createGatewayRecoveryActions(
     if (gatewayRecoveringRef.current.has(fullMode)) return;
     const activeSessionIds = new Set(
       [...workingSessionIdsRef.current, ...waitingSessionIdsRef.current].filter(
-        (sessionId) => sessionUnrestricted(sessionId) === fullMode,
+        (sessionId) => effectiveSessionFullMode(sessionId, sandboxModeSupported) === fullMode,
       ),
     );
     if (!activeSessionIds.size) return;
