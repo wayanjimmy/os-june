@@ -7,6 +7,7 @@ import { describeHermesError, messageFromError } from "../../lib/errors";
 import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
 import { UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT } from "../../lib/agent-chat-runtime";
 import { upstreamProviderRecoveryStore } from "../../lib/upstream-provider-recovery";
+import { seedSandboxModeSupported } from "../../lib/hermes-sandbox-capability-store";
 import { isProvisionalHermesSessionId } from "./agent-workspace-config";
 import {
   SESSION_NOT_AVAILABLE_MESSAGE,
@@ -231,6 +232,7 @@ export function createGatewayRecoveryActions(
     setError(null);
     try {
       const status = await startHermesBridge(undefined, fullMode);
+      seedSandboxModeSupported(status);
       setBridge(status);
       await refreshActiveHermesProfile({ status, mode: fullMode ? "unrestricted" : "sandboxed" });
       return status;

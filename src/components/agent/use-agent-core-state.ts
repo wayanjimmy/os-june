@@ -15,6 +15,7 @@ import {
 } from "../../lib/active-hermes-profile";
 import { isTopUpRequiresMaxError, messageFromError } from "../../lib/errors";
 import { hermesActivityStore } from "../../lib/hermes-activity-store";
+import { useSandboxModeSupported } from "../../lib/use-hermes-sandbox-capability";
 import type { ReportCategory } from "./composer/reportCategory";
 import type { ReportDialogAttachment } from "./ReportDialog";
 import type { AgentAttachment } from "./agent-workspace-models";
@@ -44,6 +45,7 @@ export function useAgentCoreState(dependencies: UseAgentCoreStateDependencies) {
 
   const initialSessionId = initialSession?.id ?? initialSessionIdProp;
   const activeHermesProfile = useActiveHermesProfile();
+  const sandboxModeSupported = useSandboxModeSupported();
   const hasActiveAgentWork = useSyncExternalStore(
     hermesActivityStore.subscribe,
     () => hermesActivityStore.activeCount() > 0,
@@ -347,6 +349,7 @@ export function useAgentCoreState(dependencies: UseAgentCoreStateDependencies) {
     setBranchingMessageId,
     branchingMessageIdRef,
     bridge,
+    sandboxModeSupported,
     setBridge,
     bridgeStarting,
     setBridgeStarting,

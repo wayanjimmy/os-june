@@ -44,6 +44,7 @@ import { unsupportedEventStore } from "../lib/hermes-unsupported-events";
 import { readSessionModelSelections } from "../lib/hermes-session-model-selection";
 import { reserveHermesSessionDispatch } from "../lib/hermes-session-dispatch-mutex";
 import { resetHermesActiveSessionSnapshotsForTests } from "../lib/hermes-active-session-snapshots";
+import { resetSandboxModeSupportForTests } from "../lib/hermes-sandbox-capability-store";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
 const HERO_GREETING = new RegExp(
@@ -596,6 +597,7 @@ describe("AgentWorkspace", () => {
     mocks.gatewayCloseHandlers.clear();
     mocks.gatewayInstances.length = 0;
     resetHermesActiveSessionSnapshotsForTests();
+    resetSandboxModeSupportForTests();
     // Auto-cleanup unmounts the workspace after each test, which snapshots
     // any still-working session for the next mount — across tests that would
     // leak one test's mid-run session into the next.

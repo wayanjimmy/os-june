@@ -55,6 +55,7 @@ import {
 import { type ComposerEditorHandle, stripPlaceholder } from "./composer/ComposerEditor";
 import { type NoteReferenceInput } from "./composer/noteReference";
 import { effectiveSessionFullMode } from "../../lib/agent-session-modes";
+import { loadSandboxModeSupported } from "../../lib/hermes-sandbox-capability-store";
 import { type AgentChatPart, type AgentChatTurn } from "../../lib/agent-chat-runtime";
 import { ProjectContextSignatureStore } from "../../lib/agent-project-context";
 import { type AgentChatGallerySection } from "../../lib/agent-chat-gallery";
@@ -321,6 +322,7 @@ export function AgentWorkspace({
     setBranchingMessageId,
     branchingMessageIdRef,
     bridge,
+    sandboxModeSupported,
     setBridge,
     bridgeStarting,
     setBridgeStarting,
@@ -711,12 +713,14 @@ export function AgentWorkspace({
     let cancelled = false;
 
     void (async () => {
+      const restoredSandboxModeSupported = await loadSandboxModeSupported().catch(() => undefined);
+      if (cancelled) return;
       for (const sessionId of restoredSessionIds) {
         const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
         if (!runtimeSessionId) continue;
         try {
           const gateway = await ensureHermesGateway(
-            effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+            effectiveSessionFullMode(sessionId, restoredSandboxModeSupported),
           );
           if (cancelled || !workingSessionIdsRef.current.has(sessionId)) {
             continue;
@@ -1452,7 +1456,7 @@ export function AgentWorkspace({
     watchCompletedAgentRunSettle,
     reconcileWorkingSessionsAgainstRuntime,
   } = createRuntimeReconciliation({
-    sandboxModeSupported: bridge.sandboxModeSupported,
+    sandboxModeSupported,
     hermesSessionItems,
     pendingAttachmentPreparationsRef,
     pendingSteerBySessionIdRef,
@@ -1744,7 +1748,7 @@ export function AgentWorkspace({
     if (!bridge.running || workingSessionIds.size === 0) return;
     const modes = new Set(
       Array.from(workingSessionIds, (sessionId) =>
-        effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+        effectiveSessionFullMode(sessionId, sandboxModeSupported),
       ),
     );
     const unsubscribe = [...modes].map((fullMode) =>
@@ -1755,7 +1759,7 @@ export function AgentWorkspace({
     return () => {
       for (const remove of unsubscribe) remove();
     };
-  }, [bridge.running, bridge.sandboxModeSupported, workingSessionIds]);
+  }, [bridge.running, sandboxModeSupported, workingSessionIds]);
 
   useEffect(() => {
     categoryRef.current = category;
@@ -1927,7 +1931,7 @@ export function AgentWorkspace({
     }
     try {
       const gateway = await ensureHermesGateway(
-        effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+        effectiveSessionFullMode(sessionId, sandboxModeSupported),
       );
       await createHermesMethods(gateway).setSessionReasoningEffort({
         sessionId: runtimeSessionId,
@@ -2266,6 +2270,7 @@ export function AgentWorkspace({
   // the other's process or in-flight work.
   const agentGatewayActions = useAgentGatewayActions({
     bridge,
+    sandboxModeSupported,
     gatewayCloseHandlerRef,
     gatewaysRef,
     projectContextSignaturesBySessionId,
@@ -2310,7 +2315,7 @@ export function AgentWorkspace({
     creditActionsDisabledReason,
     defaultGenerationModelIdRef,
     ensureHermesGateway,
-    sandboxModeSupported: bridge.sandboxModeSupported,
+    sandboxModeSupported,
     fullModeDraftRef,
     generationCostQualityRef,
     generationModelsRef,
@@ -2356,7 +2361,7 @@ export function AgentWorkspace({
     attachHermesSessionEventListener,
     captureSessionModelTarget,
     ensureHermesGateway,
-    sandboxModeSupported: bridge.sandboxModeSupported,
+    sandboxModeSupported,
     gatewayRecoveringRef,
     hermesSessionItemsRef,
     liveEventsRef,
@@ -2472,7 +2477,7 @@ export function AgentWorkspace({
     composerEditorRef,
     draftRef,
     ensureHermesGateway,
-    sandboxModeSupported: bridge.sandboxModeSupported,
+    sandboxModeSupported,
     hermesSessionItems,
     hermesSessionMessages,
     hermesSessionMessagesRef,
@@ -2527,7 +2532,7 @@ export function AgentWorkspace({
     // The instruction is shown as a read-only steer card tacked to the composer
     // (see the submit path) rather than a transcript line.
     const gateway = await ensureHermesGateway(
-      effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+      effectiveSessionFullMode(sessionId, sandboxModeSupported),
     );
     await createHermesMethods(gateway).steerSession({
       sessionId,
@@ -2588,7 +2593,7 @@ export function AgentWorkspace({
     clearSubmittedSteers,
     computerUseRunLeasesRef,
     ensureHermesGateway,
-    sandboxModeSupported: bridge.sandboxModeSupported,
+    sandboxModeSupported,
     hermesSessionItems,
     refreshHermesSession,
     runtimeSessionIds,
@@ -2842,7 +2847,7 @@ export function AgentWorkspace({
   });
 
   const composer = renderAgentComposer({
-    sandboxModeSupported: bridge.sandboxModeSupported,
+    sandboxModeSupported,
     SESSION_BUSY_NOTICE,
     activeGenerationCostQuality,
     activePanel,
@@ -2979,7 +2984,7 @@ export function AgentWorkspace({
     <AgentDetailContent
       {...{
         activeThinkingKey,
-        sandboxModeSupported: bridge.sandboxModeSupported,
+        sandboxModeSupported,
         approvalSubmitting,
         branchFromMessage,
         branchingMessageId,
@@ -3037,7 +3042,7 @@ export function AgentWorkspace({
   );
 
   return renderAgentWorkspaceLayout({
-    sandboxModeSupported: bridge.sandboxModeSupported,
+    sandboxModeSupported,
     ACTIVITY_DRAWER_ENABLED,
     activeAgentCount,
     activePanel,

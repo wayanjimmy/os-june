@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { HermesGatewayClient } from "../../lib/hermes-gateway";
 import { createHermesMethods } from "../../lib/hermes-control-plane";
 import { parseSessionUsage, type SessionUsage } from "../../lib/hermes-session-usage";
@@ -17,6 +17,7 @@ import type { UseAgentGatewayActionsDependencies } from "./use-agent-gateway-act
 export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDependencies) {
   const {
     bridge,
+    sandboxModeSupported,
     gatewayCloseHandlerRef,
     gatewaysRef,
     projectContextSignaturesBySessionId,
@@ -24,14 +25,19 @@ export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDepen
     setRuntimeSessionIds,
     startBridge,
   } = dependencies;
+  const bridgeRef = useRef(bridge);
+  const sandboxModeSupportedRef = useRef(sandboxModeSupported);
+  bridgeRef.current = bridge;
+  sandboxModeSupportedRef.current = sandboxModeSupported;
 
   async function ensureHermesGateway(fullMode = false) {
     // The native capability is authoritative. On unsupported Windows both
     // historical session modes share the sole Full-mode client and process.
     // Until status resolves, preserve strict supported-platform routing.
-    const effectiveFullMode = bridge.sandboxModeSupported === false ? true : fullMode;
+    const currentBridge = bridgeRef.current;
+    const effectiveFullMode = sandboxModeSupportedRef.current === false ? true : fullMode;
     let connection = hermesConnectionForMode(
-      bridge.running ? bridge : undefined,
+      currentBridge.running ? currentBridge : undefined,
       effectiveFullMode,
     );
     if (!connection) {
@@ -62,7 +68,7 @@ export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDepen
   const fetchSessionUsage = useCallback(
     async (storedSessionId: string): Promise<SessionUsage> => {
       const gateway = await ensureHermesGateway(
-        effectiveSessionFullMode(storedSessionId, bridge.sandboxModeSupported),
+        effectiveSessionFullMode(storedSessionId, sandboxModeSupportedRef.current),
       );
       const methods = createHermesMethods(gateway);
       const usageFor = async (runtimeId: string) =>
@@ -107,7 +113,7 @@ export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDepen
   const compressSessionContext = useCallback(
     async (sessionId: string): Promise<CompressSessionResult> => {
       const gateway = await ensureHermesGateway(
-        effectiveSessionFullMode(sessionId, bridge.sandboxModeSupported),
+        effectiveSessionFullMode(sessionId, sandboxModeSupportedRef.current),
       );
       const raw = await createHermesMethods(gateway).compressSession({
         sessionId,

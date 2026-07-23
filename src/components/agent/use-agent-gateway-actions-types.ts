@@ -5,6 +5,7 @@ import type * as React from "react";
 
 export type UseAgentGatewayActionsDependencies = {
   bridge: HermesBridgeStatus;
+  sandboxModeSupported?: boolean;
   gatewayCloseHandlerRef: React.MutableRefObject<(_fullMode: boolean) => void>;
   gatewaysRef: React.MutableRefObject<Map<boolean, HermesGatewayClient>>;
   projectContextSignaturesBySessionId: ProjectContextSignatureStore;

@@ -3,6 +3,7 @@ import { hermesBridgeStatus, startHermesBridge } from "../../lib/tauri";
 import { refreshActiveHermesProfile } from "../../lib/active-hermes-profile";
 import { releaseAgentRunSettlement } from "../../lib/agent-run-monitor";
 import { describeHermesError } from "../../lib/errors";
+import { seedSandboxModeSupported } from "../../lib/hermes-sandbox-capability-store";
 import { reportableAgentErrorOptions } from "./agent-workspace-errors";
 import {
   captureSessionContinuity,
@@ -46,9 +47,11 @@ export function useAgentSessionEvents(dependencies: useAgentSessionEventsDepende
     void (async () => {
       try {
         let status = await hermesBridgeStatus();
+        seedSandboxModeSupported(status);
         if (cancelled) return;
         if (!status.running) {
           status = await startHermesBridge(undefined, false);
+          seedSandboxModeSupported(status);
         }
         if (cancelled) return;
         setBridge(status);
