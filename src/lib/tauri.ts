@@ -1196,8 +1196,17 @@ export async function listAgentToolEvents(taskId: string) {
   });
 }
 
+let pendingHermesBridgeStatus: Promise<HermesBridgeStatus> | undefined;
+
 export async function hermesBridgeStatus() {
-  return invoke<HermesBridgeStatus>("hermes_bridge_status");
+  if (pendingHermesBridgeStatus) return pendingHermesBridgeStatus;
+  const request = invoke<HermesBridgeStatus>("hermes_bridge_status");
+  pendingHermesBridgeStatus = request;
+  const clearPending = () => {
+    if (pendingHermesBridgeStatus === request) pendingHermesBridgeStatus = undefined;
+  };
+  request.then(clearPending, clearPending);
+  return request;
 }
 
 export async function ensureHermesBridgeGateway() {

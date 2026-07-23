@@ -5,6 +5,7 @@ import {
   ensureHermesBridgeGateway,
   finishRecording,
   getNote,
+  hermesBridgeStatus,
   juneOpenCommunityPage,
   recoverRecording,
   retryProcessing,
@@ -106,6 +107,30 @@ describe("Tauri command contracts", () => {
     await ensureHermesBridgeGateway();
 
     expect(mocks.invoke).toHaveBeenCalledWith("ensure_hermes_bridge_gateway");
+  });
+
+  it("coalesces only concurrent Hermes bridge status requests", async () => {
+    let resolveStatus: (status: { running: boolean }) => void = () => undefined;
+    mocks.invoke.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStatus = resolve;
+        }),
+    );
+
+    const first = hermesBridgeStatus();
+    const second = hermesBridgeStatus();
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+
+    resolveStatus({ running: true });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { running: true },
+      { running: true },
+    ]);
+
+    mocks.invoke.mockResolvedValueOnce({ running: false });
+    await expect(hermesBridgeStatus()).resolves.toEqual({ running: false });
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
   });
 
   it("opens the June community through a dedicated command", async () => {
