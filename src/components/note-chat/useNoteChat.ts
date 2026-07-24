@@ -12,12 +12,14 @@ import {
 } from "../../lib/active-hermes-profile";
 import { messageFromError } from "../../lib/errors";
 import { listHermesSessions } from "../../lib/hermes-adapter";
+import { hasHermesActiveSessionSnapshotSubscribers } from "../../lib/hermes-active-session-snapshots";
 import { hermesConnectionForMode } from "../../lib/hermes-connection";
 import { classifyHermesEvent } from "../../lib/hermes-control-plane/event-classifier";
 import { createHermesMethods } from "../../lib/hermes-control-plane/methods";
 import { isTerminalHermesEvent, type JuneHermesEvent } from "../../lib/hermes-control-plane/events";
 import { isHermesFeatureSupported } from "../../lib/hermes-control-plane/compatibility/support";
 import { HermesGatewayClient, isSessionBusyError } from "../../lib/hermes-gateway";
+import { createHermesIdleSubmitGateway } from "../../lib/hermes-idle-submit-recovery";
 import { applySessionModelWhenIdle } from "../../lib/hermes-next-prompt-model";
 import {
   canAttributeUntaggedAgentRun,
@@ -53,6 +55,7 @@ import {
   hermesBridgeImageDataUrl,
   hermesBridgeSessionMessages,
   hermesBridgeStatus,
+  prepareHermesBridgeImageAttachment,
   providerModelSettings,
   startHermesBridge,
   type HermesSessionMessage,
@@ -140,7 +143,7 @@ async function connectGateway(startIfNeeded: boolean): Promise<HermesGatewayClie
     if (!wsUrl) throw new Error("Hermes bridge did not return a gateway URL.");
     sharedGatewayFullMode = Boolean(connection?.fullMode);
     if (!sharedGateway) {
-      const gateway = new HermesGatewayClient();
+      const gateway = new HermesGatewayClient(false);
       gateway.onEvent((raw) => {
         const event = classifyHermesEvent(raw);
         for (const subscriber of [...eventSubscribers]) subscriber(event);
@@ -600,6 +603,16 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
       try {
         const gateway = await connectGateway(true);
         if (!gateway) throw new Error("Hermes gateway is not connected.");
+        const submitGateway = createHermesIdleSubmitGateway({
+          fullMode: false,
+          gateway,
+          shouldProbeFirstRequest: () => !hasHermesActiveSessionSnapshotSubscribers(false),
+          reconnect: async () => {
+            const reconnected = await connectGateway(true);
+            if (!reconnected) throw new Error("Hermes gateway is not connected.");
+            return reconnected;
+          },
+        });
         // Read after connectGateway so its refreshActiveHermesProfile has
         // reconciled the sticky pointer.
         const activeProfile = getActiveHermesProfileName();
@@ -632,12 +645,15 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
           }
         }
         if (!activeStoredSessionId) {
-          const created = await gateway.request<HermesRuntimeSessionResponse>("session.create", {
-            title: noteTitle.trim() || "Note chat",
-            cols: 96,
-            ...(capturedHermesModelId ? { model: capturedHermesModelId } : {}),
-            ...(activeProfile !== "default" ? { profile: activeProfile } : {}),
-          });
+          const created = await submitGateway.request<HermesRuntimeSessionResponse>(
+            "session.create",
+            {
+              title: noteTitle.trim() || "Note chat",
+              cols: 96,
+              ...(capturedHermesModelId ? { model: capturedHermesModelId } : {}),
+              ...(activeProfile !== "default" ? { profile: activeProfile } : {}),
+            },
+          );
           activeStoredSessionId = created.stored_session_id ?? created.session_id;
           if (!activeStoredSessionId) throw new Error("Hermes did not create a session.");
           dispatchReservation = reserveHermesSessionDispatch(activeStoredSessionId);
@@ -671,10 +687,13 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
           }
         }
         if (!runtimeSessionId) {
-          const resumed = await gateway.request<HermesRuntimeSessionResponse>("session.resume", {
-            session_id: activeStoredSessionId,
-            cols: 96,
-          });
+          const resumed = await submitGateway.request<HermesRuntimeSessionResponse>(
+            "session.resume",
+            {
+              session_id: activeStoredSessionId,
+              cols: 96,
+            },
+          );
           runtimeSessionId = resumed.session_id;
           if (!runtimeSessionId) throw new Error("Hermes did not resume the session.");
         }
@@ -704,7 +723,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
             // of the prompt. Failure blocks the send; silently using the prior
             // model would betray the picker.
             await applySessionModelWhenIdle(() =>
-              createHermesMethods(gateway).switchActiveSessionModel({
+              createHermesMethods(submitGateway).switchActiveSessionModel({
                 mode: "sandboxed",
                 sessionId: runtimeSessionId,
                 model: modelToApply,
@@ -734,8 +753,11 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
             attachments.map((attachment) => attachment.attach),
           );
           if (pendingImages.length) {
-            const methods = createHermesMethods(gateway);
+            const methods = createHermesMethods(submitGateway);
             const deps = {
+              prepareImagePath: prepareHermesBridgeImageAttachment,
+              attachImagePath: methods.attachImagePath,
+              isPathSupported: () => isHermesFeatureSupported("image.attach"),
               attachImage: methods.attachImage,
               readImageData: (path: string) => hermesBridgeImageDataUrl(path),
               isSupported: () => isHermesFeatureSupported("image.attach_bytes"),
@@ -747,7 +769,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
               }
             }
           }
-          await gateway.request("prompt.submit", {
+          await submitGateway.request("prompt.submit", {
             session_id: runtimeSessionId,
             text: content,
           });

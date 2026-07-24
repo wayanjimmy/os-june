@@ -49,7 +49,7 @@ export function useAgentGatewayActions(dependencies: UseAgentGatewayActionsDepen
     const connectionFullMode = Boolean(connection.fullMode);
     let gateway = gatewaysRef.current.get(connectionFullMode);
     if (!gateway) {
-      gateway = new HermesGatewayClient();
+      gateway = new HermesGatewayClient(fullMode);
       gatewaysRef.current.set(connectionFullMode, gateway);
       // Fires only on unexpected drops — the unmount close() detaches the
       // socket first, and a superseded socket never notifies.
