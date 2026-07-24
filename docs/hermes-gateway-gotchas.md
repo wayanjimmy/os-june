@@ -28,6 +28,15 @@ to "reconnect" existing clients.
 with `launchctl bootout gui/$UID/ai.hermes.gateway`. June re-registers it on
 next launch.
 
+**Windows owns the routine Gateway as a foreground child.** Do not call
+`hermes gateway start` on Windows: it expects an installed Scheduled Task or
+Startup entry and prompts when neither exists. June first rejects either form
+of pre-existing Hermes persistence, then starts the runtime's real Python
+directly with `-m hermes_cli.main gateway run --replace`, retains that process,
+and accepts readiness only when `/api/status.gateway_pid` matches the child.
+Explicit quit requests `gateway stop` before the provider proxy is torn down,
+then force-cleans the tracked process tree if needed. See ADR 0038.
+
 **The pinned chat gateway has no application ping.** Its JSON-RPC registry
 does not expose ping, pong, or tick, and WKWebView's browser `WebSocket` cannot
 send protocol-level ping frames. June therefore treats the existing
@@ -44,12 +53,14 @@ submission or a change to the heartbeat counters.
 **App teardown is ordered and bounded.** Ordinary quit enters the idempotent
 shutdown coordinator from `RunEvent::ExitRequested`; update relaunch enters the
 same coordinator from its command. Cleanup runs off the main event loop and
-Hermes keeps this order: latch and quiesce starts, unload the launchd Gateway
-while the provider proxy is alive, reap interactive runtime process groups,
-then stop the provider proxy. `RunEvent::Exit` performs no cleanup because work
-started there can be dropped before it runs. Every leaf has its own deadline,
-and a five-second aggregate deadline schedules the final exit or restart even
-if a leaf remains stuck.
+Hermes keeps this order: latch and quiesce starts, stop the platform-owned
+routine Gateway while the provider proxy is alive, reap interactive runtime
+process groups, then stop the provider proxy. macOS unloads launchd; Windows
+stops and reaps its owned child. `RunEvent::Exit` performs no cleanup because
+work started there can be dropped before it runs. Every leaf has its own
+deadline. Gateway shutdown has a six-second sub-budget inside the app's
+20-second aggregate deadline, which schedules the final exit or restart even if
+a leaf remains stuck.
 
 ## Config
 

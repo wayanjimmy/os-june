@@ -780,11 +780,17 @@ pub struct HermesBridge {
     /// per-process proxy would rewrite the file under the other process.
     /// Started lazily on the first spawn, lives until app shutdown.
     provider_proxy: Mutex<Option<SharedProviderProxy>>,
-    /// Last connection June used to supervise the launchd routine Gateway.
-    /// The gateway may outlive both interactive bridge modes, but app shutdown
-    /// stops it before the app-owned provider proxy goes away. Its lifecycle
-    /// CLI still needs the isolated Hermes home and command.
+    /// Last connection June used to supervise the routine Gateway. The Gateway
+    /// may outlive both interactive bridge modes, but app shutdown stops it
+    /// before the app-owned provider proxy goes away. Its lifecycle CLI still
+    /// needs the isolated Hermes home and command.
     routine_gateway_connection: Mutex<Option<HermesBridgeConnection>>,
+    /// Windows has no app-appropriate service lifecycle: `gateway start`
+    /// requires a separately installed Scheduled Task. Keep the foreground
+    /// `gateway run --replace` child owned by June instead. macOS retains its
+    /// launchd-managed Gateway and therefore has no child handle here.
+    #[cfg(target_os = "windows")]
+    routine_gateway_process: Mutex<Option<Child>>,
     /// True only after this app process has successfully started or restarted
     /// the routine Gateway against its own provider-proxy coordinates. Failed
     /// app-start cleanup checks this under `gateway_lifecycle_lock` so it never
@@ -1575,14 +1581,14 @@ async fn disable_inherited_gateway_after_failed_app_start(
         let remove_result = remove_gateway_launch_agent_plist(app);
         let stop_result = match gateway_launch_agent_targets_loaded().await {
             Ok(targets) if targets.is_empty() => Ok(()),
-            Ok(targets) => stop_loaded_hermes_gateway(app, None, Some(&targets)).await,
+            Ok(targets) => stop_loaded_hermes_gateway(app, bridge, None, Some(&targets)).await,
             Err(error) => {
                 tracing::warn!(
                     ?error,
                     reason,
                     "failed to inspect inherited routine gateway after app-start failure; attempting stop"
                 );
-                stop_loaded_hermes_gateway(app, None, None).await
+                stop_loaded_hermes_gateway(app, bridge, None, None).await
             }
         };
         #[cfg(target_os = "macos")]
@@ -2877,8 +2883,8 @@ async fn installed_repo_set_for_filter(
 }
 
 /// Apply June's native-memory toolset policy without requiring a live bridge
-/// connection. The launchd routine gateway can remain alive after both bridge
-/// modes stop, but it reloads config.yaml before every cron run, so this direct
+/// connection. The routine Gateway can remain alive after both bridge modes
+/// stop, but it reloads config.yaml before every cron run, so this direct
 /// shared-config mutation closes the gateway-only window immediately.
 pub(crate) async fn apply_memory_runtime_policy(
     app: &AppHandle,
@@ -2900,9 +2906,10 @@ pub(crate) async fn reapply_hermes_runtime(
 ) -> Result<(), AppError> {
     let _reapply_guard = REAPPLY_RUNTIME_LOCK.lock().await;
     let live_connections = live_connections(bridge)?;
-    // The launchd routine Gateway is a separate long-lived process. Retain a
-    // bridge connection before restarting dashboard modes so June can invoke
-    // its lifecycle command from the unsandboxed app process afterwards.
+    // The routine Gateway is a separate long-lived process. Retain a bridge
+    // connection before restarting dashboard modes so June can invoke its
+    // platform lifecycle from the unsandboxed app process afterwards.
+    #[cfg(not(target_os = "windows"))]
     let gateway_connection = live_connections.first().cloned().or_else(|| {
         bridge
             .routine_gateway_connection
@@ -2943,6 +2950,8 @@ pub(crate) async fn reapply_hermes_runtime(
             first_error.get_or_insert(error);
         }
     }
+    #[cfg(target_os = "windows")]
+    let gateway_connection = live_connections(bridge)?.first().cloned();
     if let Some(connection) = gateway_connection {
         let _gateway_guard = bridge.gateway_lifecycle_lock.lock().await;
         if !bridge.shutting_down.load(Ordering::SeqCst) {
@@ -5340,13 +5349,13 @@ pub(crate) async fn shutdown(app: &tauri::AppHandle, deadline: crate::shutdown::
     }
 }
 
-/// Routines run in a launchd-managed Gateway, but every model request goes
-/// through the provider proxy owned by this app process. Stop the Gateway while
-/// that proxy is still alive: leaving launchd running after June quits makes
-/// the next scheduled routine retry a dead loopback URL and persist a misleading
-/// generic "Connection error" (JUN-367). Closing the window still hides June and
-/// keeps routines running; only an explicit app quit reaches this teardown.
-/// App startup re-enables the service before future runs.
+/// Routines run in a separate Gateway, but every model request goes through the
+/// provider proxy owned by this app process. Stop the Gateway while that proxy
+/// is still alive: leaving it running after June quits makes the next scheduled
+/// routine retry a dead loopback URL and persist a misleading generic
+/// "Connection error" (JUN-367). Closing the window still hides June and keeps
+/// routines running; only an explicit app quit reaches this teardown. App
+/// startup re-enables the service before future runs.
 async fn shutdown_hermes_gateway(
     app: &tauri::AppHandle,
     bridge: &HermesBridge,
@@ -5382,7 +5391,8 @@ async fn shutdown_hermes_gateway(
             Ok(())
         }
         Ok(targets) => {
-            stop_loaded_hermes_gateway(app, gateway_connection.as_ref(), Some(&targets)).await
+            stop_loaded_hermes_gateway(app, bridge, gateway_connection.as_ref(), Some(&targets))
+                .await
         }
         // A failed probe must not strand an inherited Gateway. Preserve the
         // fail-safe stop and surface its result instead of treating uncertain
@@ -5392,7 +5402,7 @@ async fn shutdown_hermes_gateway(
                 ?error,
                 "failed to check Hermes routine gateway during app shutdown; attempting stop"
             );
-            stop_loaded_hermes_gateway(app, gateway_connection.as_ref(), None).await
+            stop_loaded_hermes_gateway(app, bridge, gateway_connection.as_ref(), None).await
         }
     };
     #[cfg(target_os = "macos")]
@@ -5430,7 +5440,11 @@ const GATEWAY_SHUTDOWN_TOTAL_TIMEOUT: Duration =
 /// path can terminate the whole lifecycle process group before the outer future
 /// is dropped.
 #[cfg(not(target_os = "macos"))]
-const GATEWAY_SHUTDOWN_CLI_TIMEOUT: Duration = Duration::from_secs(4);
+const GATEWAY_SHUTDOWN_CLI_TIMEOUT: Duration = if cfg!(target_os = "windows") {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(4)
+};
 /// Keep the status check inside the lifecycle critical section short. A failed
 /// or slow local probe falls back to start-then-restart during fresh-app
 /// reconciliation, and to an idempotent start for interactive ensures.
@@ -7475,11 +7489,11 @@ async fn start_hermes_gateway_if_needed(
     connection: &HermesBridgeConnection,
 ) -> Result<bool, AppError> {
     let _gateway_guard = lock_gateway_lifecycle_if_active(bridge).await?;
-    let restart_inherited = !bridge.gateway_reconciled.load(Ordering::SeqCst);
+    let needs_reconciliation = !bridge.gateway_reconciled.load(Ordering::SeqCst);
     retain_routine_gateway_connection(bridge, connection)?;
     let status_probe = tokio::time::timeout(
         GATEWAY_STATUS_PROBE_TIMEOUT,
-        hermes_gateway_running(connection),
+        hermes_gateway_status(connection),
     );
     tokio::pin!(status_probe);
     let status_result = tokio::select! {
@@ -7492,12 +7506,12 @@ async fn start_hermes_gateway_if_needed(
         }
         result = status_probe.as_mut() => result,
     };
-    let running = match status_result {
-        Ok(Ok(running)) => Some(running),
+    let status = match status_result {
+        Ok(Ok(status)) => Some(status),
         Ok(Err(error)) => {
             tracing::warn!(
                 ?error,
-                restart_inherited,
+                needs_reconciliation,
                 "failed to inspect Hermes routine gateway before lifecycle action"
             );
             None
@@ -7505,13 +7519,19 @@ async fn start_hermes_gateway_if_needed(
         Err(_) => {
             tracing::warn!(
                 timeout_ms = GATEWAY_STATUS_PROBE_TIMEOUT.as_millis(),
-                restart_inherited,
+                needs_reconciliation,
                 "timed out inspecting Hermes routine gateway before lifecycle action"
             );
             None
         }
     };
-    match gateway_start_action(running, restart_inherited) {
+    #[cfg(target_os = "windows")]
+    let restart_inherited = needs_reconciliation
+        || !windows_gateway_process_matches(bridge, status.as_ref().and_then(|status| status.pid));
+    #[cfg(not(target_os = "windows"))]
+    let restart_inherited = needs_reconciliation;
+    let running = status.as_ref().map(|status| status.running);
+    match gateway_start_action(running, restart_inherited, cfg!(target_os = "windows")) {
         GatewayStartAction::KeepRunning => return Ok(false),
         GatewayStartAction::StartThenRestart => {
             // An inconclusive fresh-app probe is ambiguous: `start` recreates
@@ -7564,7 +7584,17 @@ enum GatewayStartAction {
     Restart,
 }
 
-fn gateway_start_action(running: Option<bool>, restart_inherited: bool) -> GatewayStartAction {
+fn gateway_start_action(
+    running: Option<bool>,
+    restart_inherited: bool,
+    target_is_windows: bool,
+) -> GatewayStartAction {
+    if target_is_windows {
+        return match (running, restart_inherited) {
+            (Some(true), false) => GatewayStartAction::KeepRunning,
+            _ => GatewayStartAction::Start,
+        };
+    }
     match (running, restart_inherited) {
         (Some(true), true) => GatewayStartAction::Restart,
         (None, true) => GatewayStartAction::StartThenRestart,
@@ -7580,6 +7610,9 @@ async fn ensure_hermes_gateway_running(
     if !start_hermes_gateway_if_needed(bridge, connection).await? {
         return Ok(());
     }
+    #[cfg(target_os = "windows")]
+    return Ok(());
+    #[cfg(not(target_os = "windows"))]
     wait_for_hermes_gateway(connection).await
 }
 
@@ -7611,15 +7644,18 @@ fn retain_routine_gateway_connection(
 }
 
 /// Restarts the known routine Gateway from June's unsandboxed parent process.
-/// Unlike the dashboard API restart endpoint, this direct non-interactive CLI
-/// invocation is supervised by June and preserves launchd ownership. Its
-/// command must not query the dashboard: reapply has already replaced that
-/// dashboard connection by the time the routine service is restarted.
+/// macOS preserves launchd ownership; Windows replaces the app-owned foreground
+/// child. The command must not query the dashboard: reapply has already replaced
+/// that dashboard connection by the time the routine service is restarted.
 async fn restart_hermes_gateway(
     bridge: &HermesBridge,
     connection: &HermesBridgeConnection,
 ) -> Result<(), AppError> {
+    #[cfg(target_os = "windows")]
+    return run_hermes_gateway_start(bridge, connection).await;
+    #[cfg(not(target_os = "windows"))]
     let cmd = hermes_gateway_lifecycle_command(connection, "restart");
+    #[cfg(not(target_os = "windows"))]
     run_hermes_gateway_lifecycle_command(
         cmd,
         "restart",
@@ -7643,7 +7679,7 @@ async fn stop_hermes_gateway(connection: &HermesBridgeConnection) -> Result<(), 
 /// when this process never reached runtime startup and therefore never retained
 /// a connection. This intentionally resolves only an executable already on
 /// disk; app teardown must never install or update the managed runtime.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 async fn stop_persisted_hermes_gateway(app: &AppHandle) -> Result<(), AppError> {
     let hermes_home = resolve_june_hermes_home(app)?;
     let command = existing_hermes_command_for_gateway_stop(app)?;
@@ -7656,22 +7692,92 @@ async fn stop_persisted_hermes_gateway(app: &AppHandle) -> Result<(), AppError> 
 
 async fn stop_loaded_hermes_gateway(
     app: &AppHandle,
+    bridge: &HermesBridge,
     connection: Option<&HermesBridgeConnection>,
     launchd_targets: Option<&[String]>,
 ) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = (app, connection);
+        let _ = (app, bridge, connection);
         unload_gateway_launch_agents(launchd_targets).await
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = launchd_targets;
-        match connection {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = app;
+            let Some(connection) = connection else {
+                stop_tracked_windows_gateway(bridge, None).await;
+                return Ok(());
+            };
+            if !windows_gateway_process_is_active(bridge, connection).await {
+                // An untracked process may belong to an independently
+                // installed Scheduled Task or Startup entry. Only `--replace`
+                // after the explicit persistence preflight may reconcile an
+                // unowned foreground Gateway; shutdown never sends it the
+                // profile-wide graceful stop command.
+                stop_tracked_windows_gateway(bridge, None).await;
+                return Ok(());
+            }
+            let result = stop_hermes_gateway(connection).await;
+            stop_tracked_windows_gateway(bridge, None).await;
+            return result;
+        }
+        #[cfg(not(target_os = "windows"))]
+        let result = match connection {
             Some(connection) => stop_hermes_gateway(connection).await,
             None => stop_persisted_hermes_gateway(app).await,
+        };
+        #[cfg(not(target_os = "windows"))]
+        let _ = bridge;
+        #[cfg(not(target_os = "windows"))]
+        result
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn tracked_windows_gateway_pid(bridge: &HermesBridge) -> Option<u32> {
+    let mut process = bridge.routine_gateway_process.lock().ok()?;
+    let child = process.as_mut()?;
+    let pid = child.id();
+    match child.try_wait() {
+        Ok(None) => Some(pid),
+        Ok(Some(_)) => {
+            process.take();
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                pid,
+                "could not inspect owned Windows routine service"
+            );
+            None
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+async fn windows_gateway_process_is_active(
+    bridge: &HermesBridge,
+    connection: &HermesBridgeConnection,
+) -> bool {
+    let Some(pid) = tracked_windows_gateway_pid(bridge) else {
+        return false;
+    };
+    let status = tokio::time::timeout(
+        GATEWAY_STATUS_PROBE_TIMEOUT,
+        hermes_gateway_status(connection),
+    )
+    .await;
+    matches!(
+        status,
+        Ok(Ok(HermesGatewayStatus {
+            running: true,
+            pid: Some(active_pid),
+        })) if active_pid == pid && tracked_windows_gateway_pid(bridge) == Some(pid)
+    )
 }
 
 /// Checks the launchd job directly rather than starting the comparatively
@@ -7878,13 +7984,35 @@ fn existing_hermes_command_for_gateway_stop(app: &AppHandle) -> Result<String, A
     ))
 }
 
-async fn hermes_gateway_running(connection: &HermesBridgeConnection) -> Result<bool, AppError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HermesGatewayStatus {
+    running: bool,
+    pid: Option<u32>,
+}
+
+fn hermes_gateway_status_from_json(status: &serde_json::Value) -> HermesGatewayStatus {
+    HermesGatewayStatus {
+        running: status
+            .get("gateway_running")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        pid: status
+            .get("gateway_pid")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok()),
+    }
+}
+
+async fn hermes_gateway_status(
+    connection: &HermesBridgeConnection,
+) -> Result<HermesGatewayStatus, AppError> {
     let status =
         hermes_connection_json(connection, reqwest::Method::GET, "/api/status", None).await?;
-    Ok(status
-        .get("gateway_running")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false))
+    Ok(hermes_gateway_status_from_json(&status))
+}
+
+async fn hermes_gateway_running(connection: &HermesBridgeConnection) -> Result<bool, AppError> {
+    Ok(hermes_gateway_status(connection).await?.running)
 }
 
 async fn wait_for_hermes_gateway(connection: &HermesBridgeConnection) -> Result<(), AppError> {
@@ -7906,25 +8034,191 @@ async fn wait_for_hermes_gateway(connection: &HermesBridgeConnection) -> Result<
     }
 }
 
-/// Starts the messaging gateway by running `hermes gateway start` as a direct
-/// child of this (unsandboxed) app process — deliberately NOT via the bridge's
-/// `POST /api/gateway/start`. The bridge runs inside the Seatbelt write-jail,
-/// and launchd refuses service-management requests from any sandboxed process:
-/// `launchctl bootstrap` fails with exit 5 (EIO) and `kickstart` with 113, so a
-/// jailed bridge can never (re)register the gateway's LaunchAgent — routines
-/// silently stop running after the job is unloaded. The gateway can outlive
-/// either dashboard bridge mode, but not the app-owned provider proxy; app
-/// shutdown unloads it before tearing that proxy down. It is launchd-managed
-/// so it survives dashboard restarts while June remains running and must be
-/// started from outside the jail. The plist
-/// rewrite `hermes gateway start` performs also needs `~/Library/LaunchAgents`,
-/// which sits outside the jail's write roots.
-///
+#[cfg(target_os = "windows")]
+fn windows_gateway_process_matches(bridge: &HermesBridge, expected_pid: Option<u32>) -> bool {
+    let Ok(mut process) = bridge.routine_gateway_process.lock() else {
+        return false;
+    };
+    let Some(child) = process.as_mut() else {
+        return false;
+    };
+    let child_pid = child.id();
+    match child.try_wait() {
+        Ok(None) => expected_pid == Some(child_pid),
+        Ok(Some(_)) => {
+            process.take();
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                child_pid,
+                "could not inspect owned Windows routine service"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_gateway_child_exit(
+    bridge: &HermesBridge,
+    expected_pid: u32,
+) -> Result<Option<ExitStatus>, AppError> {
+    let mut process = bridge.routine_gateway_process.lock().map_err(|_| {
+        AppError::new(
+            "hermes_gateway_state_failed",
+            "June could not inspect its Windows routine service process.",
+        )
+    })?;
+    let Some(child) = process.as_mut() else {
+        return Err(AppError::new(
+            "hermes_gateway_start_failed",
+            "The Windows routine service process was lost during startup.",
+        ));
+    };
+    if child.id() != expected_pid {
+        return Err(AppError::new(
+            "hermes_gateway_start_failed",
+            "The Windows routine service was replaced during startup.",
+        ));
+    }
+    let status = child.try_wait().map_err(|error| {
+        AppError::new(
+            "hermes_gateway_start_failed",
+            format!("Could not inspect the Windows routine service process. {error}"),
+        )
+    })?;
+    if status.is_some() {
+        process.take();
+    }
+    Ok(status)
+}
+
+#[cfg(target_os = "windows")]
+async fn wait_for_windows_gateway(
+    bridge: &HermesBridge,
+    connection: &HermesBridgeConnection,
+    expected_pid: u32,
+) -> Result<(), AppError> {
+    const GATEWAY_READY_TIMEOUT: Duration = Duration::from_secs(10);
+    const GATEWAY_READY_POLL: Duration = Duration::from_millis(250);
+
+    let started = Instant::now();
+    loop {
+        if let Some(status) = windows_gateway_child_exit(bridge, expected_pid)? {
+            return Err(AppError::new(
+                "hermes_gateway_start_failed",
+                format!(
+                    "`hermes gateway run --replace` exited with {status}. See logs/gateway-start.log."
+                ),
+            ));
+        }
+        if matches!(
+            hermes_gateway_status(connection).await,
+            Ok(HermesGatewayStatus {
+                running: true,
+                pid: Some(pid),
+            }) if pid == expected_pid
+        ) {
+            return Ok(());
+        }
+        if started.elapsed() >= GATEWAY_READY_TIMEOUT {
+            return Err(AppError::new(
+                "hermes_gateway_start_failed",
+                "`hermes gateway run --replace` started, but its PID did not become the active routine service. See logs/gateway-start.log.",
+            ));
+        }
+        tokio::select! {
+            biased;
+            _ = bridge.gateway_shutdown_notify.notified() => {
+                return Err(AppError::new(
+                    "hermes_bridge_shutting_down",
+                    "Windows routine service startup cancelled because June is shutting down.",
+                ));
+            }
+            _ = tokio::time::sleep(GATEWAY_READY_POLL) => {}
+        }
+    }
+}
+
+/// Starts the routine Gateway from June's unsandboxed parent process, never via
+/// the jailed dashboard API. macOS runs `gateway start` so launchd owns the
+/// service; Windows runs the bundled Python's foreground `gateway run
+/// --replace` because `gateway start` requires an independently installed
+/// Scheduled Task and prompts when it is absent. The Windows child remains
+/// attached to June and readiness is accepted only when `/api/status` reports
+/// that exact PID.
 async fn run_hermes_gateway_start(
     bridge: &HermesBridge,
     connection: &HermesBridgeConnection,
 ) -> Result<(), AppError> {
-    let cmd = hermes_gateway_start_command(connection);
+    #[cfg(target_os = "windows")]
+    {
+        ensure_no_windows_gateway_persistence(bridge, connection).await?;
+        if bridge.shutting_down.load(Ordering::SeqCst) {
+            return Err(AppError::new(
+                "hermes_bridge_shutting_down",
+                "Windows routine service startup cancelled because June is shutting down.",
+            ));
+        }
+        // A retained child belongs to this June process. Stop it before
+        // replacing an inherited/unowned Gateway so a failed new spawn never
+        // loses the only handle to an owned process.
+        stop_tracked_windows_gateway(bridge, None).await;
+        if bridge.shutting_down.load(Ordering::SeqCst) {
+            return Err(AppError::new(
+                "hermes_bridge_shutting_down",
+                "Windows routine service startup cancelled because June is shutting down.",
+            ));
+        }
+        let mut cmd = hermes_gateway_start_command(connection)?;
+        let child = cmd.spawn().map_err(|error| {
+            AppError::new(
+                "hermes_gateway_start_failed",
+                format!("Could not run `hermes gateway run --replace`. {error}"),
+            )
+        })?;
+        let pid = child.id();
+        let mut unregistered = Some(child);
+        {
+            let mut process = match bridge.routine_gateway_process.lock() {
+                Ok(process) => process,
+                Err(_) => {
+                    terminate_windows_gateway_child(unregistered.take().expect("spawned child"));
+                    return Err(AppError::new(
+                        "hermes_gateway_state_failed",
+                        "June could not retain its Windows routine service process.",
+                    ));
+                }
+            };
+            if process.is_some() {
+                terminate_windows_gateway_child(unregistered.take().expect("spawned child"));
+                return Err(AppError::new(
+                    "hermes_gateway_state_failed",
+                    "June already owns a Windows routine service process.",
+                ));
+            }
+            if !bridge.shutting_down.load(Ordering::SeqCst) {
+                *process = unregistered.take();
+            }
+        }
+        if let Some(child) = unregistered {
+            terminate_windows_gateway_child(child);
+            return Err(AppError::new(
+                "hermes_bridge_shutting_down",
+                "Windows routine service startup cancelled because June is shutting down.",
+            ));
+        }
+        if let Err(error) = wait_for_windows_gateway(bridge, connection, pid).await {
+            stop_tracked_windows_gateway(bridge, Some(pid)).await;
+            return Err(error);
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    let cmd = hermes_gateway_start_command(connection)?;
+    #[cfg(not(target_os = "windows"))]
     run_hermes_gateway_lifecycle_command(
         cmd,
         "start",
@@ -7932,6 +8226,54 @@ async fn run_hermes_gateway_start(
         Some(&bridge.gateway_shutdown_notify),
     )
     .await
+}
+
+#[cfg(target_os = "windows")]
+async fn stop_tracked_windows_gateway(bridge: &HermesBridge, expected_pid: Option<u32>) {
+    let child = bridge
+        .routine_gateway_process
+        .lock()
+        .ok()
+        .and_then(|mut process| {
+            if expected_pid
+                .is_some_and(|pid| process.as_ref().is_some_and(|child| child.id() != pid))
+            {
+                return None;
+            }
+            process.take()
+        });
+    let Some(child) = child else {
+        return;
+    };
+    // Once the handle leaves shared state, cleanup must survive cancellation
+    // of the outer six-second shutdown future. Dropping a spawn_blocking join
+    // handle detaches the task rather than cancelling it.
+    let cleanup = tokio::task::spawn_blocking(move || terminate_windows_gateway_child(child));
+    let _ = tokio::time::timeout(Duration::from_secs(2), cleanup).await;
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_windows_gateway_child(mut child: Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let pid = child.id();
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 async fn run_hermes_gateway_lifecycle_command(
@@ -8013,12 +8355,204 @@ async fn terminate_gateway_lifecycle_child(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         kill_process_group(pid);
     }
+    #[cfg(target_os = "windows")]
+    if let Some(pid) = child.id() {
+        // Keep tree termination alive if the outer aggregate shutdown future
+        // expires while taskkill is running.
+        let cleanup = tokio::task::spawn_blocking(move || {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(1_500), cleanup).await;
+    }
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_millis(250), child.wait()).await;
 }
 
-fn hermes_gateway_start_command(connection: &HermesBridgeConnection) -> Command {
-    hermes_gateway_lifecycle_command(connection, "start")
+fn hermes_gateway_start_command(connection: &HermesBridgeConnection) -> Result<Command, AppError> {
+    build_hermes_gateway_start_command(connection, cfg!(target_os = "windows"))
+}
+
+fn build_hermes_gateway_start_command(
+    connection: &HermesBridgeConnection,
+    target_is_windows: bool,
+) -> Result<Command, AppError> {
+    if !target_is_windows {
+        return Ok(hermes_gateway_lifecycle_command(connection, "start"));
+    }
+    let python = windows_hermes_python_command(&connection.command).ok_or_else(|| {
+        AppError::new(
+            "hermes_gateway_start_failed",
+            "June could not find the bundled Python runtime for the Windows routine service.",
+        )
+    })?;
+    let hermes_home = PathBuf::from(&connection.hermes_home);
+    let mut cmd = python.command();
+    cmd.args(["-m", "hermes_cli.main", "gateway", "run", "--replace"]);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
+    cmd.env("HERMES_NONINTERACTIVE", "1");
+    cmd.current_dir(&hermes_home);
+    cmd.stdin(Stdio::null());
+    attach_gateway_lifecycle_log(&mut cmd, &hermes_home);
+    Ok(cmd)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsHermesPython {
+    executable: PathBuf,
+    virtual_env: Option<PathBuf>,
+    python_path: Option<String>,
+}
+
+impl WindowsHermesPython {
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.executable);
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("PYTHONNOUSERSITE", "1");
+        if let Some(virtual_env) = &self.virtual_env {
+            cmd.env("VIRTUAL_ENV", virtual_env);
+        }
+        if let Some(python_path) = &self.python_path {
+            cmd.env("PYTHONPATH", python_path);
+        }
+        cmd
+    }
+}
+
+fn windows_hermes_python_command(hermes_command: &str) -> Option<WindowsHermesPython> {
+    let command = Path::new(hermes_command);
+    let parent = command.parent()?;
+    for name in ["python.exe", "python"] {
+        let candidate = parent.join(name);
+        if candidate.is_file() {
+            let virtual_env = parent.parent()?;
+            let base_python = windows_venv_base_python(virtual_env)?;
+            let install_dir = virtual_env.parent()?;
+            let site_packages = virtual_env.join("Lib").join("site-packages");
+            return Some(WindowsHermesPython {
+                executable: base_python,
+                virtual_env: Some(virtual_env.to_path_buf()),
+                // The managed Hermes install is editable. Starting the base
+                // interpreter avoids the Windows venv redirector PID while
+                // mirroring upstream's cron workaround for import visibility.
+                python_path: Some(format!(
+                    "{};{}",
+                    install_dir.to_string_lossy(),
+                    site_packages.to_string_lossy()
+                )),
+            });
+        }
+    }
+    let bundle_root = parent.parent()?;
+    for name in ["python.exe", "python"] {
+        let candidate = bundle_root.join("python").join("current").join(name);
+        if candidate.is_file() {
+            return Some(WindowsHermesPython {
+                executable: candidate,
+                virtual_env: None,
+                python_path: None,
+            });
+        }
+    }
+    None
+}
+
+fn windows_venv_base_python(virtual_env: &Path) -> Option<PathBuf> {
+    let config = fs::read_to_string(virtual_env.join("pyvenv.cfg")).ok()?;
+    let home = config.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("home")
+            .then(|| value.trim())
+    })?;
+    for name in ["python.exe", "python"] {
+        let candidate = Path::new(home).join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+async fn ensure_no_windows_gateway_persistence(
+    bridge: &HermesBridge,
+    connection: &HermesBridgeConnection,
+) -> Result<(), AppError> {
+    const PERSISTENCE_FOUND_EXIT_CODE: i32 = 10;
+    let python = windows_hermes_python_command(&connection.command).ok_or_else(|| {
+        AppError::new(
+            "hermes_gateway_start_failed",
+            "June could not find the Python runtime needed to inspect Windows routine service persistence.",
+        )
+    })?;
+    let hermes_home = PathBuf::from(&connection.hermes_home);
+    let mut cmd = python.command();
+    cmd.args([
+        "-c",
+        "from hermes_cli import gateway_windows as g; import sys; sys.exit(10 if g.is_installed() else 0)",
+    ]);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
+    cmd.env("HERMES_NONINTERACTIVE", "1")
+        .current_dir(&hermes_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut cmd = tokio::process::Command::from(cmd);
+    cmd.kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|error| {
+        AppError::new(
+            "hermes_gateway_persistence_check_failed",
+            format!("June could not check for an existing Windows routine service. {error}"),
+        )
+    })?;
+    let wait_result = {
+        let wait = tokio::time::timeout(Duration::from_secs(20), child.wait());
+        tokio::pin!(wait);
+        tokio::select! {
+            biased;
+            _ = bridge.gateway_shutdown_notify.notified() => None,
+            result = wait.as_mut() => Some(result),
+        }
+    };
+    let status = match wait_result {
+        None => {
+            terminate_gateway_lifecycle_child(&mut child).await;
+            return Err(AppError::new(
+                "hermes_bridge_shutting_down",
+                "Windows routine service persistence check cancelled because June is shutting down.",
+            ));
+        }
+        Some(Ok(Ok(status))) => status,
+        Some(Ok(Err(error))) => {
+            return Err(AppError::new(
+                "hermes_gateway_persistence_check_failed",
+                format!("June could not check for an existing Windows routine service. {error}"),
+            ));
+        }
+        Some(Err(_)) => {
+            terminate_gateway_lifecycle_child(&mut child).await;
+            return Err(AppError::new(
+                "hermes_gateway_persistence_check_failed",
+                "June timed out while checking for an existing Windows routine service.",
+            ));
+        }
+    };
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(PERSISTENCE_FOUND_EXIT_CODE) => Err(AppError::new(
+            "hermes_gateway_persistence_conflict",
+            "A persistent Hermes Gateway is already installed in Windows. Uninstall its Scheduled Task or Startup entry before enabling June Routines.",
+        )),
+        _ => Err(AppError::new(
+            "hermes_gateway_persistence_check_failed",
+            format!("June could not verify Windows routine service ownership ({status})."),
+        )),
+    }
 }
 
 fn hermes_gateway_lifecycle_command(
@@ -23347,6 +23881,101 @@ mcp_servers:
     }
 
     #[test]
+    fn windows_gateway_run_uses_the_runtime_python_and_stays_attached() {
+        let runtime = tempfile::tempdir().expect("runtime");
+        let virtual_env = runtime.path().join("venv");
+        let scripts = virtual_env.join("Scripts");
+        let base = runtime.path().join("base-python");
+        std::fs::create_dir_all(&scripts).expect("scripts");
+        std::fs::create_dir_all(&base).expect("base python");
+        let hermes = scripts.join("hermes.exe");
+        let redirector = scripts.join("python.exe");
+        let python = base.join("python.exe");
+        std::fs::write(&hermes, "").expect("hermes");
+        std::fs::write(&redirector, "").expect("redirector");
+        std::fs::write(&python, "").expect("python");
+        std::fs::write(
+            virtual_env.join("pyvenv.cfg"),
+            format!("home = {}\n", base.display()),
+        )
+        .expect("pyvenv config");
+        let home = tempfile::tempdir().expect("home");
+        let mut connection = test_gateway_connection();
+        connection.command = hermes.to_string_lossy().into_owned();
+        connection.hermes_home = home.path().to_string_lossy().into_owned();
+
+        let cmd = build_hermes_gateway_start_command(&connection, true)
+            .expect("Windows foreground gateway command");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(cmd.get_program(), python.as_os_str());
+        assert_eq!(
+            args,
+            ["-m", "hermes_cli.main", "gateway", "run", "--replace"]
+        );
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(key, _)| key.to_string_lossy() == "HERMES_NONINTERACTIVE")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned()),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(key, _)| key.to_string_lossy() == "VIRTUAL_ENV")
+                .and_then(|(_, value)| value),
+            Some(virtual_env.as_os_str())
+        );
+        assert_eq!(cmd.get_current_dir(), Some(home.path()));
+    }
+
+    #[test]
+    fn windows_gateway_python_resolves_the_relocatable_bundle_layout() {
+        let bundle = tempfile::tempdir().expect("bundle");
+        let bin = bundle.path().join("bin");
+        let python_dir = bundle.path().join("python").join("current");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::create_dir_all(&python_dir).expect("python dir");
+        let hermes = bin.join("hermes.exe");
+        let python = python_dir.join("python.exe");
+        std::fs::write(&hermes, "").expect("hermes");
+        std::fs::write(&python, "").expect("python");
+
+        assert_eq!(
+            windows_hermes_python_command(&hermes.to_string_lossy()),
+            Some(WindowsHermesPython {
+                executable: python,
+                virtual_env: None,
+                python_path: None,
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_status_reads_running_state_and_pid() {
+        assert_eq!(
+            hermes_gateway_status_from_json(&serde_json::json!({
+                "gateway_running": true,
+                "gateway_pid": 42,
+            })),
+            HermesGatewayStatus {
+                running: true,
+                pid: Some(42),
+            }
+        );
+        assert_eq!(
+            hermes_gateway_status_from_json(&serde_json::json!({})),
+            HermesGatewayStatus {
+                running: false,
+                pid: None,
+            }
+        );
+    }
+
+    #[test]
     fn gateway_restart_uses_the_same_june_supervised_lifecycle_command() {
         let connection = test_gateway_connection();
         let cmd = hermes_gateway_lifecycle_command(&connection, "restart");
@@ -23457,22 +24086,45 @@ mcp_servers:
     #[test]
     fn app_start_reconciles_only_an_inherited_running_gateway() {
         assert_eq!(
-            gateway_start_action(Some(true), true),
+            gateway_start_action(Some(true), true, false),
             GatewayStartAction::Restart
         );
         assert_eq!(
-            gateway_start_action(None, true),
+            gateway_start_action(None, true, false),
             GatewayStartAction::StartThenRestart
         );
         assert_eq!(
-            gateway_start_action(Some(true), false),
+            gateway_start_action(Some(true), false, false),
             GatewayStartAction::KeepRunning
         );
         assert_eq!(
-            gateway_start_action(Some(false), true),
+            gateway_start_action(Some(false), true, false),
             GatewayStartAction::Start
         );
-        assert_eq!(gateway_start_action(None, false), GatewayStartAction::Start);
+        assert_eq!(
+            gateway_start_action(None, false, false),
+            GatewayStartAction::Start
+        );
+    }
+
+    #[test]
+    fn windows_keeps_only_a_confirmed_owned_gateway() {
+        assert_eq!(
+            gateway_start_action(Some(true), false, true),
+            GatewayStartAction::KeepRunning
+        );
+        for (running, inherited) in [
+            (Some(true), true),
+            (Some(false), false),
+            (Some(false), true),
+            (None, false),
+            (None, true),
+        ] {
+            assert_eq!(
+                gateway_start_action(running, inherited, true),
+                GatewayStartAction::Start
+            );
+        }
     }
 
     #[cfg(not(target_os = "windows"))]

@@ -1,7 +1,7 @@
 /**
  * Notifications for finished routine runs.
  *
- * Routines fire on Hermes's launchd-managed gateway, so a run can start and
+ * Routines fire on Hermes's separately supervised Gateway, so a run can start and
  * finish with no webview involvement at all - nothing in the event stream
  * reaches the app for them. The only trustworthy signal is the session store,
  * which the Routines view already polls. This module watches that same feed

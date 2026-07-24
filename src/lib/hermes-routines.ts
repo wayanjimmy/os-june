@@ -118,9 +118,9 @@ async function withBridge<T>(run: () => Promise<T>): Promise<T> {
   return run();
 }
 
-/** Cron jobs are fired by Hermes's launchd-managed gateway. Require it only
- * for operations that create or enable future work; read and cleanup actions
- * must still work when the gateway is unhealthy. */
+/** Cron jobs are fired by Hermes's separately supervised routine Gateway.
+ * Require it only for operations that create or enable future work; read and
+ * cleanup actions must still work when the Gateway is unhealthy. */
 async function withScheduler<T>(run: () => Promise<T>): Promise<T> {
   return withBridge(async () => {
     await ensureHermesBridgeGateway();
@@ -253,9 +253,9 @@ export function resumeRoutine(jobId: string) {
   return withScheduler(() => hermesBridgeCronJobAction(jobId, "resume"));
 }
 
-/** Queues an immediate run. The launchd-managed gateway picks the job up on
- * its next scheduler tick, so the run starts within about a minute — and
- * only if the gateway is running. */
+/** Queues an immediate run. The routine Gateway picks the job up on its next
+ * scheduler tick, so the run starts within about a minute — and only if the
+ * Gateway is running. */
 export function triggerRoutine(jobId: string) {
   return withScheduler(() => hermesBridgeCronJobAction(jobId, "trigger"));
 }

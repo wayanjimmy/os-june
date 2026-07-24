@@ -1027,7 +1027,7 @@ export function App() {
     };
   }, [appBlocked, bootstrapped, commitAgentSessions, refreshSessionProfiles]);
 
-  // Routine runs finish on the launchd-managed gateway with no webview
+  // Routine runs finish on the separately supervised Gateway with no webview
   // involvement, so nothing event-driven announces them. Poll the session
   // store (the same feed the Routines view reads) and post one native,
   // click-through notification per newly finished run. State persists so

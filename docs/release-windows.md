@@ -113,7 +113,13 @@ the app launches as June, the sign-in copy mentions recording, notes, and
 dictation, and sign-in lands on the fresh New session hero with the Sessions
 sidebar visible. Confirm the bundled agent starts on a clean VM with no Python
 installed, and Windows dictation can record from the microphone and paste into
-a normal app. Record from the microphone and generate a note against production
+a normal app. Create a harmless near-term Routine and confirm it fires while the
+June window is hidden. Explicitly quit June and confirm the Routine Gateway exits,
+no `Hermes_Gateway*` Scheduled Task or Startup entry was created, and no Routine
+fires while June is quit. Relaunch and confirm the existing Routine fires at its
+next due time. Separately install a Hermes Scheduled Task or Startup entry and
+confirm June rejects the ownership conflict without replacing or removing it.
+Record from the microphone and generate a note against production
 June API before linking the installer publicly.
 
 For updater validation after a second Windows release, install an older

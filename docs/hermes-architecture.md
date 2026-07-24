@@ -83,6 +83,12 @@ classified events into `AgentChatTurn` / `AgentChatPart[]` for rendering.
   session cannot un-sandbox others. Windows has no OS sandbox and canonicalizes
   both compatibility aliases to one Full-mode process. Stored session mode
   metadata is left untouched.
+- **Routine Gateway lifecycle is platform-owned.** The cron scheduler runs in a
+  separate Gateway against the shared Hermes home. macOS uses a launchd
+  LaunchAgent. Windows rejects pre-existing Hermes persistence and uses one
+  June-owned foreground `gateway run --replace` child whose reported PID must
+  match the real Python process June spawned. Both stop before the app-owned
+  provider proxy on explicit quit.
 - **Stored vs runtime session id.** The UI keys everything on the persistent
   **stored** id; RPCs target the live **runtime** id. Sessions render
   optimistically before the first message persists, with rollback/migrate paths.

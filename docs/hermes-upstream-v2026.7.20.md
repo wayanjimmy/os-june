@@ -25,6 +25,13 @@ and `messages` database fields June reads remain compatible.
 The upstream installer still has bare `$UV_CMD` calls. June's quoting patch
 remains required for app data paths containing spaces.
 
+The Windows Gateway's service-oriented `start` command requires an installed
+Scheduled Task or Startup entry and prompts when neither exists. June does not
+install that persistent state because its provider proxy is process-local.
+Instead, June supervises the pinned foreground `gateway run --replace` path and
+matches the runtime's reported PID to its owned real Python child. It probes and
+rejects either Hermes persistence mechanism before replacement (ADR 0038).
+
 The dashboard now imports the `@hermes/shared` workspace from `apps/shared`.
 June's macOS and Windows bundlers retain that workspace until the dashboard
 assets are compiled, then prune the rest of `apps/` from the shipped runtime.
