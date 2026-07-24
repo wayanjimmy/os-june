@@ -399,6 +399,13 @@ describe("RoutinesView templates and creation", () => {
     await screen.findByText("Morning brief");
 
     await userEvent.click(screen.getByRole("button", { name: "New routine" }));
+    const access = screen.getByRole("group", { name: "What can this routine change?" });
+    expect(within(access).getByRole("button", { name: "Sandboxed" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(access).getByRole("button", { name: "Unrestricted" })).toBeEnabled();
+    expect(screen.queryByText(/Sandboxed mode is not supported on Windows/)).toBeNull();
     await userEvent.type(
       screen.getByRole("textbox", { name: "Instructions" }),
       "Summarize my unread notes and flag anything urgent.",
@@ -420,14 +427,27 @@ describe("RoutinesView templates and creation", () => {
     );
   });
 
-  it("forces new Windows routines to use full local access without a mode picker", async () => {
+  it("shows locked full access when creating a Windows routine", async () => {
     tauriMocks.hermesBridgeStatus.mockResolvedValue({ sandboxModeSupported: false });
     mocks.listRoutines.mockResolvedValueOnce([]);
     renderView();
     await screen.findByText("Morning brief");
 
-    expect(screen.queryByText("Unrestricted")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "New routine" }));
+    const access = screen.getByRole("group", { name: "What can this routine change?" });
+    const sandboxed = within(access).getByRole("button", { name: "Sandboxed" });
+    const unrestricted = within(access).getByRole("button", { name: "Unrestricted" });
+    expect(sandboxed).toBeDisabled();
+    expect(sandboxed).toHaveAttribute("aria-pressed", "false");
+    expect(unrestricted).toBeDisabled();
+    expect(unrestricted).toHaveAttribute("aria-pressed", "true");
+    expect(access).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByText(
+        "Sandboxed mode is not supported on Windows. This routine will run with full access to files available to your Windows account.",
+      ),
+    ).toBeInTheDocument();
+
     await userEvent.type(screen.getByRole("textbox", { name: "Instructions" }), "Check my files.");
     await userEvent.click(screen.getByRole("button", { name: "Create" }));
 
@@ -920,6 +940,11 @@ describe("RoutinesView detail", () => {
 
     const instructions = await openDetail("Morning summary");
     expect(screen.queryByText("Unrestricted")).toBeNull();
+    expect(
+      screen.getByText(
+        "Sandboxed mode is not supported on Windows. Existing routines keep their saved tool access.",
+      ),
+    ).toBeInTheDocument();
     await userEvent.clear(instructions);
     await userEvent.type(instructions, "List my unread notes only.");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));

@@ -11,7 +11,9 @@ type Props<T extends string> = {
   onValueChange: (value: T) => void;
   options: readonly Option<T>[];
   className?: string;
+  disabled?: boolean;
   "aria-label"?: string;
+  "aria-describedby"?: string;
 };
 
 /**
@@ -26,7 +28,9 @@ export function SegmentedControl<T extends string>({
   onValueChange,
   options,
   className,
+  disabled = false,
   "aria-label": ariaLabel,
+  "aria-describedby": ariaDescribedBy,
 }: Props<T>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
@@ -72,6 +76,8 @@ export function SegmentedControl<T extends string>({
       ref={containerRef}
       role="group"
       aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
+      aria-disabled={disabled || undefined}
       className={["segmented", className].filter(Boolean).join(" ")}
     >
       {indicator ? (
@@ -93,6 +99,7 @@ export function SegmentedControl<T extends string>({
               buttonsRef.current[idx] = el;
             }}
             type="button"
+            disabled={disabled}
             aria-pressed={selected}
             aria-label={opt.ariaLabel}
             title={opt.ariaLabel}

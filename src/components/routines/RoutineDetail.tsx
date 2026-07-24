@@ -757,8 +757,18 @@ export function RoutineDetail({
               </h2>
               <div className="settings-card">
                 {sandboxModeSupported === true ? (
-                  <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
-                ) : null}
+                  <RoutineModePicker
+                    availability="supported"
+                    unrestricted={unrestricted}
+                    onChange={setUnrestricted}
+                  />
+                ) : (
+                  <p className="routines-mode-hint" role="status">
+                    {sandboxModeSupported === false
+                      ? "Sandboxed mode is not supported on Windows. Existing routines keep their saved tool access."
+                      : "Checking access options..."}
+                  </p>
+                )}
                 {browserUseEnabled ? (
                   <div className="settings-row">
                     <div className="settings-row-info">

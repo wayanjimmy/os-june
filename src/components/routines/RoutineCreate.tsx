@@ -254,8 +254,16 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
             </h2>
             <div className="settings-card">
               {sandboxModeSupported === true ? (
-                <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
-              ) : null}
+                <RoutineModePicker
+                  availability="supported"
+                  unrestricted={unrestricted}
+                  onChange={setUnrestricted}
+                />
+              ) : (
+                <RoutineModePicker
+                  availability={sandboxModeSupported === false ? "unsupported" : "checking"}
+                />
+              )}
             </div>
           </section>
 

@@ -10968,6 +10968,19 @@ button.agent-user-attachment:hover {
   color: var(--foreground);
 }
 
+.segmented[aria-disabled="true"] button {
+  cursor: not-allowed;
+}
+
+.segmented[aria-disabled="true"] {
+  opacity: 0.65;
+}
+
+.segmented[aria-disabled="true"] button[aria-pressed="false"]:hover,
+.segmented[aria-disabled="true"] button[aria-pressed="false"]:hover > svg {
+  color: var(--muted-foreground);
+}
+
 /* Warm add-on: the indicator and selected label go terracotta. Callers pass
  * the class while the armed option warrants the accent (the routines access
  * picker uses it for Unrestricted). After the base selected-state rules on
