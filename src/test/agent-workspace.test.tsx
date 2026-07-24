@@ -49,6 +49,7 @@ import {
   resetHermesIdleSubmitRecoveryForTests,
 } from "../lib/hermes-idle-submit-recovery";
 import { writeAgentSessionContinuity } from "../components/agent/agent-session-continuity";
+import { ARTIFACT_INDEX_RECONCILE_INTERVAL_MS } from "../components/agent/artifact-index";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
 const HERO_GREETING = new RegExp(
@@ -11447,6 +11448,98 @@ describe("AgentWorkspace", () => {
       "title",
       fileName,
     );
+  });
+
+  it("keeps ordinary message growth on the artifact index and refreshes after a file write", async () => {
+    const user = userEvent.setup();
+    const workspaceRoot =
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace";
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    await waitFor(() => expect(mocks.hermesBridgeFilesystemSnapshot).toHaveBeenCalledTimes(1));
+    mocks.hermesBridgeFilesystemSnapshot.mockClear();
+
+    const composer = await screen.findByRole("textbox", { name: "Message June" });
+    await user.type(composer, "Create a report");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "Create a report",
+      }),
+    );
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "message.delta",
+          session_id: "runtime-session-1",
+          payload: { delta: "Working on it." },
+        });
+      }
+    });
+    await act(async () => Promise.resolve());
+    expect(mocks.hermesBridgeFilesystemSnapshot).not.toHaveBeenCalled();
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.complete",
+          session_id: "runtime-session-1",
+          payload: {
+            tool_id: "tool-1",
+            tool_name: "write_file",
+            path: `${workspaceRoot}/report.md`,
+          },
+        });
+      }
+    });
+    await waitFor(() => expect(mocks.hermesBridgeFilesystemSnapshot).toHaveBeenCalledTimes(1));
+  });
+
+  it("reconciles the artifact index every 15 seconds and clears the interval on unmount", async () => {
+    vi.useFakeTimers();
+    const setInterval = vi.spyOn(window, "setInterval");
+    const clearInterval = vi.spyOn(window, "clearInterval");
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      view = render(<AgentWorkspace initialSession={existingSession} />);
+      await settleUnderFakeTimers(() =>
+        expect(mocks.hermesBridgeFilesystemSnapshot).toHaveBeenCalledTimes(1),
+      );
+      const artifactIntervalIndex = setInterval.mock.calls.findIndex(
+        ([, delay]) => delay === ARTIFACT_INDEX_RECONCILE_INTERVAL_MS,
+      );
+      expect(artifactIntervalIndex).toBeGreaterThanOrEqual(0);
+      const artifactInterval = setInterval.mock.results[artifactIntervalIndex]?.value;
+      mocks.hermesBridgeFilesystemSnapshot.mockClear();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ARTIFACT_INDEX_RECONCILE_INTERVAL_MS - 1);
+      });
+      expect(mocks.hermesBridgeFilesystemSnapshot).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      await settleUnderFakeTimers(() =>
+        expect(mocks.hermesBridgeFilesystemSnapshot).toHaveBeenCalledTimes(1),
+      );
+
+      view.unmount();
+      view = undefined;
+      expect(clearInterval).toHaveBeenCalledWith(artifactInterval);
+      mocks.hermesBridgeFilesystemSnapshot.mockClear();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ARTIFACT_INDEX_RECONCILE_INTERVAL_MS);
+      });
+      expect(mocks.hermesBridgeFilesystemSnapshot).not.toHaveBeenCalled();
+    } finally {
+      view?.unmount();
+      setInterval.mockRestore();
+      clearInterval.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("renders a workspace file's download card only on the first response that mentions it", async () => {
