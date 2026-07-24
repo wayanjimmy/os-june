@@ -2905,19 +2905,19 @@ pub(crate) async fn reapply_hermes_runtime(
     bridge: &HermesBridge,
 ) -> Result<(), AppError> {
     let _reapply_guard = REAPPLY_RUNTIME_LOCK.lock().await;
-    let live_connections = live_connections(bridge)?;
+    let connections_before_reapply = live_connections(bridge)?;
     // The routine Gateway is a separate long-lived process. Retain a bridge
     // connection before restarting dashboard modes so June can invoke its
     // platform lifecycle from the unsandboxed app process afterwards.
     #[cfg(not(target_os = "windows"))]
-    let gateway_connection = live_connections.first().cloned().or_else(|| {
+    let gateway_connection = connections_before_reapply.first().cloned().or_else(|| {
         bridge
             .routine_gateway_connection
             .lock()
             .ok()
             .and_then(|connection| connection.clone())
     });
-    let connections: Vec<(bool, Option<String>)> = live_connections
+    let connections: Vec<(bool, Option<String>)> = connections_before_reapply
         .iter()
         .map(|connection| (connection.full_mode, connection.cwd.clone()))
         .collect();
