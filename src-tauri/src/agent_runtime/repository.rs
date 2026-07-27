@@ -522,20 +522,37 @@ impl AgentRepository {
         };
         let payload_json = serde_json::to_string(&payload)
             .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
-        let item = if let Some(row) =
-            query("SELECT id, sequence, created_at FROM agent_items WHERE external_id = ?")
-                .bind(external_id)
-                .fetch_optional(&mut *transaction)
-                .await?
+        let item = if let Some(row) = query(
+            "SELECT id FROM agent_items
+             WHERE external_id = ? AND session_id = ? AND run_id = ?
+               AND kind = 'assistant_message'",
+        )
+        .bind(external_id)
+        .bind(session_id)
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await?
         {
             let id: String = row.get("id");
-            let display_sequence: i64 = row.get("sequence");
-            let created_at: String = row.get("created_at");
-            query("UPDATE agent_items SET payload_json = ?, external_id = NULL WHERE id = ?")
-                .bind(&payload_json)
-                .bind(&id)
-                .execute(&mut *transaction)
-                .await?;
+            let display_sequence: i64 = query(
+                "SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence
+                 FROM agent_items WHERE session_id = ?",
+            )
+            .bind(session_id)
+            .fetch_one(&mut *transaction)
+            .await?
+            .get("next_sequence");
+            query(
+                "UPDATE agent_items
+                 SET sequence = ?, payload_json = ?, external_id = NULL, created_at = ?
+                 WHERE id = ?",
+            )
+            .bind(display_sequence)
+            .bind(&payload_json)
+            .bind(&now)
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
             AgentItemDto {
                 id,
                 session_id: session_id.to_string(),
@@ -543,7 +560,7 @@ impl AgentRepository {
                 sequence: display_sequence,
                 payload: AgentItemPayload::AssistantMessage(payload),
                 external_id: None,
-                created_at,
+                created_at: now.clone(),
             }
         } else {
             let id = Uuid::new_v4().to_string();

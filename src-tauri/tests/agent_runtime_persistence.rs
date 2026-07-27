@@ -1,6 +1,6 @@
 use os_june_lib::agent_runtime::{
     import_legacy_agent_state, legacy_import_completed, AgentItemPayload, AgentRepository,
-    LegacyImportOptions, MessagePayload,
+    LegacyImportOptions, MessagePayload, ToolPayload,
 };
 use os_june_lib::db::migrations::run_migrations;
 use sqlx::{query::query, row::Row};
@@ -158,6 +158,94 @@ async fn streamed_assistant_text_survives_mid_run_hydration_without_duplicates()
             if message.content == "What was already said, plus the ending."
     ));
     assert_eq!(repository.get_run(&run.id).await.unwrap().last_sequence, 3);
+}
+
+#[tokio::test]
+async fn completed_assistant_text_moves_behind_the_tools_that_produced_it() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool.clone());
+    let session = repository
+        .create_session(
+            "Ordered tool run",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Sandboxed,
+            None,
+        )
+        .await
+        .expect("session");
+    let run = repository
+        .create_run(&session.id, "private-auto", Some("medium"))
+        .await
+        .expect("run");
+    let stream_id = format!("assistant:{}", run.id);
+    let partial = repository
+        .append_assistant_message_delta(&session.id, &run.id, 1, "I'll check.", &stream_id)
+        .await
+        .expect("message delta")
+        .expect("assistant row");
+    query("UPDATE agent_items SET created_at = '2026-01-01T00:00:00Z' WHERE id = ?")
+        .bind(&partial.id)
+        .execute(&pool)
+        .await
+        .expect("set old stream timestamp");
+    for (sequence, payload, external_id) in [
+        (
+            2,
+            AgentItemPayload::ToolCall(ToolPayload {
+                tool_name: Some("read_file".into()),
+                tool_call_id: Some("call-1".into()),
+                arguments: Some(serde_json::json!({ "path": "note.md" })),
+                result: None,
+                status: Some("running".into()),
+            }),
+            "tool-call-event",
+        ),
+        (
+            3,
+            AgentItemPayload::ToolResult(ToolPayload {
+                tool_name: Some("read_file".into()),
+                tool_call_id: Some("call-1".into()),
+                arguments: None,
+                result: Some(serde_json::json!({ "content": "note" })),
+                status: Some("complete".into()),
+            }),
+            "tool-result-event",
+        ),
+    ] {
+        repository
+            .append_item(
+                &session.id,
+                Some(&run.id),
+                sequence,
+                &payload,
+                Some(external_id),
+            )
+            .await
+            .expect("tool item")
+            .expect("tool item inserted");
+    }
+
+    let completed = repository
+        .complete_assistant_message(&session.id, &run.id, 4, "Here is what I found.", &stream_id)
+        .await
+        .expect("completed message")
+        .expect("assistant row");
+    let items = repository.items(&session.id).await.expect("items");
+
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].payload.kind(), "tool_call");
+    assert_eq!(items[1].payload.kind(), "tool_result");
+    assert_eq!(items[2].id, partial.id);
+    assert_eq!(items[2].sequence, 3);
+    assert_eq!(items[2].external_id, None);
+    assert_ne!(items[2].created_at, "2026-01-01T00:00:00Z");
+    assert_eq!(completed, items[2]);
+    assert!(matches!(
+        &items[2].payload,
+        AgentItemPayload::AssistantMessage(message) if message.content == "Here is what I found."
+    ));
+    let sequences = items.iter().map(|item| item.sequence).collect::<Vec<_>>();
+    assert_eq!(sequences, vec![1, 2, 3]);
 }
 
 #[tokio::test]
