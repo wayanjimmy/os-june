@@ -102,18 +102,10 @@ pub async fn get_latest_agent_run(
     session_id: String,
 ) -> Result<Option<Value>, AppError> {
     let repository = repository(&app).await?;
-    let row = sqlx::query::query(
-        "SELECT id FROM agent_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT 1",
-    )
-    .bind(session_id)
-    .fetch_optional(&repository.pool)
-    .await?;
-    use sqlx::row::Row;
-    match row {
-        Some(row) => Ok(Some(run_json(
-            repository.get_run(&row.get::<String, _>("id")).await?,
-        ))),
-        None => Ok(None),
+    match repository.latest_run(&session_id).await {
+        Ok(run) => Ok(Some(run_json(run))),
+        Err(sqlx::Error::RowNotFound) => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -802,6 +794,12 @@ pub async fn resolve_agent_interruption(
     let original_interruption_json: String = row.get("payload_json");
     let mut interruption: Value = serde_json::from_str(&original_interruption_json)
         .map_err(|error| AppError::new("agent_interruption_invalid", error.to_string()))?;
+    if interruption.get("status").and_then(Value::as_str) != Some("pending") {
+        return Err(AppError::new(
+            "agent_interruption_expired",
+            "This interruption can no longer be resumed.",
+        ));
+    }
     let run = repository.get_run(&run_id).await?;
     if run.status != "waiting_for_user" {
         return Err(AppError::new(
@@ -935,69 +933,137 @@ pub async fn resolve_agent_interruption(
     if let Some(secret_ref) = secret_ref.as_deref() {
         interruption["secretRef"] = json!(secret_ref);
     }
+    let resolved_interruption_json = interruption.to_string();
     // Persist the visible resolution and reset sequencing as one unit. The
     // sidecar can emit resumed events immediately after accepting the request,
     // so both must be in place before dispatch, but neither may be left behind
     // when preparation or persistence fails.
-    let persist_result: Result<(), sqlx::Error> = async {
+    let persist_result: Result<bool, sqlx::Error> = async {
         let mut transaction = repository.pool.begin().await?;
-        sqlx::query::query("UPDATE agent_items SET payload_json = ? WHERE id = ?")
-            .bind(interruption.to_string())
-            .bind(&item_id)
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query::query("UPDATE agent_runs SET last_sequence = 0, updated_at = ? WHERE id = ?")
-            .bind(chrono::Utc::now().to_rfc3339())
-            .bind(&run.id)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await
+        let claimed = sqlx::query::query(
+            "UPDATE agent_items SET payload_json = ?
+             WHERE id = ? AND payload_json = ?
+               AND json_extract(payload_json, '$.status') = 'pending'",
+        )
+        .bind(&resolved_interruption_json)
+        .bind(&item_id)
+        .bind(&original_interruption_json)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if claimed == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let reset = sqlx::query::query(
+            "UPDATE agent_runs SET last_sequence = 0, updated_at = ?
+             WHERE id = ? AND status = 'waiting_for_user'",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&run.id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if reset == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
     }
     .await;
-    if let Err(error) = persist_result {
-        if let Some(secret_ref) = secret_ref.as_deref() {
-            let _ = super::secrets::delete(secret_ref).await;
+    match persist_result {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Some(secret_ref) = secret_ref.as_deref() {
+                if let Err(cleanup_error) = super::secrets::delete(secret_ref).await {
+                    tracing::warn!(
+                        error_code = %cleanup_error.code,
+                        "failed to remove an unclaimed staged agent secret"
+                    );
+                }
+            }
+            return Err(AppError::new(
+                "agent_interruption_expired",
+                "This interruption can no longer be resumed.",
+            ));
         }
-        return Err(error.into());
+        Err(error) => {
+            if let Some(secret_ref) = secret_ref.as_deref() {
+                if let Err(cleanup_error) = super::secrets::delete(secret_ref).await {
+                    tracing::warn!(
+                        error_code = %cleanup_error.code,
+                        "failed to remove a staged agent secret after claim persistence failed"
+                    );
+                }
+            }
+            return Err(error.into());
+        }
     }
     if let Err(error) = host
         .request("run.resume", &session.id, &run.id, params)
         .await
     {
+        if error.code != "agent_runtime_request_failed" {
+            repository
+                .update_run_status(
+                    &run.id,
+                    "interrupted",
+                    None,
+                    None,
+                    Some((
+                        "agent_resume_dispatch_unknown",
+                        "June lost contact with the local agent runtime while resuming this run. The request will not be repeated automatically.",
+                    )),
+                )
+                .await?;
+            return Err(error);
+        }
         let restore_result = async {
             let mut transaction = repository.pool.begin().await?;
-            sqlx::query::query("UPDATE agent_items SET payload_json = ? WHERE id = ?")
-                .bind(&original_interruption_json)
-                .bind(&item_id)
-                .execute(&mut *transaction)
-                .await?;
-            sqlx::query::query(
-                "UPDATE agent_runs SET last_sequence = ?, updated_at = ? WHERE id = ?",
+            let restored = sqlx::query::query(
+                "UPDATE agent_items SET payload_json = ?
+                 WHERE id = ? AND payload_json = ?
+                   AND EXISTS (
+                     SELECT 1 FROM agent_runs
+                     WHERE id = ? AND status = 'waiting_for_user'
+                   )",
             )
-            .bind(run.last_sequence)
-            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(&original_interruption_json)
+            .bind(&item_id)
+            .bind(&resolved_interruption_json)
             .bind(&run.id)
             .execute(&mut *transaction)
-            .await?;
-            transaction.commit().await
+            .await?
+            .rows_affected();
+            if restored > 0 {
+                sqlx::query::query(
+                    "UPDATE agent_runs SET last_sequence = ?, updated_at = ?
+                     WHERE id = ? AND status = 'waiting_for_user'",
+                )
+                .bind(run.last_sequence)
+                .bind(chrono::Utc::now().to_rfc3339())
+                .bind(&run.id)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            transaction.commit().await?;
+            Ok::<bool, sqlx::Error>(restored > 0)
         }
-        .await;
-        if let Some(secret_ref) = secret_ref.as_deref() {
-            if let Err(cleanup_error) = super::secrets::delete(secret_ref).await {
-                tracing::warn!(
-                    error_code = %cleanup_error.code,
-                    "failed to remove a secret after resume dispatch failed"
-                );
+        .await?;
+        if restore_result {
+            if let Some(secret_ref) = secret_ref.as_deref() {
+                if let Err(cleanup_error) = super::secrets::delete(secret_ref).await {
+                    tracing::warn!(
+                        error_code = %cleanup_error.code,
+                        "failed to remove a secret after resume dispatch failed"
+                    );
+                }
             }
         }
-        restore_result?;
         return Err(error);
     }
-    Ok(run_json(
-        repository
-            .update_run_status(&run.id, "running", None, None, None)
-            .await?,
-    ))
+    Ok(run_json(repository.get_run(&run.id).await?))
 }
 
 async fn mark_dispatch_failed(repository: &AgentRepository, run_id: &str, error: &AppError) {

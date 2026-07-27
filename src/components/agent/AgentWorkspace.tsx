@@ -29,6 +29,7 @@ import {
   agentItemsToChatTurns,
   applyAgentRuntimeEvent,
   createAgentRuntimeProjection,
+  mergeAgentRuntimeRun,
   mergeAgentRuntimeSnapshot,
   type AgentRuntimeProjection,
 } from "../../lib/agent-runtime-adapter";
@@ -251,6 +252,8 @@ export function AgentWorkspace({
   const [projection, setProjection] = useState<AgentRuntimeProjection>(() =>
     createAgentRuntimeProjection({ session: initialAgentSession }),
   );
+  const projectionRef = useRef(projection);
+  projectionRef.current = projection;
   const [hydratedSelectionId, setHydratedSelectionId] = useState<string>();
   const [artifacts, setArtifacts] = useState<AgentArtifactDto[]>([]);
   const [artifactPanel, setArtifactPanel] = useState<AgentArtifactPanelState | null>(null);
@@ -681,20 +684,31 @@ export function AgentWorkspace({
         void refreshSessions().catch(() => undefined);
         return;
       }
-      setProjection((current) => applyAgentRuntimeEvent(current, payload));
-      dispatchAgentSessionStatus({
-        sessionId: payload.sessionId,
-        status:
-          payload.method === "interruption.requested"
-            ? "waitingForUser"
-            : payload.method === "run.completed"
-              ? "completed"
-              : payload.method === "run.cancelled"
-                ? "cancelled"
-                : payload.method === "run.failed"
-                  ? "failed"
-                  : "running",
+      const projected = applyAgentRuntimeEvent(projectionRef.current, payload);
+      projectionRef.current = projected;
+      setProjection((current) => {
+        const next = applyAgentRuntimeEvent(current, payload);
+        projectionRef.current = next;
+        return next;
       });
+      const sessionStatus =
+        projected.run?.id !== payload.runId
+          ? undefined
+          : payload.method === "run.started" && projected.run.status === "running"
+            ? "running"
+            : payload.method === "interruption.requested" &&
+                projected.run.status === "waiting_for_user"
+              ? "waitingForUser"
+              : payload.method === "run.completed" && projected.run.status === "completed"
+                ? "completed"
+                : payload.method === "run.cancelled" && projected.run.status === "cancelled"
+                  ? "cancelled"
+                  : payload.method === "run.failed" && projected.run.status === "failed"
+                    ? "failed"
+                    : undefined;
+      if (sessionStatus) {
+        dispatchAgentSessionStatus({ sessionId: payload.sessionId, status: sessionStatus });
+      }
       if (
         payload.method === "run.completed" ||
         payload.method === "run.cancelled" ||
@@ -1014,7 +1028,7 @@ export function AgentWorkspace({
         rememberSessionThinkingLevel(activeSession.id, submittedThinkingLevel);
       }
       if (selectedIdRef.current === activeSession.id) {
-        setProjection((current) => ({ ...current, run }));
+        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
       }
       if (pendingSessionCreationRef.current === creationRequestId) {
         pendingSessionCreationRef.current = undefined;
@@ -1439,7 +1453,9 @@ export function AgentWorkspace({
     setError(undefined);
     try {
       const run = await agentRuntimeBindings.retryRun(failedItem.runId);
-      setProjection((current) => ({ ...current, run }));
+      if (run && selectedIdRef.current === run.sessionId) {
+        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
+      }
       dispatchAgentSessionStatus({
         sessionId: failedItem.sessionId,
         title: selectedSession?.title,
@@ -1466,7 +1482,9 @@ export function AgentWorkspace({
         interruptionId,
         resolution: { kind: "approval", choice },
       });
-      setProjection((current) => ({ ...current, run }));
+      if (run && selectedIdRef.current === run.sessionId) {
+        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
+      }
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
@@ -1485,7 +1503,9 @@ export function AgentWorkspace({
         interruptionId,
         resolution: { kind: "clarification", answer },
       });
-      setProjection((current) => ({ ...current, run }));
+      if (run && selectedIdRef.current === run.sessionId) {
+        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
+      }
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
@@ -1506,7 +1526,9 @@ export function AgentWorkspace({
           ? { kind: "secret", secret, choice: "once" }
           : { kind: "secret", choice: "deny" },
       });
-      setProjection((current) => ({ ...current, run }));
+      if (run && selectedIdRef.current === run.sessionId) {
+        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
+      }
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {

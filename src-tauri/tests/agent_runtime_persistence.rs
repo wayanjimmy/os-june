@@ -6,6 +6,8 @@ use os_june_lib::db::migrations::run_migrations;
 use sqlx::{query::query, row::Row};
 use sqlx_sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::Barrier;
 
 async fn memory_database() -> SqlitePool {
     let pool = SqlitePoolOptions::new()
@@ -436,6 +438,235 @@ async fn resumed_run_rebases_process_local_event_sequence() {
 
     assert!(resumed.is_some());
     assert_eq!(repository.get_run(&run.id).await.unwrap().last_sequence, 1);
+}
+
+#[tokio::test]
+async fn terminal_run_status_cannot_be_regressed_by_a_late_active_update() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool);
+    let session = repository
+        .create_session(
+            "Terminal run",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .expect("session");
+    let run = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("run");
+
+    let failed = repository
+        .update_run_status(
+            &run.id,
+            "failed",
+            None,
+            None,
+            Some(("agent_patch_ambiguous", "Patch target did not match.")),
+        )
+        .await
+        .expect("terminal failure");
+    let terminal_completed_at = failed.completed_at.clone();
+    let after_late_usage = repository
+        .update_run_usage(&run.id, &serde_json::json!({ "inputTokens": 11 }))
+        .await
+        .expect("late usage update");
+    let after_late_update = repository
+        .update_run_status(&run.id, "running", None, None, None)
+        .await
+        .expect("late active update is ignored");
+    let session = repository.get_session(&session.id).await.expect("session");
+
+    assert_eq!(failed.status, "failed");
+    assert_eq!(after_late_usage.status, "failed");
+    assert_eq!(after_late_usage.completed_at, terminal_completed_at);
+    assert_eq!(
+        after_late_usage.error_code.as_deref(),
+        Some("agent_patch_ambiguous")
+    );
+    assert_eq!(
+        after_late_usage.error_message.as_deref(),
+        Some("Patch target did not match.")
+    );
+    assert_eq!(
+        after_late_usage.usage,
+        Some(serde_json::json!({ "inputTokens": 11 }))
+    );
+    assert_eq!(after_late_update.status, "failed");
+    assert_eq!(after_late_update.completed_at, terminal_completed_at);
+    assert_eq!(
+        after_late_update.error_code.as_deref(),
+        Some("agent_patch_ambiguous")
+    );
+    assert_eq!(
+        after_late_update.error_message.as_deref(),
+        Some("Patch target did not match.")
+    );
+    assert_eq!(session.status, "failed");
+    assert_eq!(
+        session.last_error.as_deref(),
+        Some("Patch target did not match.")
+    );
+}
+
+#[tokio::test]
+async fn concurrent_terminal_and_late_active_updates_settle_terminal() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database_path = directory.path().join("agent-runtime.db");
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", database_path.display()))
+        .expect("database options")
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .expect("database");
+    run_migrations(&pool).await.expect("migrations");
+    let repository = AgentRepository::new(pool);
+    let session = repository
+        .create_session(
+            "Concurrent terminal run",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .expect("session");
+    let run = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("run");
+    let barrier = Arc::new(Barrier::new(3));
+
+    let terminal_repository = repository.clone();
+    let terminal_run_id = run.id.clone();
+    let terminal_barrier = Arc::clone(&barrier);
+    let terminal_update = tokio::spawn(async move {
+        terminal_barrier.wait().await;
+        terminal_repository
+            .update_run_status(
+                &terminal_run_id,
+                "failed",
+                None,
+                None,
+                Some(("agent_patch_ambiguous", "Patch target did not match.")),
+            )
+            .await
+    });
+
+    let active_repository = repository.clone();
+    let active_run_id = run.id.clone();
+    let active_barrier = Arc::clone(&barrier);
+    let active_update = tokio::spawn(async move {
+        active_barrier.wait().await;
+        active_repository
+            .update_run_status(&active_run_id, "running", None, None, None)
+            .await
+    });
+
+    barrier.wait().await;
+    terminal_update
+        .await
+        .expect("terminal task")
+        .expect("terminal update");
+    active_update
+        .await
+        .expect("active task")
+        .expect("active update");
+
+    let settled = repository.get_run(&run.id).await.expect("settled run");
+    let session = repository.get_session(&session.id).await.expect("session");
+    assert_eq!(settled.status, "failed");
+    assert_eq!(settled.error_code.as_deref(), Some("agent_patch_ambiguous"));
+    assert_eq!(session.status, "failed");
+}
+
+#[tokio::test]
+async fn restart_interrupts_resolved_waiting_runs_but_preserves_pending_interruptions() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool);
+    let pending_session = repository
+        .create_session(
+            "Pending interruption",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .unwrap();
+    let pending = repository
+        .create_run(&pending_session.id, "private-auto", None)
+        .await
+        .unwrap();
+    let resolved_session = repository
+        .create_session(
+            "Resolved interruption",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .unwrap();
+    let resolved = repository
+        .create_run(&resolved_session.id, "private-auto", None)
+        .await
+        .unwrap();
+    for (run, session, status) in [
+        (&pending, &pending_session, "pending"),
+        (&resolved, &resolved_session, "resolved"),
+    ] {
+        repository
+            .update_run_status(
+                &run.id,
+                "waiting_for_user",
+                None,
+                Some(&serde_json::json!("serialized")),
+                None,
+            )
+            .await
+            .unwrap();
+        repository
+            .append_item(
+                &session.id,
+                Some(&run.id),
+                1,
+                &AgentItemPayload::Interruption(serde_json::json!({
+                    "id": format!("interruption-{status}"),
+                    "status": status,
+                })),
+                Some(&format!("interruption-{status}")),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        repository
+            .reconcile_unresumable_waiting_runs_after_restart()
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repository.get_run(&pending.id).await.unwrap().status,
+        "waiting_for_user"
+    );
+    let resolved = repository.get_run(&resolved.id).await.unwrap();
+    assert_eq!(resolved.status, "interrupted");
+    assert_eq!(
+        resolved.error_code.as_deref(),
+        Some("resume_dispatch_interrupted")
+    );
+    assert_eq!(
+        repository
+            .get_session(&resolved_session.id)
+            .await
+            .unwrap()
+            .status,
+        "interrupted"
+    );
 }
 
 #[tokio::test]
