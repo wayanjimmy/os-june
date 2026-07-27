@@ -186,12 +186,13 @@ retried without recording again.
 
 ## Agent skills
 
-The agent loads skills from its managed `skills` folder and, when the folder
-exists, from `~/.agents/skills` in your home directory (the same location the
-`skills` CLI installs into). Drop a skill folder there and every agent session
-picks it up the next time it starts. Home-folder skills load read-only: the
-macOS write-jail grants writes only under June's own data directory, so the
-agent can use these skills but cannot modify them.
+The agent loads skills from its managed `skills` folder, from
+`~/.agents/skills` in your home directory (the same location the `skills` CLI
+installs into), and from June's bundled `src-tauri/resources/agent-skills`
+fallbacks. Drop a skill folder into the user-global directory and every agent
+session picks it up the next time it starts. Managed and user-global skills
+shadow a bundled skill with the same id. User-global and bundled skills load
+read-only; June edits only its managed app-data skills.
 
 ## Permissions
 

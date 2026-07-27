@@ -230,6 +230,13 @@ loop. It is a trusted orchestration process, while Rust owns secrets,
 persistence, approvals, and every machine-touching tool.
 _Avoid_: brain, Hermes, gateway.
 
+**Bundled agent skill**:
+A June-owned, read-only workflow instruction pack shipped as an app resource.
+Managed app-data skills and user-global `~/.agents/skills` may shadow a bundled
+skill with the same stable id. App releases update bundled skills without
+copying them into mutable profile state.
+_Avoid_: Hermes skill, built-in prompt.
+
 **Runtime protocol**:
 June's versioned newline-delimited JSON-RPC contract over the agent harness's
 stdin and stdout. It carries run requests, host tool calls, streaming events,
@@ -385,11 +392,11 @@ _Avoid_: using "tool" for all three.
 
 **Obsidian plugin**:
 The June-owned local capability for discovering the user-selected Obsidian vault
-at task time through the `june_obsidian` MCP server. The vault selection is
-stored in June-owned `obsidian.json`; it is not a runtime environment variable.
-Discovery is current state, not write authorization. Disconnect removes future
-discovery but cannot revoke a path already disclosed to a live unrestricted
-runtime.
+at task time through the Rust-owned `get_obsidian_vault` tool and bundled
+`june-obsidian` skill. The vault selection is stored in June-owned
+`obsidian.json`; it is not a runtime environment variable. Discovery is current
+state, not write authorization. Disconnect removes future discovery but cannot
+revoke a path already disclosed to a live unrestricted runtime.
 _Avoid_: Obsidian connector, `OBSIDIAN_VAULT_PATH`.
 
 **Plugin**:

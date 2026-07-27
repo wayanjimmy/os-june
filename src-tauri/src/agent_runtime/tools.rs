@@ -1099,25 +1099,16 @@ async fn notion_tool(
 }
 
 async fn list_skills(context: &ToolContext) -> Result<Value, AppError> {
-    let allowed = context
+    let enabled_skill_ids = context
         .repository
         .run_enabled_skills(&context.run_id)
-        .await?
-        .into_iter()
-        .collect::<std::collections::HashSet<_>>();
-    let roots = skill_roots(&context.app);
-    let mut skills = Vec::new();
-    for root in roots {
-        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
-            continue;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if allowed.contains(&name) && entry.path().join("SKILL.md").is_file() {
-                skills.push(json!({ "name": name, "root": root }));
-            }
-        }
-    }
+        .await?;
+    let skills = super::api::enabled_skill_descriptors(
+        &context.app,
+        &context.repository,
+        &enabled_skill_ids,
+    )
+    .await?;
     Ok(json!({ "skills": skills }))
 }
 
@@ -1256,15 +1247,7 @@ fn resolve_path(
 }
 
 fn skill_roots(app: &AppHandle) -> Vec<PathBuf> {
-    let mut roots = crate::app_paths::app_data_dir(app)
-        .ok()
-        .map(|path| path.join("agents").join("skills"))
-        .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join(".agents").join("skills"));
-    }
-    roots
+    super::api::skill_root_paths(app)
 }
 
 pub(crate) fn sandbox_profile(workspace: &Path) -> String {

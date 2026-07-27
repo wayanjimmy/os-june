@@ -1137,13 +1137,13 @@ pub async fn list_agent_skills(app: AppHandle) -> Result<Vec<Value>, AppError> {
 #[tauri::command]
 pub async fn read_agent_skill(app: AppHandle, skill_id: String) -> Result<Value, AppError> {
     validate_skill_id(&skill_id)?;
-    for (root, managed) in skill_roots(&app) {
-        let path = root.join(&skill_id).join("SKILL.md");
+    for root in skill_roots(&app) {
+        let path = root.path.join(&skill_id).join("SKILL.md");
         if path.is_file() {
             let content = tokio::fs::read_to_string(path)
                 .await
                 .map_err(|error| AppError::new("agent_skill_read_failed", error.to_string()))?;
-            return Ok(json!({ "content": content, "readOnly": !managed }));
+            return Ok(json!({ "content": content, "readOnly": !root.source.editable() }));
         }
     }
     Err(AppError::new(
@@ -1166,7 +1166,7 @@ pub async fn update_agent_skill(
     }
     let root = skill_roots(&app)
         .into_iter()
-        .find_map(|(root, managed)| managed.then_some(root))
+        .find_map(|root| (root.source == SkillSource::Managed).then_some(root.path))
         .ok_or_else(|| {
             AppError::new(
                 "agent_skill_write_failed",
@@ -1177,7 +1177,7 @@ pub async fn update_agent_skill(
     if !path.is_file() {
         return Err(AppError::new(
             "agent_skill_read_only",
-            "User-global skills are read-only in June.",
+            "Only June-managed skills can be edited.",
         ));
     }
     let temporary = path.with_extension("md.tmp");
@@ -1230,9 +1230,16 @@ async fn agent_skill_catalog(
         .into_iter()
         .map(|skill| (skill.id, skill.enabled))
         .collect();
+    Ok(agent_skill_catalog_from_roots(skill_roots(app), &overrides).await)
+}
+
+async fn agent_skill_catalog_from_roots(
+    roots: Vec<SkillRoot>,
+    overrides: &HashMap<String, bool>,
+) -> Vec<Value> {
     let mut result = Vec::new();
-    for (root, managed) in skill_roots(app) {
-        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+    for root in roots {
+        let Ok(mut entries) = tokio::fs::read_dir(&root.path).await else {
             continue;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -1252,10 +1259,10 @@ async fn agent_skill_catalog(
                 .ok()
                 .and_then(|text| skill_description(&text))
                 .unwrap_or_else(|| "June agent skill".into());
-            result.push(json!({ "id": id, "name": id, "description": description, "source": if managed { "managed" } else { "user_global" }, "enabled": overrides.get(&id).copied().unwrap_or(true), "editable": managed }));
+            result.push(json!({ "id": id, "name": id, "description": description, "source": root.source.as_str(), "enabled": overrides.get(&id).copied().unwrap_or(true), "editable": root.source.editable() }));
         }
     }
-    Ok(result)
+    result
 }
 
 #[tauri::command]
@@ -1263,30 +1270,67 @@ pub async fn set_agent_skill_enabled(
     app: AppHandle,
     request: SetSkillEnabledRequest,
 ) -> Result<Value, AppError> {
-    let managed_root = skill_roots(&app)
+    validate_skill_id(&request.skill_id)?;
+    let root = skill_roots(&app)
         .into_iter()
-        .find(|(_, managed)| *managed)
-        .map(|(root, _)| root)
-        .filter(|root| root.join(&request.skill_id).join("SKILL.md").is_file());
-    let Some(managed_root) = managed_root else {
-        return Err(AppError::new(
-            "agent_skill_read_only",
-            "User-global skills are read-only in June.",
-        ));
-    };
+        .find(|root| root.path.join(&request.skill_id).join("SKILL.md").is_file())
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_skill_not_found",
+                "The requested skill was not found.",
+            )
+        })?;
     let skill = repository(&app)
         .await?
-        .set_skill_enabled(&request.skill_id, request.enabled, true)
+        .set_skill_enabled(&request.skill_id, request.enabled, root.source.editable())
         .await?;
-    let description =
-        tokio::fs::read_to_string(managed_root.join(&request.skill_id).join("SKILL.md"))
-            .await
-            .ok()
-            .and_then(|text| skill_description(&text))
-            .unwrap_or_else(|| "June agent skill".into());
+    let description = tokio::fs::read_to_string(root.path.join(&request.skill_id).join("SKILL.md"))
+        .await
+        .ok()
+        .and_then(|text| skill_description(&text))
+        .unwrap_or_else(|| "June agent skill".into());
     Ok(
-        json!({ "id": skill.id, "name": skill.id, "description": description, "source": "managed", "enabled": skill.enabled, "editable": true }),
+        json!({ "id": skill.id, "name": skill.id, "description": description, "source": root.source.as_str(), "enabled": skill.enabled, "editable": root.source.editable() }),
     )
+}
+
+pub(super) async fn enabled_skill_descriptors(
+    app: &AppHandle,
+    repository: &AgentRepository,
+    enabled_skill_ids: &[String],
+) -> Result<Vec<Value>, AppError> {
+    let enabled = enabled_skill_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    Ok(agent_skill_catalog(app, repository)
+        .await?
+        .into_iter()
+        .filter(|skill| {
+            skill
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| enabled.contains(id))
+        })
+        .collect())
+}
+
+fn runtime_skill_descriptors(skills: Vec<Value>) -> Vec<Value> {
+    skills
+        .into_iter()
+        .map(|skill| {
+            let source = if skill.get("source").and_then(Value::as_str) == Some("managed") {
+                "managed"
+            } else {
+                "external"
+            };
+            json!({
+                "name": skill.get("name").cloned().unwrap_or(Value::Null),
+                "description": skill.get("description").cloned().unwrap_or(Value::Null),
+                "source": source,
+            })
+        })
+        .collect()
 }
 
 fn skill_description(text: &str) -> Option<String> {
@@ -1313,16 +1357,83 @@ fn skill_description(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn skill_roots(app: &AppHandle) -> Vec<(PathBuf, bool)> {
-    let mut roots = crate::app_paths::app_data_dir(app)
-        .ok()
-        .map(|path| (path.join("agents").join("skills"), true))
-        .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push((PathBuf::from(home).join(".agents").join("skills"), false));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkillSource {
+    Managed,
+    UserGlobal,
+    Bundled,
+}
+
+impl SkillSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::UserGlobal => "user_global",
+            Self::Bundled => "bundled",
+        }
     }
-    roots
+
+    fn editable(self) -> bool {
+        self == Self::Managed
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SkillRoot {
+    path: PathBuf,
+    source: SkillSource,
+}
+
+fn skill_roots(app: &AppHandle) -> Vec<SkillRoot> {
+    let managed = crate::app_paths::app_data_dir(app)
+        .ok()
+        .map(|path| path.join("agents").join("skills"));
+    let user_global = app
+        .path()
+        .home_dir()
+        .ok()
+        .map(|home| home.join(".agents").join("skills"));
+    let bundled = if cfg!(debug_assertions) {
+        Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("agent-skills"),
+        )
+    } else {
+        app.path()
+            .resource_dir()
+            .ok()
+            .map(|path| path.join("native").join("agent-skills"))
+    };
+    skill_roots_from_locations(managed, user_global, bundled)
+}
+
+fn skill_roots_from_locations(
+    managed: Option<PathBuf>,
+    user_global: Option<PathBuf>,
+    bundled: Option<PathBuf>,
+) -> Vec<SkillRoot> {
+    [
+        managed.map(|path| SkillRoot {
+            path,
+            source: SkillSource::Managed,
+        }),
+        user_global.map(|path| SkillRoot {
+            path,
+            source: SkillSource::UserGlobal,
+        }),
+        bundled.map(|path| SkillRoot {
+            path,
+            source: SkillSource::Bundled,
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+pub(super) fn skill_root_paths(app: &AppHandle) -> Vec<PathBuf> {
+    skill_roots(app).into_iter().map(|root| root.path).collect()
 }
 
 fn normalize_agent_model(model: &str) -> String {
@@ -1424,8 +1535,11 @@ async fn run_params(
     crate::agent_mcp::snapshot_run_policies(&repository.pool, request.run_id, &mcp_descriptors)
         .await
         .map_err(|error| AppError::new("agent_mcp_policy_snapshot_failed", error.to_string()))?;
+    let skills = runtime_skill_descriptors(
+        enabled_skill_descriptors(app, repository, request.skills).await?,
+    );
     Ok(
-        json!({ "model": request.model, "reasoningEffort": request.reasoning_effort, "instructions": INSTRUCTIONS, "workspace": request.workspace, "safetyMode": request.safety_mode.as_db(), "input": message_with_attachment_context(request.input, request.attachments), "attachments": vision_attachments, "history": history, "tools": tools, "skills": request.skills.iter().map(|name| json!({ "name": name, "description": "Enabled June skill", "source": "managed" })).collect::<Vec<_>>(), "contextWindow": model_capabilities.context_tokens.unwrap_or(128000), "maxOutputTokens": 8192 }),
+        json!({ "model": request.model, "reasoningEffort": request.reasoning_effort, "instructions": INSTRUCTIONS, "workspace": request.workspace, "safetyMode": request.safety_mode.as_db(), "input": message_with_attachment_context(request.input, request.attachments), "attachments": vision_attachments, "history": history, "tools": tools, "skills": skills, "contextWindow": model_capabilities.context_tokens.unwrap_or(128000), "maxOutputTokens": 8192 }),
     )
 }
 
@@ -1452,7 +1566,7 @@ async fn tool_descriptors(
         { "name": "generate_image", "description": "Generate an image from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" } }, "required": ["prompt"], "additionalProperties": false } },
         { "name": "edit_image", "description": "Edit an image file in the June session workspace and show the result in the conversation.", "parameters": { "type": "object", "properties": { "sourcePath": { "type": "string" }, "instruction": { "type": "string" } }, "required": ["sourcePath", "instruction"], "additionalProperties": false } },
         { "name": "generate_video", "description": "Generate a short video from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" }, "duration": { "type": "string" }, "aspectRatio": { "type": "string" }, "audio": { "type": "boolean" } }, "required": ["prompt"], "additionalProperties": false } },
-        { "name": "get_obsidian_vault", "description": "Discover the current Obsidian vault selected in June. Re-query for each distinct task.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
+        { "name": "get_obsidian_vault", "description": "Discover the current Obsidian vault selected in June. Re-query for each distinct task. If no current path is returned, do not guess one. A returned path is discovery, not write authorization.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
         { "name": "start_recording", "description": "Start a visible June recording only when the user explicitly asks to begin recording now.", "parameters": { "type": "object", "properties": { "sourceMode": { "type": "string", "enum": ["microphoneOnly", "microphonePlusSystem"] } }, "required": [], "additionalProperties": false }, "requiresApproval": true },
         { "name": "stop_recording", "description": "Stop the recording currently visible in June.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false }, "requiresApproval": true },
         { "name": "recording_status", "description": "Check whether June is currently recording and return the active recording metadata.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
@@ -1999,6 +2113,130 @@ mod tests {
             )
             .as_deref(),
             Some("Readable managed skill summary.")
+        );
+    }
+
+    #[test]
+    fn skill_roots_prefer_managed_then_user_global_then_bundled() {
+        let roots = skill_roots_from_locations(
+            Some(PathBuf::from("managed")),
+            Some(PathBuf::from("user-global")),
+            Some(PathBuf::from("bundled")),
+        );
+
+        assert_eq!(
+            roots,
+            vec![
+                SkillRoot {
+                    path: PathBuf::from("managed"),
+                    source: SkillSource::Managed,
+                },
+                SkillRoot {
+                    path: PathBuf::from("user-global"),
+                    source: SkillSource::UserGlobal,
+                },
+                SkillRoot {
+                    path: PathBuf::from("bundled"),
+                    source: SkillSource::Bundled,
+                },
+            ]
+        );
+        assert!(roots[0].source.editable());
+        assert!(!roots[1].source.editable());
+        assert!(!roots[2].source.editable());
+    }
+
+    #[tokio::test]
+    async fn skill_catalog_applies_precedence_source_and_enabled_overrides() {
+        let directory = tempfile::tempdir().expect("skills directory");
+        let managed = directory.path().join("managed");
+        let user_global = directory.path().join("user-global");
+        let bundled = directory.path().join("bundled");
+        for (root, id, description) in [
+            (&managed, "shared", "Managed winner"),
+            (&user_global, "shared", "User-global shadowed"),
+            (&bundled, "shared", "Bundled shadowed"),
+            (&bundled, "june-obsidian", "Bundled Obsidian"),
+        ] {
+            let skill_directory = root.join(id);
+            std::fs::create_dir_all(&skill_directory).expect("skill directory");
+            std::fs::write(
+                skill_directory.join("SKILL.md"),
+                format!("---\nname: {id}\ndescription: {description}\n---\n"),
+            )
+            .expect("skill file");
+        }
+        let overrides = HashMap::from([("june-obsidian".to_string(), false)]);
+
+        let catalog = agent_skill_catalog_from_roots(
+            skill_roots_from_locations(Some(managed), Some(user_global), Some(bundled)),
+            &overrides,
+        )
+        .await;
+
+        let shared = catalog
+            .iter()
+            .find(|skill| skill["id"] == "shared")
+            .expect("shared skill");
+        assert_eq!(shared["description"], "Managed winner");
+        assert_eq!(shared["source"], "managed");
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|skill| skill["id"] == "shared")
+                .count(),
+            1
+        );
+        let obsidian = catalog
+            .iter()
+            .find(|skill| skill["id"] == "june-obsidian")
+            .expect("bundled Obsidian skill");
+        assert_eq!(obsidian["source"], "bundled");
+        assert_eq!(obsidian["editable"], false);
+        assert_eq!(obsidian["enabled"], false);
+    }
+
+    #[test]
+    fn runtime_skill_descriptors_keep_real_descriptions_without_expanding_protocol_sources() {
+        let descriptors = runtime_skill_descriptors(vec![json!({
+            "name": "june-obsidian",
+            "description": "Work with the selected Obsidian vault.",
+            "source": "bundled",
+        })]);
+
+        assert_eq!(descriptors[0]["name"], "june-obsidian");
+        assert_eq!(
+            descriptors[0]["description"],
+            "Work with the selected Obsidian vault."
+        );
+        assert_eq!(descriptors[0]["source"], "external");
+    }
+
+    #[test]
+    fn bundled_obsidian_skill_preserves_the_native_discovery_contract() {
+        let skill = include_str!("../../resources/agent-skills/june-obsidian/SKILL.md");
+
+        assert_eq!(
+            skill_description(skill).as_deref(),
+            Some(
+                "Works with the Obsidian vault currently selected in June. Use for Obsidian note tasks."
+            )
+        );
+        assert!(skill.contains("`get_obsidian_vault`"));
+        assert!(skill.contains("Do not guess a default path."));
+        assert!(skill.contains("current discovery only, not authorization"));
+        assert!(skill.contains("`[[Note Name]]` wikilinks"));
+        assert!(!skill.contains("june_obsidian.get_obsidian_vault"));
+    }
+
+    #[test]
+    fn tauri_bundle_includes_native_agent_skills() {
+        let config: Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).expect("tauri config");
+
+        assert_eq!(
+            config["bundle"]["resources"]["resources/agent-skills"],
+            "native/agent-skills"
         );
     }
 

@@ -20,7 +20,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0008](adr/0008-image-generation-and-editing-tools.md) — image generation/editing: `/image` fast path + LLM tools, via Venice
 - [adr/0009](adr/0009-hermes-config-shared-ownership-merge.md) — config.yaml is shared with the Hermes dashboard; June deep-merges on spawn, never overwrites
 - [adr/0010](adr/0010-note-references-in-agent-chat.md) — note references in agent chat: `@note:<id>` text token + `get_meeting_note` fetch-by-id
-- [adr/0011](adr/0011-bundled-hermes-skills.md) — selected Hermes skills ship as read-only app resources when the runtime pin cannot move
+- [adr/0011](adr/0011-bundled-hermes-skills.md) — selected Hermes skills shipped as read-only app resources; superseded by ADR-0040
 - [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); June API generates the team-facing diagnosis
 - [adr/0013](adr/0013-stream-inference-responses-through-june-api.md) — inference responses stream through June API (SSE pass-through + keep-alive heartbeats); charges settle after the stream ends
 - [adr/0014](adr/0014-pinned-dictation-paste-target.md) — the dictation paste target is pinned when the recording stops, never re-resolved at paste time
@@ -43,12 +43,13 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0031](adr/0031-per-profile-data-isolation.md) — profiles isolate user data (notes/dictation/projects via a `profile` column, chat sessions via a `session_profiles` map); profile is the first data-partition key; delete prompts move-to-default vs delete
 - [adr/0032](adr/0032-session-completion-june-owned-local-state.md) — marking a session complete is June-owned local SQLite state keyed by the stored Hermes session id, orthogonal to Hermes' archive flag; mirrors the `session_folders` stack
 - [adr/0033](adr/0033-notion-hosted-mcp-connect-preview.md) - Notion hosted MCP connector preview with read-only `june_notion`, approved page creation and updates, and no selected-resource claim
-- [adr/0034](adr/0034-obsidian-vault-discovery-mcp.md) - Obsidian vault discovery uses a June-owned MCP server, not an ambient environment variable
+- [adr/0034](adr/0034-obsidian-vault-discovery-mcp.md) - Obsidian vault discovery behavior and disclosure policy; transport and skill packaging superseded by ADR-0040
 - [adr/0035](adr/0035-extension-releases-follow-desktop-rc-promotion.md) - Chrome Web Store packages are reviewed during desktop RC and the exact staged bytes publish after stable desktop promotion
 - [adr/0036](adr/0036-github-connector-app-user-tokens.md) - GitHub connector uses GitHub App user access tokens only (no app private key on device or backend), local-mode custody per ADR-0016, June-side read/write gating, approval-only writes
 - [adr/0037](adr/0037-versioned-local-sqlite-migrations.md) - June's local SQLite schema uses an append-only release-ordered catalog, introspection-based legacy stamping, and one transaction for all pending migrations
 - [adr/0038](adr/0038-june-owned-openai-agents-runtime.md) - June owns the local agent harness, persistence, tools, approvals, and stdio protocol on top of the OpenAI Agents SDK
 - [adr/0039](adr/0039-june-owned-routines-and-mcp.md) - June owns routine scheduling and user-configured MCP transport, persistence, safety, and migration
+- [adr/0040](adr/0040-june-owned-bundled-agent-skills.md) - June-owned bundled agent skills ship as read-only app resources beneath managed and user-global overrides
 
 ## Enforceable rules (spec/)
 

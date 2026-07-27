@@ -178,7 +178,7 @@ export type AgentSkillDto = {
   id: string;
   name: string;
   description: string;
-  source: "managed" | "user_global";
+  source: "managed" | "user_global" | "bundled";
   enabled: boolean;
   editable: boolean;
 };
