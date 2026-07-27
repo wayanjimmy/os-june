@@ -74,6 +74,15 @@ impl RpcFrame {
     }
 
     pub fn failure(request: &Self, code: i64, message: impl Into<String>) -> Self {
+        Self::failure_with_data(request, code, message, None)
+    }
+
+    pub fn failure_with_data(
+        request: &Self,
+        code: i64,
+        message: impl Into<String>,
+        data: Option<Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             protocol_version: PROTOCOL_VERSION,
@@ -88,7 +97,7 @@ impl RpcFrame {
             error: Some(RpcError {
                 code,
                 message: message.into(),
-                data: None,
+                data,
             }),
         }
     }
@@ -147,5 +156,32 @@ mod tests {
         .unwrap();
         assert_eq!(value["protocolVersion"], 1);
         assert_eq!(value["sessionId"], "s");
+    }
+
+    #[test]
+    fn failure_metadata_round_trips_in_error_data() {
+        let request = RpcFrame::request(
+            "1".into(),
+            "tool.invoke",
+            "s",
+            "r",
+            3,
+            serde_json::json!({}),
+        );
+        let frame = RpcFrame::failure_with_data(
+            &request,
+            -32603,
+            "Denied",
+            Some(serde_json::json!({
+                "failureKind": "tool",
+                "retryable": false,
+                "errorCode": "agent_path_denied"
+            })),
+        );
+        let value = serde_json::to_value(frame).unwrap();
+
+        assert_eq!(value["error"]["data"]["failureKind"], "tool");
+        assert_eq!(value["error"]["data"]["retryable"], false);
+        assert_eq!(value["error"]["data"]["errorCode"], "agent_path_denied");
     }
 }

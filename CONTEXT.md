@@ -246,8 +246,9 @@ _Avoid_: gateway, WebSocket control plane.
 **Runtime mode**:
 The per-session execution policy applied by Rust tools: `sandboxed` or
 `unrestricted`. The trusted harness itself is not sandboxed. On macOS,
-sandboxed shell tools use Seatbelt. On Windows, sandboxed file tools are
-workspace-scoped and sandboxed shell execution is unavailable.
+sandboxed shell tools use Seatbelt. Host file reads follow the desktop process's
+operating-system access. Sandboxed host-file mutations are workspace-confined;
+on Windows, sandboxed shell execution is unavailable.
 _Avoid_: permission, profile.
 
 ### Legacy agent data
@@ -396,7 +397,8 @@ at task time through the Rust-owned `get_obsidian_vault` tool and bundled
 `june-obsidian` skill. The vault selection is stored in June-owned
 `obsidian.json`; it is not a runtime environment variable. Discovery is current
 state, not write authorization. Disconnect removes future discovery but cannot
-revoke a path already disclosed to a live unrestricted runtime.
+revoke generic operating-system read access or a path already disclosed to a
+live run.
 _Avoid_: Obsidian connector, `OBSIDIAN_VAULT_PATH`.
 
 **Plugin**:

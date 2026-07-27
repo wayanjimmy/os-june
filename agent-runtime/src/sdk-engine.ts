@@ -7,6 +7,7 @@ import {
   type FunctionTool,
 } from "@openai/agents";
 import { readFile } from "node:fs/promises";
+import { ProtocolError, runtimeFailureMetadata } from "./protocol.js";
 import { RpcChatCompletionsModelProvider } from "./rpc-model-provider.js";
 import { REQUEST_CLARIFICATION_TOOL } from "./types.js";
 import type { JsonObject, JsonValue } from "./types.js";
@@ -147,6 +148,7 @@ export class OpenAIAgentsEngine implements AgentEngine {
       parameters: descriptor.parameters as never,
       strict: true,
       needsApproval: descriptor.requiresApproval ?? false,
+      errorFunction: null,
       execute: async (argumentsValue, _context, details) => {
         const callId = toolCallId(details);
         const argumentsJson = asJsonValue(argumentsValue);
@@ -168,8 +170,18 @@ export class OpenAIAgentsEngine implements AgentEngine {
           return output;
         } catch (error) {
           const message = errorMessage(error);
-          emit({ type: "tool.failed", callId, name: descriptor.name, error: message });
-          throw new Error(message);
+          const metadata =
+            error instanceof ProtocolError
+              ? runtimeFailureMetadata(error.data)
+              : { failureKind: "unknown" as const, retryable: false };
+          emit({
+            type: "tool.failed",
+            callId,
+            name: descriptor.name,
+            error: message,
+            ...metadata,
+          });
+          throw error;
         }
       },
     });

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PassThrough } from "node:stream";
+import { ToolCallError } from "@openai/agents";
+import { ProtocolError } from "../src/protocol.ts";
 import { RuntimeService } from "../src/service.ts";
 import { NdjsonRpcPeer } from "../src/transport.ts";
 import type {
@@ -221,6 +223,21 @@ test("forces manual history compaction without starting a model run", async () =
   assert.equal(engine.starts, 0);
 });
 
+test("preserves structured failure metadata on a failed run", async () => {
+  const { service, frames } = harness(new RejectingEngine());
+  await initialize(service);
+  await service.handle(request("run.start", runParams));
+  await nextTurn();
+
+  const failed = frames().find((frame) => frame.method === "run.failed");
+  assert.deepEqual(failed?.params, {
+    error: "Sandboxed mode denied this write.",
+    failureKind: "tool",
+    retryable: false,
+    errorCode: "agent_path_denied",
+  });
+});
+
 class FakeEngine implements AgentEngine {
   readonly result: EngineResult;
   starts = 0;
@@ -244,6 +261,19 @@ class FakeEngine implements AgentEngine {
     return this.result;
   }
   async shutdown(): Promise<void> {}
+}
+
+class RejectingEngine extends FakeEngine {
+  override async start(): Promise<EngineResult> {
+    throw new ToolCallError(
+      "Failed to run function tool",
+      new ProtocolError(-32603, "Sandboxed mode denied this write.", {
+        failureKind: "tool",
+        retryable: false,
+        errorCode: "agent_path_denied",
+      }),
+    );
+  }
 }
 
 class WaitingEngine extends FakeEngine {

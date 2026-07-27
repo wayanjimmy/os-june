@@ -806,6 +806,7 @@ fn prepare_agent_chat_body(
         "model".to_string(),
         serde_json::Value::String(model.0.clone()),
     );
+    normalize_assistant_text_content(object);
     inject_safety_context(object);
     sanitize_tool_schemas(object);
     if object.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -823,6 +824,47 @@ fn prepare_agent_chat_body(
         }
     }
     Ok(body)
+}
+
+/// Venice accepts rich content arrays for user messages, but requires
+/// assistant text to use the legacy string shape. The Agents SDK replays
+/// assistant text as an array after a tool call, so adapt that provider wire
+/// shape without changing tool calls or multimodal user input.
+fn normalize_assistant_text_content(body: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(messages) = body
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for message in messages {
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(parts) = message
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .filter(|parts| !parts.is_empty())
+        else {
+            continue;
+        };
+        let text = parts
+            .iter()
+            .map(|part| {
+                let part = part.as_object()?;
+                if part.get("type").and_then(serde_json::Value::as_str) != Some("text") {
+                    return None;
+                }
+                part.get("text").and_then(serde_json::Value::as_str)
+            })
+            .collect::<Option<String>>();
+        if let Some(text) = text {
+            message.insert("content".to_string(), serde_json::Value::String(text));
+        }
+    }
 }
 
 fn handle_agent_chat_non_success(
@@ -1575,8 +1617,9 @@ mod tests {
     use super::{
         SAFETY_CONTEXT, STREAM_HEARTBEAT_INTERVAL, VeniceAgentChat, VeniceGenerator,
         VeniceModelsApiResponse, cleanup_generated_note_text, cleanup_source_text,
-        generation_source_text, inject_safety_context, sanitize_tool_schemas,
-        strip_scaffolding_tags, usage_from_chat_body, venice_priced_model_items,
+        generation_source_text, inject_safety_context, prepare_agent_chat_body,
+        sanitize_tool_schemas, strip_scaffolding_tags, usage_from_chat_body,
+        venice_priced_model_items,
     };
 
     #[test]
@@ -2478,6 +2521,70 @@ mod tests {
         assert_eq!(messages[0]["content"], SAFETY_CONTEXT);
         assert_eq!(messages[1]["content"], "client system prompt");
         assert_eq!(messages[2]["content"], "hi");
+    }
+
+    #[test]
+    fn agent_chat_flattens_assistant_text_parts_without_changing_tool_calls() {
+        let tool_calls = json!([{
+            "id": "call_vault",
+            "type": "function",
+            "function": {
+                "name": "get_obsidian_vault",
+                "arguments": "{}"
+            }
+        }]);
+        let body = prepare_agent_chat_body(
+            json!({
+                "model": "client-model",
+                "messages": [{
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "I'll check " },
+                        { "type": "text", "text": "your vault." }
+                    ],
+                    "tool_calls": tool_calls.clone()
+                }]
+            }),
+            &ModelId("routed-model".to_string()),
+        )
+        .expect("valid chat body");
+
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(body["model"], "routed-model");
+        assert_eq!(messages[0]["content"], SAFETY_CONTEXT);
+        assert_eq!(messages[1]["content"], "I'll check your vault.");
+        assert_eq!(messages[1]["tool_calls"], tool_calls);
+    }
+
+    #[test]
+    fn agent_chat_only_flattens_supported_assistant_text_parts() {
+        let body = prepare_agent_chat_body(
+            json!({
+                "messages": [
+                    { "role": "user", "content": [{ "type": "text", "text": "hello" }] },
+                    { "role": "assistant", "content": "already flat" },
+                    { "role": "assistant", "content": null, "tool_calls": [] },
+                    { "role": "assistant", "content": [] },
+                    { "role": "assistant", "content": [
+                        { "type": "text", "text": "keep" },
+                        { "type": "image_url", "image_url": { "url": "data:image/png;base64,x" } }
+                    ] },
+                    { "role": "tool", "content": "result", "tool_call_id": "call_vault" }
+                ]
+            }),
+            &ModelId("routed-model".to_string()),
+        )
+        .expect("valid chat body");
+
+        let messages = body["messages"].as_array().expect("messages array");
+        assert!(messages[1]["content"].is_array());
+        assert_eq!(messages[2]["content"], "already flat");
+        assert!(messages[3]["content"].is_null());
+        assert_eq!(messages[3]["tool_calls"], json!([]));
+        assert_eq!(messages[4]["content"], json!([]));
+        assert!(messages[5]["content"].is_array());
+        assert_eq!(messages[6]["content"], "result");
+        assert_eq!(messages[6]["tool_call_id"], "call_vault");
     }
 
     fn test_agent(base_url: &str) -> VeniceAgentChat {

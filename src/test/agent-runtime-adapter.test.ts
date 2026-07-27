@@ -17,6 +17,37 @@ const frame = {
 };
 
 describe("agent runtime adapter", () => {
+  it("only offers provider retry for transient model request failures", () => {
+    const base = {
+      sessionId: "session-1",
+      runId: "run-1",
+      createdAt: "2026-07-22T12:00:00Z",
+      kind: "error" as const,
+      retryable: true,
+    };
+    const turns = agentItemsToChatTurns([
+      {
+        ...base,
+        id: "model-error",
+        sequence: 1,
+        message: "Temporary provider failure",
+        failureKind: "model_request",
+      },
+      {
+        ...base,
+        id: "tool-error",
+        sequence: 2,
+        message: "Sandboxed mode denied this write.",
+        failureKind: "tool",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toMatchObject([{ type: "notice", kind: "upstream-provider" }]);
+    expect(turns[1]?.parts).toMatchObject([
+      { type: "text", text: "Sandboxed mode denied this write." },
+    ]);
+  });
+
   it("renders generated image and video tool results as media", () => {
     const items = [
       {

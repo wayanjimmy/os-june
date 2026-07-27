@@ -101,3 +101,16 @@ payloads.
   service credentials, unrestricted tools, or persistence authority.
 - Implement the entire agent loop in Rust. Rejected because it would duplicate
   a maintained SDK while adding a slower path to feature parity.
+
+## 2026-07-27 addendum: failure provenance and retryability
+
+Runtime protocol v1 carries additive failure metadata across the Rust host and
+TypeScript harness. Rust classifies failures at the boundary that owns them as
+`model_request`, `tool`, or `runtime`, with a stable error code and explicit
+retryability. The harness preserves that metadata through SDK error wrappers.
+Missing or malformed metadata becomes `unknown` and non-retryable.
+
+Failure origin and retryability are independent. Only transient model-request
+failures use the upstream-provider recovery notice and manual retry action.
+Deterministic tool, authorization, protocol, and configuration failures retain
+their actual message and do not present the same request unchanged as recovery.

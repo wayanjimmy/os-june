@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PROTOCOL_VERSION, ProtocolError, encodeFrame, parseFrame } from "../src/protocol.ts";
+import {
+  PROTOCOL_VERSION,
+  ProtocolError,
+  encodeFrame,
+  parseFrame,
+  runtimeFailureMetadata,
+} from "../src/protocol.ts";
 
 test("round trips a versioned request frame", () => {
   const frame = {
@@ -53,4 +59,27 @@ test("rejects malformed JSON and invalid sequences", () => {
       ),
     /non-negative integer/,
   );
+});
+
+test("failure metadata defaults unknown frames to non-retryable", () => {
+  assert.deepEqual(
+    runtimeFailureMetadata({
+      failureKind: "tool",
+      retryable: false,
+      errorCode: "agent_path_denied",
+    }),
+    {
+      failureKind: "tool",
+      retryable: false,
+      errorCode: "agent_path_denied",
+    },
+  );
+  assert.deepEqual(runtimeFailureMetadata({ retryable: true }), {
+    failureKind: "unknown",
+    retryable: false,
+  });
+  assert.deepEqual(runtimeFailureMetadata(undefined), {
+    failureKind: "unknown",
+    retryable: false,
+  });
 });

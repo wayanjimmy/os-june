@@ -3,6 +3,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { ToolCallError } from "@openai/agents";
+import { ProtocolError } from "../src/protocol.ts";
 import { OpenAIAgentsEngine } from "../src/sdk-engine.ts";
 import { MODEL_CHAT_COMPLETIONS_TOOL } from "../src/rpc-model-provider.ts";
 import type { EngineEvent, EngineRunInput, JsonObject } from "../src/types.ts";
@@ -121,6 +123,96 @@ test("continues model inference after a host tool result", async () => {
   assert.equal(result.usage.provider, "phala");
   assert.equal(result.usage.privacyLevel, "tee");
   assert.equal(result.usage.endpoint, "phala-glm-5.2");
+});
+
+test("preserves host failure metadata through the SDK tool error", async () => {
+  const engine = new OpenAIAgentsEngine(async (input) => {
+    if (input.name !== MODEL_CHAT_COMPLETIONS_TOOL) {
+      throw new ProtocolError(-32603, "Sandboxed mode denied this write.", {
+        failureKind: "tool",
+        retryable: false,
+        errorCode: "agent_path_denied",
+      });
+    }
+    return streamPage("tool-error-stream", {
+      id: "completion-tool-error",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "private-auto",
+      choices: [
+        {
+          index: 0,
+          finish_reason: "tool_calls",
+          delta: {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call-write-file",
+                type: "function",
+                function: {
+                  name: "write_file",
+                  arguments: "{\"path\":\"outside.md\",\"content\":\"No\"}",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+  });
+  await engine.initialize({ clientName: "June", clientVersion: "test" });
+  const events: EngineEvent[] = [];
+
+  await assert.rejects(
+    engine.start({
+      sessionId: "session-tool-error",
+      runId: "run-tool-error",
+      signal: new AbortController().signal,
+      emit: (event) => events.push(event),
+      takeSteering: () => [],
+      params: {
+        model: "private-auto",
+        instructions: "Use the file tool.",
+        workspace: "/tmp/june-workspace",
+        safetyMode: "sandboxed",
+        input: "Write outside the workspace.",
+        history: [],
+        tools: [
+          {
+            name: "write_file",
+            description: "Write a file.",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+              additionalProperties: false,
+            },
+          },
+        ],
+        skills: [],
+        contextWindow: 16_000,
+      },
+    }),
+    (error: unknown) =>
+      error instanceof ToolCallError &&
+      error.error instanceof ProtocolError &&
+      error.error.data !== undefined &&
+      isRecord(error.error.data) &&
+      error.error.data.errorCode === "agent_path_denied",
+  );
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "tool.failed" &&
+        event.failureKind === "tool" &&
+        event.retryable === false &&
+        event.errorCode === "agent_path_denied",
+    ),
+  );
 });
 
 test("replays a persisted tool group into the next model turn", async () => {

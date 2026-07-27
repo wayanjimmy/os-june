@@ -277,7 +277,10 @@ fn spawn_stdout_reader(
                 .await;
                 let response_frame = match response {
                     Ok(value) => RpcFrame::success(&frame, value),
-                    Err(error) => RpcFrame::failure(&frame, -32603, error.message),
+                    Err(error) => {
+                        let data = runtime_failure_data(&frame, &error);
+                        RpcFrame::failure_with_data(&frame, -32603, error.message, Some(data))
+                    }
                 };
                 let _ = write_frame(&request_stdin, &response_frame).await;
             });
@@ -291,8 +294,40 @@ fn spawn_stdout_reader(
         let _ = repository
             .mark_active_runs_interrupted("The local agent runtime stopped unexpectedly.")
             .await;
-        let _ = app.emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": "runtime", "runId": "runtime", "sequence": 0, "eventId": Uuid::new_v4(), "method": "run.failed", "data": { "completedAt": now(), "message": "The local agent runtime stopped unexpectedly.", "retryable": true } }));
+        let _ = app.emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": "runtime", "runId": "runtime", "sequence": 0, "eventId": Uuid::new_v4(), "method": "run.failed", "data": { "completedAt": now(), "message": "The local agent runtime stopped unexpectedly.", "failureKind": "runtime", "retryable": true, "errorCode": "runtime_crashed" } }));
     });
+}
+
+fn runtime_failure_data(frame: &RpcFrame, error: &AppError) -> Value {
+    let tool_name = frame
+        .params
+        .as_ref()
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str);
+    let failure_kind = match (frame.method.as_deref(), tool_name) {
+        (Some("tool.invoke"), Some("__june_model_chat_completions")) => "model_request",
+        (Some("tool.invoke"), _) => "tool",
+        _ => "runtime",
+    };
+    let retryable = failure_kind == "model_request" && model_failure_is_retryable(error);
+    json!({
+        "failureKind": failure_kind,
+        "retryable": retryable,
+        "errorCode": error.code
+    })
+}
+
+fn model_failure_is_retryable(error: &AppError) -> bool {
+    if error.code == "june_request_failed" {
+        return true;
+    }
+    error.code == "agent_model_request_failed"
+        && error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("status"))
+            .and_then(Value::as_u64)
+            .is_some_and(|status| matches!(status, 408 | 409 | 429) || status >= 500)
 }
 
 async fn handle_runtime_request(
@@ -333,12 +368,14 @@ async fn handle_runtime_request(
                 request["stream"] = Value::Bool(true);
                 let response = crate::june_api::proxy_agent_chat_completions(request).await?;
                 if response.status >= 400 {
+                    let status = response.status;
                     let bytes = response.collect_body().await?;
                     let body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
-                    return Err(AppError::new(
-                        "agent_model_request_failed",
-                        model_gateway_error_message(&body),
-                    ));
+                    return Err(AppError {
+                        code: "agent_model_request_failed".into(),
+                        message: model_gateway_error_message(&body).to_string(),
+                        details: Some(json!({ "status": status })),
+                    });
                 }
                 let stream_id = Uuid::new_v4().to_string();
                 let route = response.route.clone();
@@ -355,12 +392,14 @@ async fn handle_runtime_request(
                 return poll_model_stream(model_streams, &stream_id).await;
             }
             let session = repository.get_session(&frame.session_id).await?;
-            let workspace = session.workspace_path.map(PathBuf::from).ok_or_else(|| {
-                AppError::new(
-                    "agent_workspace_missing",
-                    "Session workspace is unavailable.",
-                )
-            })?;
+            let workspace = super::api::canonical_run_workspace(
+                app,
+                &session.id,
+                session.safety_mode,
+                session.workspace_path.as_deref(),
+                "",
+            )
+            .await?;
             dispatch_tool(
                 &ToolContext {
                     app: app.clone(),
@@ -707,17 +746,37 @@ async fn persist_and_emit_event(
             None
         }
         "run.failed" => {
-            data = json!({ "completedAt": created_at, "message": params.get("error").cloned().unwrap_or_else(|| json!("Agent run failed.")), "retryable": true });
+            let message = params
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Agent run failed.");
+            let failure_kind = params
+                .get("failureKind")
+                .and_then(Value::as_str)
+                .filter(|value| matches!(*value, "model_request" | "tool" | "runtime" | "unknown"))
+                .unwrap_or("unknown");
+            let retryable = params
+                .get("retryable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let error_code = params
+                .get("errorCode")
+                .and_then(Value::as_str)
+                .unwrap_or("agent_run_failed");
+            data = json!({
+                "completedAt": created_at,
+                "message": message,
+                "failureKind": failure_kind,
+                "retryable": retryable,
+                "errorCode": error_code
+            });
             repository
                 .update_run_status(
                     &frame.run_id,
                     "failed",
                     None,
                     None,
-                    Some((
-                        "agent_run_failed",
-                        data["message"].as_str().unwrap_or("Agent run failed."),
-                    )),
+                    Some((error_code, message)),
                 )
                 .await?;
             Some(AgentItemPayload::Error(data.clone()))
@@ -950,6 +1009,46 @@ mod tests {
             model_gateway_error_message(&json!({ "error": { "message": "invalid tool result" } })),
             "invalid tool result"
         );
+    }
+
+    #[test]
+    fn model_retryability_is_limited_to_transient_failures() {
+        let failure = |status| AppError {
+            code: "agent_model_request_failed".into(),
+            message: "failed".into(),
+            details: Some(json!({ "status": status })),
+        };
+
+        for status in [408, 409, 429, 500, 503] {
+            assert!(model_failure_is_retryable(&failure(status)));
+        }
+        for status in [400, 401, 402, 403, 404, 422] {
+            assert!(!model_failure_is_retryable(&failure(status)));
+        }
+        assert!(model_failure_is_retryable(&AppError::new(
+            "june_request_failed",
+            "network unavailable"
+        )));
+    }
+
+    #[test]
+    fn host_tool_failures_are_non_retryable_and_keep_their_code() {
+        let frame = RpcFrame::request(
+            "request".into(),
+            "tool.invoke",
+            "session",
+            "run",
+            1,
+            json!({ "name": "patch_file", "arguments": {} }),
+        );
+        let data = runtime_failure_data(
+            &frame,
+            &AppError::new("agent_path_denied", "Sandboxed write denied"),
+        );
+
+        assert_eq!(data["failureKind"], "tool");
+        assert_eq!(data["retryable"], false);
+        assert_eq!(data["errorCode"], "agent_path_denied");
     }
 
     #[test]

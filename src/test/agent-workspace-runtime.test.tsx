@@ -1395,6 +1395,7 @@ describe("AgentWorkspace runtime wiring", () => {
             createdAt: session.updatedAt,
             kind: "error",
             message: "upstream_provider_failed",
+            failureKind: "model_request",
             retryable: true,
           },
         ]);

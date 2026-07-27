@@ -68,6 +68,14 @@ export type RuntimeEvent = FrameBase & {
 
 export type RpcFrame = RpcRequest | RpcResponse | RuntimeEvent;
 
+export type RuntimeFailureKind = "model_request" | "tool" | "runtime" | "unknown";
+
+export type RuntimeFailureMetadata = {
+  failureKind: RuntimeFailureKind;
+  retryable: boolean;
+  errorCode?: string;
+};
+
 export class ProtocolError extends Error {
   readonly code: number;
   readonly data?: JsonValue;
@@ -134,6 +142,25 @@ export function isResponse(frame: RpcFrame): frame is RpcResponse {
 
 export function isEvent(frame: RpcFrame): frame is RuntimeEvent {
   return "method" in frame && "eventId" in frame;
+}
+
+export function runtimeFailureMetadata(data: JsonValue | undefined): RuntimeFailureMetadata {
+  if (!isRecord(data)) return { failureKind: "unknown", retryable: false };
+  const failureKind =
+    data.failureKind === "model_request" ||
+    data.failureKind === "tool" ||
+    data.failureKind === "runtime" ||
+    data.failureKind === "unknown"
+      ? data.failureKind
+      : "unknown";
+  return {
+    failureKind,
+    retryable:
+      failureKind !== "unknown" && typeof data.retryable === "boolean"
+        ? data.retryable
+        : false,
+    ...(typeof data.errorCode === "string" ? { errorCode: data.errorCode } : {}),
+  };
 }
 
 function requireString(value: Record<string, unknown>, key: string): void {

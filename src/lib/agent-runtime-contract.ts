@@ -112,6 +112,8 @@ export type AgentErrorItemDto = AgentItemBase & {
   kind: "error";
   message: string;
   retryable: boolean;
+  failureKind?: "model_request" | "tool" | "runtime" | "unknown";
+  errorCode?: string;
 };
 
 export type AgentItemDto =
@@ -259,7 +261,13 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "run.failed";
-        data: { completedAt: string; message: string; retryable: boolean };
+        data: {
+          completedAt: string;
+          message: string;
+          retryable: boolean;
+          failureKind?: "model_request" | "tool" | "runtime" | "unknown";
+          errorCode?: string;
+        };
       }
   );
 

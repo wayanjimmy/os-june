@@ -249,6 +249,8 @@ export function applyAgentRuntimeEvent(
         kind: "error",
         message: event.data.message,
         retryable: event.data.retryable,
+        failureKind: event.data.failureKind,
+        errorCode: event.data.errorCode,
       });
       break;
   }
@@ -392,7 +394,7 @@ export function agentItemsToChatTurns(items: AgentItemDto[]): AgentChatTurn[] {
             ...base,
             role: "system",
             parts: [
-              item.retryable
+              item.failureKind === "model_request" && item.retryable
                 ? {
                     type: "notice",
                     kind: "upstream-provider",

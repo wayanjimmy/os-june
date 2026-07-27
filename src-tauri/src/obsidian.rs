@@ -298,7 +298,10 @@ fn ensure_writable(path: &Path) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{discovery_from_config, status_from_config, validate_vault_path, ObsidianConfig};
+    use super::{
+        discovery_from_config, normalize_vault_path_for_external_use, status_from_config,
+        validate_vault_path, ObsidianConfig,
+    };
 
     #[test]
     fn validates_real_vault_and_canonicalizes() {
@@ -306,7 +309,10 @@ mod tests {
         let vault = temp.path().join("My Vault");
         std::fs::create_dir_all(vault.join(".obsidian")).expect("vault");
         let validated = validate_vault_path(&vault).expect("valid vault");
-        assert_eq!(validated, vault.canonicalize().expect("canonical"));
+        assert_eq!(
+            validated,
+            normalize_vault_path_for_external_use(vault.canonicalize().expect("canonical"))
+        );
     }
 
     #[test]
@@ -322,9 +328,7 @@ mod tests {
         assert_eq!(
             connected.vault.and_then(|vault| vault.path),
             Some(
-                vault
-                    .canonicalize()
-                    .expect("canonical")
+                normalize_vault_path_for_external_use(vault.canonicalize().expect("canonical"))
                     .to_string_lossy()
                     .into_owned()
             )

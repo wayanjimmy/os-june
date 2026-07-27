@@ -51,6 +51,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0039](adr/0039-june-owned-routines-and-mcp.md) - June owns routine scheduling and user-configured MCP transport, persistence, safety, and migration
 - [adr/0040](adr/0040-plugin-capabilities-as-host-tools.md) - June-owned plugin capabilities are in-loop host tools (brokered helpers for risky engines), never June-managed MCP servers
 - [adr/0041](adr/0041-june-owned-bundled-agent-skills.md) - June-owned bundled agent skills ship as read-only app resources beneath managed and user-global overrides
+- [adr/0042](adr/0042-sandboxed-host-file-read-write-policy.md) - Sandboxed host file tools may read user-accessible paths but confine every mutation to the session workspace
 
 ## Enforceable rules (spec/)
 

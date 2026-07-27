@@ -147,7 +147,15 @@ export type EngineEvent =
   | { type: "steering.consumed"; messageId: string; text: string }
   | { type: "tool.started"; callId: string; name: string; arguments: JsonValue }
   | { type: "tool.completed"; callId: string; name: string; output: JsonValue }
-  | { type: "tool.failed"; callId: string; name: string; error: string };
+  | {
+      type: "tool.failed";
+      callId: string;
+      name: string;
+      error: string;
+      failureKind?: "model_request" | "tool" | "runtime" | "unknown";
+      retryable?: boolean;
+      errorCode?: string;
+    };
 
 export type EngineRunInput = {
   sessionId: string;

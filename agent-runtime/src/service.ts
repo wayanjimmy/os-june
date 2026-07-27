@@ -1,5 +1,12 @@
+import { ToolCallError } from "@openai/agents";
 import { compactHistory } from "./compaction.js";
-import { HOST_REQUEST_METHODS, ProtocolError, type RpcRequest, type RuntimeEventMethod } from "./protocol.js";
+import {
+  HOST_REQUEST_METHODS,
+  ProtocolError,
+  runtimeFailureMetadata,
+  type RpcRequest,
+  type RuntimeEventMethod,
+} from "./protocol.js";
 import { errorMessage, sanitizeForLog } from "./sanitize.js";
 import type { NdjsonRpcPeer } from "./transport.js";
 import type {
@@ -214,7 +221,7 @@ export class RuntimeService {
       if (active?.controller.signal.aborted || isAbortError(error)) {
         this.emit("run.cancelled", {}, sessionId, runId);
       } else {
-        this.emit("run.failed", { error: errorMessage(error) }, sessionId, runId);
+        this.emit("run.failed", classifyRunFailure(error), sessionId, runId);
         void this.log("error", "Agent run failed", { error: sanitizeForLog(error) }, sessionId, runId);
       }
     } finally {
@@ -263,6 +270,20 @@ export class RuntimeService {
     if (!this.peer) throw new ProtocolError(-32603, "Runtime transport is not attached");
     return this.peer;
   }
+}
+
+function classifyRunFailure(error: unknown): JsonObject {
+  const cause = error instanceof ToolCallError ? error.error : error;
+  const metadata =
+    cause instanceof ProtocolError
+      ? runtimeFailureMetadata(cause.data)
+      : { failureKind: "unknown" as const, retryable: false };
+  return {
+    error: errorMessage(cause),
+    failureKind: metadata.failureKind,
+    retryable: metadata.retryable,
+    ...(metadata.errorCode === undefined ? {} : { errorCode: metadata.errorCode }),
+  };
 }
 
 function validateRunStart(params: RunStartParams): void {

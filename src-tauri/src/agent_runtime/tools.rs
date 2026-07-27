@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sqlx::{query::query, row::Row};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -527,7 +527,7 @@ async fn generate_image(context: &ToolContext, arguments: &Value) -> Result<Valu
 }
 
 async fn edit_image(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let source = resolve_path(context, required_string(arguments, "sourcePath")?, true)?;
+    let source = resolve_read_path(context, required_string(arguments, "sourcePath")?)?;
     let instruction = required_string(arguments, "instruction")?.trim();
     let bytes = tokio::fs::read(&source).await.map_err(io_error)?;
     if bytes.len() > 20 * 1024 * 1024 {
@@ -598,7 +598,7 @@ async fn generate_video(context: &ToolContext, arguments: &Value) -> Result<Valu
                 ..
             } => {
                 let source = PathBuf::from(path);
-                let destination = resolve_path(
+                let destination = resolve_write_path(
                     context,
                     &format!(
                         "artifacts/generated-video-{}.mp4",
@@ -642,7 +642,7 @@ async fn persist_generated_image(
         "image/gif" => "gif",
         _ => "png",
     };
-    let path = resolve_path(
+    let path = resolve_write_path(
         context,
         &format!(
             "artifacts/generated-image-{}.{}",
@@ -757,10 +757,9 @@ fn web_request(arguments: &Value, call_id: Option<&str>) -> Value {
 }
 
 async fn list_files(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let path = resolve_path(
+    let path = resolve_read_path(
         context,
         arguments.get("path").and_then(Value::as_str).unwrap_or("."),
-        true,
     )?;
     let mut entries = tokio::fs::read_dir(&path).await.map_err(io_error)?;
     let mut result = Vec::new();
@@ -775,7 +774,7 @@ async fn list_files(context: &ToolContext, arguments: &Value) -> Result<Value, A
 }
 
 async fn read_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let path = resolve_path(context, required_string(arguments, "path")?, true)?;
+    let path = resolve_read_path(context, required_string(arguments, "path")?)?;
     let bytes = tokio::fs::read(&path).await.map_err(io_error)?;
     if bytes.len() > MAX_TOOL_OUTPUT_BYTES {
         return Err(AppError::new(
@@ -789,7 +788,7 @@ async fn read_file(context: &ToolContext, arguments: &Value) -> Result<Value, Ap
 }
 
 async fn write_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let path = resolve_path(context, required_string(arguments, "path")?, false)?;
+    let path = resolve_write_path(context, required_string(arguments, "path")?, false)?;
     let content = required_string(arguments, "content")?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
@@ -800,7 +799,7 @@ async fn write_file(context: &ToolContext, arguments: &Value) -> Result<Value, A
 }
 
 async fn patch_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let path = resolve_path(context, required_string(arguments, "path")?, true)?;
+    let path = resolve_write_path(context, required_string(arguments, "path")?, true)?;
     let before = required_string(arguments, "before")?;
     let after = required_string(arguments, "after")?;
     let content = tokio::fs::read_to_string(&path).await.map_err(io_error)?;
@@ -819,9 +818,7 @@ async fn patch_file(context: &ToolContext, arguments: &Value) -> Result<Value, A
 }
 
 async fn import_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let source = PathBuf::from(required_string(arguments, "sourcePath")?)
-        .canonicalize()
-        .map_err(io_error)?;
+    let source = resolve_read_path(context, required_string(arguments, "sourcePath")?)?;
     if !source.is_file() {
         return Err(AppError::new(
             "agent_import_invalid",
@@ -831,7 +828,7 @@ async fn import_file(context: &ToolContext, arguments: &Value) -> Result<Value, 
     let name = source
         .file_name()
         .ok_or_else(|| AppError::new("agent_import_invalid", "Import source has no file name."))?;
-    let destination = resolve_path(
+    let destination = resolve_write_path(
         context,
         &format!("imports/{}", name.to_string_lossy()),
         false,
@@ -847,7 +844,7 @@ async fn import_file(context: &ToolContext, arguments: &Value) -> Result<Value, 
 }
 
 async fn preview_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
-    let path = resolve_path(context, required_string(arguments, "path")?, true)?;
+    let path = resolve_read_path(context, required_string(arguments, "path")?)?;
     let metadata = tokio::fs::metadata(&path).await.map_err(io_error)?;
     let preview = if metadata.len() <= 64 * 1024 {
         tokio::fs::read_to_string(&path).await.ok()
@@ -888,10 +885,9 @@ async fn record_artifact_with_mime(
 
 async fn search_files(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
     let needle = required_string(arguments, "query")?.to_string();
-    let root = resolve_path(
+    let root = resolve_read_path(
         context,
         arguments.get("path").and_then(Value::as_str).unwrap_or("."),
-        true,
     )?;
     let result = tokio::task::spawn_blocking(move || search_text_files(&root, &needle))
         .await
@@ -1208,8 +1204,41 @@ async fn consume_clarification_answer_from_pool(
     Ok(json!({ "answer": answer }))
 }
 
-fn resolve_path(
+fn requested_path(workspace: &Path, requested: &str) -> PathBuf {
+    let requested = Path::new(requested);
+    if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        workspace.join(requested)
+    }
+}
+
+fn resolve_read_path(context: &ToolContext, requested: &str) -> Result<PathBuf, AppError> {
+    resolve_read_path_from(&context.workspace, requested)
+}
+
+fn resolve_read_path_from(workspace: &Path, requested: &str) -> Result<PathBuf, AppError> {
+    requested_path(workspace, requested)
+        .canonicalize()
+        .map_err(io_error)
+}
+
+fn resolve_write_path(
     context: &ToolContext,
+    requested: &str,
+    must_exist: bool,
+) -> Result<PathBuf, AppError> {
+    resolve_write_path_for_mode(
+        &context.workspace,
+        context.safety_mode,
+        requested,
+        must_exist,
+    )
+}
+
+fn resolve_write_path_for_mode(
+    workspace: &Path,
+    safety_mode: AgentSafetyMode,
     requested: &str,
     must_exist: bool,
 ) -> Result<PathBuf, AppError> {
@@ -1217,7 +1246,7 @@ fn resolve_path(
     let joined = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
-        context.workspace.join(requested)
+        workspace.join(requested)
     };
     let resolved = if must_exist || joined.exists() {
         joined.canonicalize().map_err(io_error)?
@@ -1232,14 +1261,23 @@ fn resolve_path(
         let suffix = joined
             .strip_prefix(existing)
             .map_err(|_| AppError::new("agent_path_invalid", "Path could not be resolved."))?;
+        if suffix
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(AppError::new(
+                "agent_path_invalid",
+                "Path contains unresolved traversal.",
+            ));
+        }
         canonical_existing.join(suffix)
     };
-    if context.safety_mode == AgentSafetyMode::Sandboxed {
-        let workspace = context.workspace.canonicalize().map_err(io_error)?;
+    if safety_mode == AgentSafetyMode::Sandboxed {
+        let workspace = workspace.canonicalize().map_err(io_error)?;
         if !resolved.starts_with(workspace) {
             return Err(AppError::new(
                 "agent_path_denied",
-                "Path is outside this session's workspace.",
+                "Sandboxed mode can only change files in this session's workspace.",
             ));
         }
     }
@@ -1347,6 +1385,101 @@ mod tests {
         assert!(profile.contains("(deny file-write*)"));
         assert!(profile.contains("/Users/example/June Workspace"));
         assert!(!profile.contains("(allow file-write*)"));
+    }
+
+    #[test]
+    fn sandboxed_reads_allow_existing_paths_outside_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let external = root.path().join("vault").join("note.md");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(external.parent().unwrap()).unwrap();
+        fs::write(&external, "# Note").unwrap();
+
+        assert_eq!(
+            resolve_read_path_from(&workspace, external.to_str().unwrap()).unwrap(),
+            external.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn sandboxed_writes_stay_inside_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let external = root.path().join("vault").join("note.md");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(external.parent().unwrap()).unwrap();
+        fs::write(&external, "# Note").unwrap();
+
+        let internal = resolve_write_path_for_mode(
+            &workspace,
+            AgentSafetyMode::Sandboxed,
+            "new/note.md",
+            false,
+        )
+        .unwrap();
+        assert!(internal.starts_with(workspace.canonicalize().unwrap()));
+
+        let patch_error = resolve_write_path_for_mode(
+            &workspace,
+            AgentSafetyMode::Sandboxed,
+            external.to_str().unwrap(),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(patch_error.code, "agent_path_denied");
+
+        let create_error = resolve_write_path_for_mode(
+            &workspace,
+            AgentSafetyMode::Sandboxed,
+            root.path().join("outside.md").to_str().unwrap(),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(create_error.code, "agent_path_denied");
+    }
+
+    #[test]
+    fn unrestricted_writes_may_target_external_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let external_parent = root.path().join("vault");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&external_parent).unwrap();
+        let external = external_parent.join("new-note.md");
+
+        let resolved = resolve_write_path_for_mode(
+            &workspace,
+            AgentSafetyMode::Unrestricted,
+            external.to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            external_parent.canonicalize().unwrap().join("new-note.md")
+        );
+    }
+
+    #[test]
+    fn unresolved_write_traversal_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let error = resolve_write_path_for_mode(
+            &workspace,
+            AgentSafetyMode::Sandboxed,
+            "missing/../../outside.md",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.code.as_str(),
+            "agent_path_invalid" | "agent_path_denied"
+        ));
     }
 
     #[test]

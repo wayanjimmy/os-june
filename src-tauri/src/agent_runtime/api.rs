@@ -509,29 +509,26 @@ pub async fn start_agent_run(
             "This session already has an active run.",
         ));
     }
-    let workspace = if request.workspace_path.trim().is_empty() {
-        session.workspace_path.clone().unwrap_or(
-            session_workspace(&app, Some(&session.id))?
-                .to_string_lossy()
-                .into_owned(),
-        )
-    } else {
-        request.workspace_path.clone()
-    };
-    tokio::fs::create_dir_all(&workspace)
-        .await
-        .map_err(io_error)?;
+    let workspace = canonical_run_workspace(
+        &app,
+        &session.id,
+        request.safety_mode,
+        session.workspace_path.as_deref(),
+        &request.workspace_path,
+    )
+    .await?;
+    let workspace_string = workspace.to_string_lossy().into_owned();
     sqlx::query::query(
         "UPDATE agent_sessions SET model = ?, safety_mode = ?, workspace_path = ? WHERE id = ?",
     )
     .bind(&model)
     .bind(request.safety_mode.as_db())
-    .bind(&workspace)
+    .bind(&workspace_string)
     .bind(&session.id)
     .execute(&repository.pool)
     .await?;
     let prepared_attachments =
-        prepare_attachments(&request.attachments, std::path::Path::new(&workspace)).await?;
+        prepare_attachments(&request.attachments, &workspace, request.safety_mode).await?;
     let available_skills = agent_skill_catalog(&app, &repository).await?;
     let requested_skills = request
         .enabled_skill_ids
@@ -561,7 +558,7 @@ pub async fn start_agent_run(
                 model: &model,
                 reasoning_effort,
                 safety_mode: request.safety_mode,
-                workspace: &workspace,
+                workspace: &workspace_string,
                 input: &request.prompt,
                 skills: &requested_skills,
                 attachments: &prepared_attachments,
@@ -685,12 +682,22 @@ pub async fn retry_agent_run(
         })?;
     let prompt = message.content;
     let attachments = message.attachments;
-    let workspace = session.workspace_path.clone().ok_or_else(|| {
-        AppError::new(
-            "agent_workspace_missing",
-            "Session workspace is unavailable.",
-        )
-    })?;
+    let workspace = canonical_run_workspace(
+        &app,
+        &session.id,
+        session.safety_mode,
+        session.workspace_path.as_deref(),
+        "",
+    )
+    .await?;
+    let workspace_string = workspace.to_string_lossy().into_owned();
+    if session.workspace_path.as_deref() != Some(workspace_string.as_str()) {
+        sqlx::query::query("UPDATE agent_sessions SET workspace_path = ? WHERE id = ?")
+            .bind(&workspace_string)
+            .bind(&session.id)
+            .execute(&repository.pool)
+            .await?;
+    }
     let model = normalize_agent_model(&session.model);
     if model != session.model {
         sqlx::query::query("UPDATE agent_sessions SET model = ? WHERE id = ?")
@@ -716,7 +723,7 @@ pub async fn retry_agent_run(
                 model: &model,
                 reasoning_effort: previous.reasoning_effort.as_deref(),
                 safety_mode: session.safety_mode,
-                workspace: &workspace,
+                workspace: &workspace_string,
                 input: &prompt,
                 skills: &enabled_skill_ids,
                 attachments: &attachments,
@@ -836,12 +843,22 @@ pub async fn resolve_agent_interruption(
             .get("choice")
             .and_then(Value::as_str)
             .is_some_and(|choice| choice != "deny");
-    let workspace = session.workspace_path.clone().ok_or_else(|| {
-        AppError::new(
-            "agent_workspace_missing",
-            "Session workspace is unavailable.",
-        )
-    })?;
+    let workspace = canonical_run_workspace(
+        &app,
+        &session.id,
+        session.safety_mode,
+        session.workspace_path.as_deref(),
+        "",
+    )
+    .await?;
+    let workspace_string = workspace.to_string_lossy().into_owned();
+    if session.workspace_path.as_deref() != Some(workspace_string.as_str()) {
+        sqlx::query::query("UPDATE agent_sessions SET workspace_path = ? WHERE id = ?")
+            .bind(&workspace_string)
+            .bind(&session.id)
+            .execute(&repository.pool)
+            .await?;
+    }
     let model = normalize_agent_model(&session.model);
     let enabled_skill_ids = repository.run_enabled_skills(&run.id).await?;
     host.ensure_started(&app, repository.clone()).await?;
@@ -854,7 +871,7 @@ pub async fn resolve_agent_interruption(
             &session.id,
             &model,
             session.safety_mode,
-            &workspace,
+            &workspace_string,
         )
         .await?
         {
@@ -869,7 +886,7 @@ pub async fn resolve_agent_interruption(
                         model: &model,
                         reasoning_effort: run.reasoning_effort.as_deref(),
                         safety_mode: session.safety_mode,
-                        workspace: &workspace,
+                        workspace: &workspace_string,
                         input: "",
                         skills: &enabled_skill_ids,
                         attachments: &[],
@@ -888,6 +905,8 @@ pub async fn resolve_agent_interruption(
         .as_object_mut()
         .expect("run params object")
         .remove("history");
+    params["workspace"] = json!(workspace_string);
+    params["safetyMode"] = json!(session.safety_mode.as_db());
     params["serializedState"] = json!(serialized_state);
     params["resolutions"] = if let Some(answer) = clarification_answer.as_deref() {
         json!([{ "interruptionId": request.interruption_id, "kind": "clarification", "answer": answer }])
@@ -1779,7 +1798,13 @@ fn item_json_with_active_run(
         }
         AgentItemPayload::Interruption(v) => json!({ "kind": "interruption", "interruption": v }),
         AgentItemPayload::Error(v) => {
-            json!({ "kind": "error", "message": v.get("message").cloned().unwrap_or_else(|| json!("Agent run failed.")), "retryable": v.get("retryable").cloned().unwrap_or(Value::Bool(true)) })
+            json!({
+                "kind": "error",
+                "message": v.get("message").cloned().unwrap_or_else(|| json!("Agent run failed.")),
+                "failureKind": v.get("failureKind").cloned().unwrap_or_else(|| json!("unknown")),
+                "retryable": v.get("retryable").cloned().unwrap_or(Value::Bool(false)),
+                "errorCode": v.get("errorCode").cloned().unwrap_or_else(|| json!("agent_run_failed"))
+            })
         }
     };
     object.extend(fields.as_object().cloned().expect("fields object"));
@@ -1794,6 +1819,62 @@ fn session_workspace(app: &AppHandle, session_id: Option<&str>) -> Result<PathBu
         || root.join(uuid::Uuid::new_v4().to_string()),
         |id| root.join(id),
     ))
+}
+
+fn run_workspace_path(
+    safety_mode: AgentSafetyMode,
+    trusted_workspace: &Path,
+    stored_workspace: Option<&str>,
+    requested_workspace: &str,
+) -> PathBuf {
+    if safety_mode == AgentSafetyMode::Sandboxed {
+        return trusted_workspace.to_path_buf();
+    }
+    if !requested_workspace.trim().is_empty() {
+        return PathBuf::from(requested_workspace);
+    }
+    stored_workspace
+        .filter(|workspace| !workspace.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| trusted_workspace.to_path_buf())
+}
+
+pub(super) async fn canonical_run_workspace(
+    app: &AppHandle,
+    session_id: &str,
+    safety_mode: AgentSafetyMode,
+    stored_workspace: Option<&str>,
+    requested_workspace: &str,
+) -> Result<PathBuf, AppError> {
+    let trusted_workspace = session_workspace(app, Some(session_id))?;
+    let workspace = run_workspace_path(
+        safety_mode,
+        &trusted_workspace,
+        stored_workspace,
+        requested_workspace,
+    );
+    if safety_mode == AgentSafetyMode::Sandboxed {
+        let root = trusted_workspace.parent().ok_or_else(|| {
+            AppError::new("agent_workspace_failed", "Workspace root is unavailable.")
+        })?;
+        tokio::fs::create_dir_all(root).await.map_err(io_error)?;
+        let canonical_root = root.canonicalize().map_err(io_error)?;
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .map_err(io_error)?;
+        let canonical_workspace = workspace.canonicalize().map_err(io_error)?;
+        if !canonical_workspace.starts_with(canonical_root) {
+            return Err(AppError::new(
+                "agent_workspace_denied",
+                "Sandboxed workspace must stay inside June's app data.",
+            ));
+        }
+        return Ok(canonical_workspace);
+    }
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .map_err(io_error)?;
+    workspace.canonicalize().map_err(io_error)
 }
 fn io_error(error: std::io::Error) -> AppError {
     AppError::new("agent_workspace_failed", error.to_string())
@@ -1820,6 +1901,7 @@ async fn inherit_session_profile(
 async fn prepare_attachments(
     source_paths: &[String],
     workspace: &std::path::Path,
+    safety_mode: AgentSafetyMode,
 ) -> Result<Vec<MessageAttachmentPayload>, AppError> {
     if source_paths.is_empty() {
         return Ok(Vec::new());
@@ -1829,6 +1911,15 @@ async fn prepare_attachments(
         .await
         .map_err(io_error)?;
     let canonical_workspace = workspace.canonicalize().map_err(io_error)?;
+    let destination_root = destination_root.canonicalize().map_err(io_error)?;
+    if safety_mode == AgentSafetyMode::Sandboxed
+        && !destination_root.starts_with(&canonical_workspace)
+    {
+        return Err(AppError::new(
+            "agent_attachment_path_denied",
+            "Sandboxed attachments must stay inside this session's workspace.",
+        ));
+    }
     let mut attachments = Vec::with_capacity(source_paths.len());
     for source_path in source_paths {
         let source = PathBuf::from(source_path)
@@ -1984,6 +2075,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sandboxed_runs_ignore_caller_controlled_workspace_paths() {
+        let trusted = Path::new("/app-data/agent-workspaces/session-1");
+
+        assert_eq!(
+            run_workspace_path(
+                AgentSafetyMode::Sandboxed,
+                trusted,
+                Some("/stored/external"),
+                "/requested/external",
+            ),
+            trusted
+        );
+    }
+
+    #[test]
+    fn unrestricted_runs_preserve_explicit_workspace_compatibility() {
+        assert_eq!(
+            run_workspace_path(
+                AgentSafetyMode::Unrestricted,
+                Path::new("/trusted"),
+                Some("/stored"),
+                "/requested",
+            ),
+            Path::new("/requested")
+        );
+    }
+
+    #[test]
     fn retry_uses_the_prompt_owned_by_the_selected_run() {
         let item = |id: &str, run_id: &str, content: &str, sequence: i64| AgentItemDto {
             id: id.into(),
@@ -2075,15 +2194,23 @@ mod tests {
             .await
             .expect("source attachment");
 
-        let attachments =
-            prepare_attachments(&[source.to_string_lossy().into_owned()], workspace.path())
-                .await
-                .expect("prepared attachments");
+        let attachments = prepare_attachments(
+            &[source.to_string_lossy().into_owned()],
+            workspace.path(),
+            AgentSafetyMode::Sandboxed,
+        )
+        .await
+        .expect("prepared attachments");
 
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].name, "brief.md");
         assert_eq!(attachments[0].mime_type.as_deref(), Some("text/markdown"));
-        assert!(PathBuf::from(&attachments[0].path).starts_with(workspace.path()));
+        assert!(PathBuf::from(&attachments[0].path).starts_with(
+            workspace
+                .path()
+                .canonicalize()
+                .expect("canonical workspace")
+        ));
         assert_eq!(
             tokio::fs::read_to_string(&attachments[0].path)
                 .await
@@ -2095,6 +2222,36 @@ mod tests {
         assert!(input.contains("brief.md"));
         assert!(input.contains(&attachments[0].path));
         assert!(input.ends_with("Summarize this."));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandboxed_attachments_reject_a_symlinked_destination() {
+        use std::os::unix::fs::symlink;
+
+        let source_directory = tempfile::tempdir().expect("source directory");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let external = tempfile::tempdir().expect("external directory");
+        let source = source_directory.path().join("brief.md");
+        tokio::fs::write(&source, "# Brief")
+            .await
+            .expect("source attachment");
+        symlink(external.path(), workspace.path().join("attachments"))
+            .expect("symlink attachment destination");
+
+        let error = prepare_attachments(
+            &[source.to_string_lossy().into_owned()],
+            workspace.path(),
+            AgentSafetyMode::Sandboxed,
+        )
+        .await
+        .expect_err("symlink escape must be denied");
+
+        assert_eq!(error.code, "agent_attachment_path_denied");
+        assert!(std::fs::read_dir(external.path())
+            .expect("external directory")
+            .next()
+            .is_none());
     }
 
     #[test]
