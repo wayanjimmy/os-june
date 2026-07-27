@@ -140,7 +140,7 @@ impl AgentRepository {
         query(
             "SELECT id, session_id, status, model, reasoning_effort, started_at, updated_at, completed_at,
                       usage_json, interrupted_state_json, last_sequence, error_code, error_message
-               FROM agent_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT 1",
+               FROM agent_runs WHERE session_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
         )
         .bind(session_id)
         .fetch_one(&self.pool)
@@ -782,13 +782,22 @@ impl AgentRepository {
     ) -> Result<AgentRunDto, sqlx::Error> {
         let now = now();
         let terminal = matches!(status, "completed" | "cancelled" | "failed" | "interrupted");
-        let run = self.get_run(run_id).await?;
-        query("UPDATE agent_runs SET status = ?, updated_at = ?, completed_at = ?, usage_json = COALESCE(?, usage_json), interrupted_state_json = COALESCE(?, interrupted_state_json), error_code = ?, error_message = ? WHERE id = ?")
+        let mut transaction = self.pool.begin().await?;
+        let updated = query("UPDATE agent_runs SET status = ?, updated_at = ?, completed_at = ?, usage_json = COALESCE(?, usage_json), interrupted_state_json = COALESCE(?, interrupted_state_json), error_code = ?, error_message = ? WHERE id = ? AND status NOT IN ('completed', 'cancelled', 'failed', 'interrupted')")
             .bind(status).bind(&now).bind(terminal.then_some(now.as_str()))
             .bind(usage.map(serde_json::Value::to_string))
             .bind(interrupted_state.map(serde_json::Value::to_string))
             .bind(error.map(|v| v.0)).bind(error.map(|v| v.1)).bind(run_id)
-            .execute(&self.pool).await?;
+            .execute(&mut *transaction).await?;
+        if updated.rows_affected() == 0 {
+            transaction.commit().await?;
+            return self.get_run(run_id).await;
+        }
+        let run = query("SELECT session_id FROM agent_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let session_id: String = run.get("session_id");
         let session_status = match status {
             "waiting_for_user" => "waiting_for_user",
             "failed" => "failed",
@@ -796,11 +805,28 @@ impl AgentRepository {
             "completed" | "cancelled" => "idle",
             _ => "running",
         };
-        query("UPDATE agent_sessions SET status = ?, updated_at = ?, last_error = ? WHERE id = ?")
+        query("UPDATE agent_sessions SET status = ?, updated_at = ?, last_error = ? WHERE id = ? AND ? = (SELECT id FROM agent_runs WHERE session_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1)")
             .bind(session_status)
             .bind(&now)
             .bind(error.map(|v| v.1))
-            .bind(&run.session_id)
+            .bind(&session_id)
+            .bind(run_id)
+            .bind(&session_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        self.get_run(run_id).await
+    }
+
+    pub async fn update_run_usage(
+        &self,
+        run_id: &str,
+        usage: &serde_json::Value,
+    ) -> Result<AgentRunDto, sqlx::Error> {
+        query("UPDATE agent_runs SET usage_json = ?, updated_at = ? WHERE id = ?")
+            .bind(usage.to_string())
+            .bind(now())
+            .bind(run_id)
             .execute(&self.pool)
             .await?;
         self.get_run(run_id).await
@@ -812,6 +838,58 @@ impl AgentRepository {
             .bind(&now).bind(&now).bind(message).execute(&self.pool).await?;
         query("UPDATE agent_sessions SET status = 'interrupted', updated_at = ?, last_error = ? WHERE status = 'running'")
             .bind(&now).bind(message).execute(&self.pool).await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Terminalizes the crash window where interruption resolution was stored
+    /// but dispatch acknowledgement was not. Truly pending interruptions stay
+    /// resumable across restart.
+    pub async fn reconcile_unresumable_waiting_runs_after_restart(
+        &self,
+    ) -> Result<u64, sqlx::Error> {
+        let timestamp = now();
+        let message = "June restarted before this interruption was fully dispatched.";
+        let mut transaction = self.pool.begin().await?;
+        let result = query(
+            "UPDATE agent_runs
+             SET status = 'interrupted', updated_at = ?, completed_at = COALESCE(completed_at, ?),
+                 error_code = COALESCE(error_code, 'resume_dispatch_interrupted'),
+                 error_message = COALESCE(error_message, ?)
+             WHERE status = 'waiting_for_user'
+               AND NOT EXISTS (
+                 SELECT 1 FROM agent_items
+                 WHERE agent_items.run_id = agent_runs.id
+                   AND agent_items.kind = 'interruption'
+                   AND json_extract(agent_items.payload_json, '$.status') = 'pending'
+               )",
+        )
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .bind(message)
+        .execute(&mut *transaction)
+        .await?;
+        query(
+            "UPDATE agent_sessions
+             SET status = 'interrupted', updated_at = ?, last_error = ?
+             WHERE EXISTS (
+               SELECT 1 FROM agent_runs
+               WHERE agent_runs.session_id = agent_sessions.id
+                 AND agent_runs.status = 'interrupted'
+                 AND agent_runs.error_code = 'resume_dispatch_interrupted'
+                 AND agent_runs.updated_at = ?
+             )
+               AND NOT EXISTS (
+                 SELECT 1 FROM agent_runs
+                 WHERE agent_runs.session_id = agent_sessions.id
+                   AND agent_runs.status IN ('queued', 'running', 'waiting_for_user')
+               )",
+        )
+        .bind(&timestamp)
+        .bind(message)
+        .bind(&timestamp)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(result.rows_affected())
     }
 

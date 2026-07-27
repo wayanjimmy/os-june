@@ -3,6 +3,7 @@ import {
   agentItemsToChatTurns,
   applyAgentRuntimeEvent,
   createAgentRuntimeProjection,
+  mergeAgentRuntimeRun,
   mergeAgentRuntimeSnapshot,
 } from "../lib/agent-runtime-adapter";
 import {
@@ -17,6 +18,154 @@ const frame = {
 };
 
 describe("agent runtime adapter", () => {
+  it("does not replace a terminal run with a stale active response", () => {
+    const failed = {
+      id: "run-1",
+      sessionId: "session-1",
+      status: "failed" as const,
+      model: "auto",
+      error: "Patch target did not match.",
+    };
+
+    expect(mergeAgentRuntimeRun(failed, { ...failed, status: "running", error: undefined })).toBe(
+      failed,
+    );
+    expect(
+      mergeAgentRuntimeRun(failed, {
+        id: "run-2",
+        sessionId: "session-1",
+        status: "running",
+        model: "auto",
+      }),
+    ).toMatchObject({ id: "run-2", status: "running" });
+  });
+
+  it("keeps terminal lifecycle state when late events arrive", () => {
+    const failed = createAgentRuntimeProjection({
+      run: {
+        id: "run-1",
+        sessionId: "session-1",
+        status: "failed",
+        model: "auto",
+        startedAt: "2026-07-22T12:00:00Z",
+        completedAt: "2026-07-22T12:00:10Z",
+        error: "Patch target did not match.",
+      },
+    });
+    const lateStarted: AgentRuntimeEvent = {
+      ...frame,
+      eventId: "late-started",
+      sequence: 20,
+      method: "run.started",
+      data: { startedAt: "2026-07-22T12:00:00Z", model: "auto" },
+    };
+    const lateInterruption: AgentRuntimeEvent = {
+      ...frame,
+      eventId: "late-interruption",
+      sequence: 21,
+      method: "interruption.requested",
+      data: {
+        itemId: "interruption-item",
+        interruption: {
+          id: "approval-1",
+          sessionId: "session-1",
+          runId: "run-1",
+          status: "pending",
+          createdAt: "2026-07-22T12:00:11Z",
+          kind: "approval",
+          toolName: "patch_file",
+          title: "Approval required",
+          description: "Review the operation.",
+          command: "patch_file",
+          allowAlways: false,
+        },
+      },
+    };
+
+    const afterStarted = applyAgentRuntimeEvent(failed, lateStarted);
+    const afterInterruption = applyAgentRuntimeEvent(afterStarted, lateInterruption);
+
+    expect(afterInterruption.run).toMatchObject({
+      status: "failed",
+      error: "Patch target did not match.",
+    });
+    expect(afterInterruption.items).toEqual([]);
+  });
+
+  it("does not apply lifecycle state from an older run to the current run", () => {
+    const current = createAgentRuntimeProjection({
+      run: {
+        id: "run-2",
+        sessionId: "session-1",
+        status: "running",
+        model: "auto",
+        startedAt: "2026-07-22T12:01:00Z",
+      },
+    });
+    const oldFailure: AgentRuntimeEvent = {
+      ...frame,
+      eventId: "old-failure",
+      sequence: 10,
+      method: "run.failed",
+      data: {
+        completedAt: "2026-07-22T12:00:30Z",
+        message: "Old run failed.",
+        retryable: false,
+      },
+    };
+
+    const afterFailure = applyAgentRuntimeEvent(current, oldFailure);
+
+    expect(afterFailure.run).toMatchObject({ id: "run-2", status: "running" });
+    expect(afterFailure.items).toMatchObject([{ kind: "error", runId: "run-1" }]);
+  });
+
+  it("retains terminal transcript evidence over a stale active snapshot", () => {
+    const session = {
+      id: "session-1",
+      title: "Failed session",
+      status: "failed" as const,
+      model: "auto",
+      safetyMode: "unrestricted" as const,
+      workspacePath: "/tmp/session-1",
+      source: "user" as const,
+      createdAt: "2026-07-22T12:00:00Z",
+      updatedAt: "2026-07-22T12:00:10Z",
+    };
+    const current = createAgentRuntimeProjection({
+      session,
+      run: {
+        id: "run-1",
+        sessionId: "session-1",
+        status: "failed",
+        model: "auto",
+        startedAt: "2026-07-22T12:00:00Z",
+        error: "Patch target did not match.",
+      },
+      items: [
+        {
+          id: "error-1",
+          sessionId: "session-1",
+          runId: "run-1",
+          sequence: 4,
+          createdAt: "2026-07-22T12:00:10Z",
+          kind: "error",
+          message: "Patch target did not match.",
+          retryable: false,
+        },
+      ],
+    });
+
+    const merged = mergeAgentRuntimeSnapshot(current, {
+      session: { ...session, status: "running" },
+      run: { ...current.run!, status: "running", error: undefined },
+      items: [],
+    });
+
+    expect(merged.run).toMatchObject({ status: "failed", error: "Patch target did not match." });
+    expect(merged.items).toEqual(current.items);
+  });
+
   it("only offers provider retry for transient model request failures", () => {
     const base = {
       sessionId: "session-1",

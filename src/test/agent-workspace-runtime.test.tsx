@@ -1,7 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRuntimeEvent, AgentSessionDto } from "../lib/agent-runtime-contract";
+import type {
+  AgentRunDto,
+  AgentRuntimeEvent,
+  AgentSessionDto,
+} from "../lib/agent-runtime-contract";
+import { AGENT_SESSION_STATUS_EVENT, type AgentSessionStatusDetail } from "../lib/agent-events";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -1368,6 +1373,152 @@ describe("AgentWorkspace runtime wiring", () => {
         },
       }),
     );
+  });
+
+  it("does not let a late approval response revive a failed run", async () => {
+    const statuses: AgentSessionStatusDetail[] = [];
+    const recordStatus = (event: Event) => {
+      statuses.push((event as CustomEvent<AgentSessionStatusDetail>).detail);
+    };
+    window.addEventListener(AGENT_SESSION_STATUS_EVENT, recordStatus);
+    const defaultInvoke = mocks.invoke.getMockImplementation();
+    let latestRun: AgentRunDto | null = null;
+    let resolveApproval: ((run: AgentRunDto) => void) | undefined;
+    const approvalResponse = new Promise<AgentRunDto>((resolve) => {
+      resolveApproval = resolve;
+    });
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "resolve_agent_interruption") return approvalResponse;
+      if (command === "get_latest_agent_run") return Promise.resolve(latestRun);
+      return defaultInvoke?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={session} />);
+    await screen.findByText("Earlier answer");
+
+    act(() => {
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "run-started",
+          sessionId: session.id,
+          runId: "run-patch",
+          sequence: 1,
+          method: "run.started",
+          data: { startedAt: "2026-07-22T12:00:01Z", model: "fast" },
+        },
+      });
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "approval-requested",
+          sessionId: session.id,
+          runId: "run-patch",
+          sequence: 2,
+          method: "interruption.requested",
+          data: {
+            itemId: "approval-item",
+            interruption: {
+              id: "approval-patch",
+              kind: "approval",
+              sessionId: session.id,
+              runId: "run-patch",
+              status: "pending",
+              createdAt: "2026-07-22T12:00:02Z",
+              toolName: "patch_file",
+              title: "Approval required",
+              description: "June wants to patch a file.",
+              command: "patch_file",
+              allowAlways: false,
+            },
+          },
+        },
+      });
+    });
+
+    await user.click(await screen.findByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("resolve_agent_interruption", {
+        request: {
+          interruptionId: "approval-patch",
+          resolution: { kind: "approval", choice: "once" },
+        },
+      }),
+    );
+    latestRun = {
+      id: "run-patch",
+      sessionId: session.id,
+      status: "failed",
+      model: "fast",
+      error: "Patch target did not match.",
+    };
+    act(() => {
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "tool-failed",
+          sessionId: session.id,
+          runId: "run-patch",
+          sequence: 3,
+          method: "tool.failed",
+          data: {
+            itemId: "tool-result-patch",
+            callId: "call-patch",
+            name: "patch_file",
+            error: "Patch target did not match.",
+            createdAt: "2026-07-22T12:00:03Z",
+          },
+        },
+      });
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "run-failed",
+          sessionId: session.id,
+          runId: "run-patch",
+          sequence: 4,
+          method: "run.failed",
+          data: {
+            completedAt: "2026-07-22T12:00:04Z",
+            message: "Patch target did not match.",
+            failureKind: "tool" as const,
+            retryable: false,
+            errorCode: "agent_patch_ambiguous",
+          },
+        },
+      });
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop June" })).toBeNull());
+
+    await act(async () =>
+      resolveApproval?.({
+        id: "run-patch",
+        sessionId: session.id,
+        status: "running",
+        model: "fast",
+      }),
+    );
+
+    expect(screen.queryByRole("button", { name: "Stop June" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeVisible();
+
+    const statusCount = statuses.length;
+    act(() => {
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "late-run-started",
+          sessionId: session.id,
+          runId: "run-patch",
+          sequence: 5,
+          method: "run.started",
+          data: { startedAt: "2026-07-22T12:00:01Z", model: "fast" },
+        },
+      });
+    });
+    expect(statuses).toHaveLength(statusCount);
+    expect(screen.queryByRole("button", { name: "Stop June" })).toBeNull();
+    window.removeEventListener(AGENT_SESSION_STATUS_EVENT, recordStatus);
   });
 
   it("presents retryable runtime failures as a retry action and resumes through the typed host command", async () => {

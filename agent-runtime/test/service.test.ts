@@ -150,6 +150,43 @@ test("dispatches durable approval resolutions through run.resume", async () => {
   assert.ok(frames().some((frame) => frame.method === "run.completed"));
 });
 
+test("terminalizes a resumed run after a deterministic tool failure", async () => {
+  const engine = new RejectingResumeEngine();
+  const { service, frames } = harness(engine);
+  await initialize(service);
+  await service.handle(
+    request("run.resume", {
+      model: "private-auto",
+      instructions: "You are June.",
+      workspace: "/tmp/june-workspace",
+      safetyMode: "unrestricted",
+      tools: [],
+      skills: [],
+      contextWindow: 16_000,
+      serializedState: "{\"state\":true}",
+      resolutions: [{ interruptionId: "approval-1", decision: "approve" }],
+    }),
+  );
+  await nextTurn();
+
+  const events = frames().filter((frame) => "eventId" in frame);
+  assert.deepEqual(
+    events.map((event) => event.method),
+    ["run.started", "tool.started", "tool.failed", "run.failed"],
+  );
+  assert.deepEqual(events.at(-1)?.params, {
+    error: "Patch target did not match.",
+    failureKind: "tool",
+    retryable: false,
+    errorCode: "agent_patch_ambiguous",
+  });
+  assert.equal(events.some((event) => event.method === "run.completed"), false);
+  assert.deepEqual(
+    await service.handle(request("run.steer", { messageId: "late", text: "Still active?" })),
+    { accepted: false, reason: "not_active" },
+  );
+});
+
 test("dispatches clarification answers through run.resume", async () => {
   const engine = new ResumeRecordingEngine();
   const { service } = harness(engine);
@@ -316,6 +353,34 @@ class ResumeRecordingEngine extends FakeEngine {
     this.serializedState = input.params.serializedState;
     this.resolutions = input.params.resolutions;
     return this.result;
+  }
+}
+
+class RejectingResumeEngine extends FakeEngine {
+  override async resume(input: Parameters<AgentEngine["resume"]>[0]): Promise<EngineResult> {
+    input.emit({
+      type: "tool.started",
+      callId: "call-patch",
+      name: "patch_file",
+      arguments: { path: "vault-note.md" },
+    });
+    input.emit({
+      type: "tool.failed",
+      callId: "call-patch",
+      name: "patch_file",
+      error: "Patch target did not match.",
+      failureKind: "tool",
+      retryable: false,
+      errorCode: "agent_patch_ambiguous",
+    });
+    throw new ToolCallError(
+      "Failed to run function tool",
+      new ProtocolError(-32603, "Patch target did not match.", {
+        failureKind: "tool",
+        retryable: false,
+        errorCode: "agent_patch_ambiguous",
+      }),
+    );
   }
 }
 

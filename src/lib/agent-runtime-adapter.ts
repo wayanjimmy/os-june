@@ -20,6 +20,28 @@ export type AgentRuntimeProjection = {
   processedEventIds: Set<string>;
 };
 
+const terminalRunStatuses = new Set<AgentRunDto["status"]>([
+  "completed",
+  "cancelled",
+  "interrupted",
+  "failed",
+]);
+
+export function mergeAgentRuntimeRun(
+  current: AgentRunDto | undefined,
+  incoming: AgentRunDto | undefined,
+): AgentRunDto | undefined {
+  if (!incoming) return current;
+  if (
+    current?.id === incoming.id &&
+    terminalRunStatuses.has(current.status) &&
+    !terminalRunStatuses.has(incoming.status)
+  ) {
+    return current;
+  }
+  return incoming;
+}
+
 export function createAgentRuntimeProjection(
   input: { session?: AgentSessionDto; run?: AgentRunDto; items?: AgentItemDto[] } = {},
 ): AgentRuntimeProjection {
@@ -45,6 +67,13 @@ export function mergeAgentRuntimeSnapshot(
   const snapshot = createAgentRuntimeProjection(input);
   const run = input.run;
   if (!run || (run.status !== "running" && run.status !== "waiting_for_user")) return snapshot;
+  if (
+    current.run?.id === run.id &&
+    terminalRunStatuses.has(current.run.status) &&
+    !terminalRunStatuses.has(run.status)
+  ) {
+    return { ...current, session: snapshot.session };
+  }
 
   const liveItems = current.items.filter(
     (item) =>
@@ -68,15 +97,9 @@ export function mergeAgentRuntimeSnapshot(
     }
   }
 
-  const currentRun = current.run?.id === run.id ? current.run : undefined;
-  const currentRunFinished =
-    currentRun &&
-    (currentRun.status === "completed" ||
-      currentRun.status === "cancelled" ||
-      currentRun.status === "failed");
   return {
     ...snapshot,
-    run: currentRunFinished ? currentRun : run,
+    run: mergeAgentRuntimeRun(current.run, run),
     items,
     lastSequenceByRun: {
       ...snapshot.lastSequenceByRun,
@@ -119,13 +142,21 @@ export function applyAgentRuntimeEvent(
 
   switch (event.method) {
     case "run.started":
-      next.run = {
+      const startedRun: AgentRunDto = {
         id: event.runId,
         sessionId: event.sessionId,
         status: "running",
         model: event.data.model,
         startedAt: event.data.startedAt,
       };
+      if (
+        next.run?.id === event.runId ||
+        !next.run ||
+        (startedRun.startedAt !== undefined &&
+          (next.run.startedAt === undefined || startedRun.startedAt >= next.run.startedAt))
+      ) {
+        next.run = mergeAgentRuntimeRun(next.run, startedRun);
+      }
       if (event.data.contextSummary) {
         const removedIds = new Set(event.data.removedItemIds ?? []);
         next.items = upsertItem(
@@ -201,6 +232,7 @@ export function applyAgentRuntimeEvent(
       break;
     }
     case "interruption.requested":
+      if (next.run?.id === event.runId && terminalRunStatuses.has(next.run.status)) break;
       next.items = upsertItem(
         next.items.filter(
           (item) =>
@@ -216,14 +248,14 @@ export function applyAgentRuntimeEvent(
           interruption: event.data.interruption,
         },
       );
-      if (next.run) next.run = { ...next.run, status: "waiting_for_user" };
+      if (next.run?.id === event.runId) next.run = { ...next.run, status: "waiting_for_user" };
       break;
     case "usage.updated":
-      if (next.run) next.run = { ...next.run, usage: event.data };
+      if (next.run?.id === event.runId) next.run = { ...next.run, usage: event.data };
       break;
     case "run.completed":
     case "run.cancelled":
-      if (next.run) {
+      if (next.run?.id === event.runId && !terminalRunStatuses.has(next.run.status)) {
         next.run = {
           ...next.run,
           status: event.method === "run.completed" ? "completed" : "cancelled",
@@ -232,7 +264,7 @@ export function applyAgentRuntimeEvent(
       }
       break;
     case "run.failed":
-      if (next.run) {
+      if (next.run?.id === event.runId && !terminalRunStatuses.has(next.run.status)) {
         next.run = {
           ...next.run,
           status: "failed",

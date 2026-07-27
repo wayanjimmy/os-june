@@ -294,6 +294,7 @@ fn spawn_stdout_reader(
         let _ = repository
             .mark_active_runs_interrupted("The local agent runtime stopped unexpectedly.")
             .await;
+        cleanup_terminal_run_secrets(&repository).await;
         let _ = app.emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": "runtime", "runId": "runtime", "sequence": 0, "eventId": Uuid::new_v4(), "method": "run.failed", "data": { "completedAt": now(), "message": "The local agent runtime stopped unexpectedly.", "failureKind": "runtime", "retryable": true, "errorCode": "runtime_crashed" } }));
     });
 }
@@ -674,10 +675,7 @@ async fn persist_and_emit_event(
             Some(AgentItemPayload::Interruption(data["interruption"].clone()))
         }
         "usage.updated" => {
-            let current = repository.get_run(&frame.run_id).await?;
-            repository
-                .update_run_status(&frame.run_id, &current.status, Some(&params), None, None)
-                .await?;
+            repository.update_run_usage(&frame.run_id, &params).await?;
             None
         }
         "run.started" => {
@@ -794,8 +792,79 @@ async fn persist_and_emit_event(
             )
             .await?;
     }
-    app.emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": frame.session_id, "runId": frame.run_id, "sequence": frame.sequence, "eventId": event_id, "method": method, "data": data })).map_err(|error| AppError::new("agent_event_emit_failed", error.to_string()))?;
-    Ok(())
+    let emit_result = app
+        .emit(AGENT_RUNTIME_EVENT, json!({ "protocolVersion": PROTOCOL_VERSION, "sessionId": frame.session_id, "runId": frame.run_id, "sequence": frame.sequence, "eventId": event_id, "method": method, "data": data }))
+        .map_err(|error| AppError::new("agent_event_emit_failed", error.to_string()));
+    if matches!(method, "run.completed" | "run.cancelled" | "run.failed") {
+        let repository = repository.clone();
+        let run_id = frame.run_id.clone();
+        tauri::async_runtime::spawn(async move {
+            cleanup_run_secrets(&repository, &run_id).await;
+        });
+    }
+    emit_result
+}
+
+async fn cleanup_run_secrets(repository: &AgentRepository, run_id: &str) {
+    use sqlx::row::Row;
+
+    let rows = match sqlx::query::query(
+        "SELECT DISTINCT json_extract(payload_json, '$.secretRef') AS secret_ref
+         FROM agent_items
+         WHERE run_id = ? AND kind = 'interruption'
+           AND json_extract(payload_json, '$.secretRef') IS NOT NULL",
+    )
+    .bind(run_id)
+    .fetch_all(&repository.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, run_id, "failed to find staged agent secrets during terminal cleanup");
+            return;
+        }
+    };
+    for row in rows {
+        let secret_ref: String = row.get("secret_ref");
+        if let Err(error) = super::secrets::delete(&secret_ref).await {
+            tracing::warn!(
+                error_code = %error.code,
+                run_id,
+                "failed to remove a staged agent secret after terminal settlement"
+            );
+        }
+    }
+}
+
+pub(crate) async fn cleanup_terminal_run_secrets(repository: &AgentRepository) {
+    use sqlx::row::Row;
+
+    let rows = match sqlx::query::query(
+        "SELECT DISTINCT json_extract(items.payload_json, '$.secretRef') AS secret_ref
+         FROM agent_items AS items
+         JOIN agent_runs AS runs ON runs.id = items.run_id
+         WHERE items.kind = 'interruption'
+           AND runs.status IN ('completed', 'cancelled', 'failed', 'interrupted')
+           AND json_extract(items.payload_json, '$.secretRef') IS NOT NULL",
+    )
+    .fetch_all(&repository.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "failed to find staged agent secrets during startup cleanup");
+            return;
+        }
+    };
+    for row in rows {
+        let secret_ref: String = row.get("secret_ref");
+        if let Err(error) = super::secrets::delete(&secret_ref).await {
+            tracing::warn!(
+                error_code = %error.code,
+                "failed to remove a staged agent secret for a terminal run"
+            );
+        }
+    }
 }
 
 fn tool_payload(params: &Value, status: &str) -> ToolPayload {

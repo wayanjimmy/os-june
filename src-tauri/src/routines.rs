@@ -504,7 +504,12 @@ fn advance_repeat(repeat: &str, metadata: &mut Value) -> bool {
 /// single-flight lease forever. This is deliberately separate from `reconcile`
 /// because calling it during normal scheduler ticks would interrupt live work.
 pub async fn reconcile_after_restart(pool: &SqlitePool) -> Result<(), AppError> {
-    crate::agent_runtime::AgentRepository::new(pool.clone())
+    let repository = crate::agent_runtime::AgentRepository::new(pool.clone());
+    repository
+        .reconcile_unresumable_waiting_runs_after_restart()
+        .await
+        .map_err(app_error)?;
+    repository
         .reconcile_non_routine_runs_after_restart()
         .await
         .map_err(app_error)?;
@@ -540,7 +545,9 @@ pub async fn reconcile_after_restart(pool: &SqlitePool) -> Result<(), AppError> 
         .bind(&timestamp).bind(&timestamp).execute(pool).await.map_err(app_error)?;
     query("UPDATE routine_runs SET status = 'interrupted', completed_at = COALESCE(completed_at, ?), error_code = COALESCE(error_code, 'routine_runtime_restarted'), error_message = COALESCE(error_message, 'June restarted before this routine completed.'), updated_at = ? WHERE status IN ('queued', 'running')")
         .bind(&timestamp).bind(&timestamp).execute(pool).await.map_err(app_error)?;
-    reconcile(pool).await
+    reconcile(pool).await?;
+    crate::agent_runtime::host::cleanup_terminal_run_secrets(&repository).await;
+    Ok(())
 }
 
 pub async fn mark_agent_run_waiting(pool: &SqlitePool, agent_run_id: &str) -> Result<(), AppError> {
