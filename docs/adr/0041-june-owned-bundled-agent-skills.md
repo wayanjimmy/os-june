@@ -3,7 +3,7 @@ status: accepted
 date: 2026-07-27
 ---
 
-# June owns bundled agent skills as read-only app resources
+# June-owned bundled agent skills are read-only app resources
 
 ## Context
 
