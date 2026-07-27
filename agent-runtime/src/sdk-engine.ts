@@ -77,7 +77,10 @@ export class OpenAIAgentsEngine implements AgentEngine {
     const state = await RunState.fromString(agent, input.params.serializedState);
     const interruptions = state.getInterruptions();
     for (const resolution of input.params.resolutions) {
-      const interruption = interruptions.find((candidate) => interruptionId(candidate) === resolution.interruptionId);
+      const interruption =
+        resolution.interruptionId === "unknown-interruption" && interruptions.length === 1
+          ? interruptions[0]
+          : interruptions.find((candidate) => interruptionId(candidate) === resolution.interruptionId);
       if (!interruption) throw new Error(`Unknown interruption: ${resolution.interruptionId}`);
       if (
         resolution.kind === "clarification" ||
@@ -412,13 +415,44 @@ function parsedToolArguments(value: unknown): JsonValue {
 }
 
 function interruptionId(interruption: unknown): string {
-  if (!isRecord(interruption)) return "unknown-interruption";
-  if (typeof interruption.id === "string") return interruption.id;
-  if (typeof interruption.callId === "string") return interruption.callId;
-  if (isRecord(interruption.rawItem) && typeof interruption.rawItem.callId === "string") {
-    return interruption.rawItem.callId;
+  if (!isRecord(interruption)) throw new Error("Approval interruption has no stable identity owner");
+
+  const rawItem = isRecord(interruption.rawItem) ? interruption.rawItem : undefined;
+  const providerData = rawItem
+    ? isRecord(rawItem.providerData)
+      ? rawItem.providerData
+      : isRecord(rawItem.provider_data)
+        ? rawItem.provider_data
+        : undefined
+    : undefined;
+  const identity = firstNonEmptyString(
+    rawItem?.callId,
+    rawItem?.call_id,
+    rawItem?.id,
+    providerData?.itemId,
+    providerData?.item_id,
+    providerData?.id,
+    interruption.callId,
+    interruption.call_id,
+    interruption.id,
+  );
+  if (identity) return identity;
+
+  if (!rawItem) throw new Error("Approval interruption has no serializable raw item identity");
+
+  const generatedId = crypto.randomUUID();
+  try {
+    const mutableProviderData = isRecord(rawItem.providerData) ? rawItem.providerData : {};
+    mutableProviderData.itemId = generatedId;
+    rawItem.providerData = mutableProviderData;
+  } catch {
+    throw new Error("Approval interruption identity could not be persisted for resume");
   }
-  return "unknown-interruption";
+  return generatedId;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === "string" && value.trim().length > 0);
 }
 
 function toolCallId(details: unknown): string {

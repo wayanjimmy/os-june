@@ -204,7 +204,17 @@ function isReadToolName(value: string) {
 
 function isEditToolName(value: string) {
   return (
-    hasSegment(value, ["write", "edit", "patch", "create", "delete", "remove", "move", "copy"]) ||
+    hasSegment(value, [
+      "write",
+      "edit",
+      "patch",
+      "replace",
+      "create",
+      "delete",
+      "remove",
+      "move",
+      "copy",
+    ]) ||
     hasPhrase(value, ["apply_patch"])
   );
 }

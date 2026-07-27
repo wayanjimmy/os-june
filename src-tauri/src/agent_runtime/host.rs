@@ -639,22 +639,23 @@ async fn persist_and_emit_event(
                 .get("serializedState")
                 .cloned()
                 .unwrap_or(Value::Null);
-            repository
-                .update_run_status(
-                    &frame.run_id,
-                    "waiting_for_user",
-                    None,
-                    Some(&serialized),
-                    None,
-                )
-                .await?;
-            crate::routines::mark_agent_run_waiting(&repository.pool, &frame.run_id).await?;
             let kind = params
                 .get("kind")
                 .and_then(Value::as_str)
                 .unwrap_or("approval");
-            let interruption_id = interruption_stable_id(&params, &event_id);
-            persistence_external_id = format!("interruption:{interruption_id}");
+            let interruption_id = match interruption_stable_id(&params) {
+                Ok(interruption_id) => interruption_id,
+                Err(error) => {
+                    tracing::warn!(
+                        error_code = %error.code,
+                        run_id = %frame.run_id,
+                        "agent runtime returned an interruption without a durable identity"
+                    );
+                    fail_unpersisted_interruption(app, repository, frame).await;
+                    return Ok(());
+                }
+            };
+            persistence_external_id = format!("interruption:{}:{interruption_id}", frame.run_id);
             let interruption = match kind {
                 "clarification" => {
                     json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "clarification", "question": params.get("question").cloned().unwrap_or_else(|| json!("What would you like June to do?")), "choices": params.get("choices").cloned().unwrap_or_else(|| json!([])) })
@@ -667,12 +668,55 @@ async fn persist_and_emit_event(
                         .get("toolName")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown_tool");
-                    let command = approval_command(tool_name, params.get("arguments"));
-                    json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "approval", "toolName": tool_name, "title": "Approval required", "description": format!("June wants to run {tool_name}. Review the requested operation before approving."), "command": command, "allowAlways": false })
+                    let presentation = approval_presentation(tool_name, params.get("arguments"));
+                    json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "approval", "toolName": tool_name, "title": presentation.title, "description": presentation.description, "command": presentation.command, "allowAlways": false })
                 }
             };
             data = json!({ "itemId": persistence_external_id, "interruption": interruption });
-            Some(AgentItemPayload::Interruption(data["interruption"].clone()))
+            let persistence = repository
+                .persist_pending_interruption(
+                    &frame.session_id,
+                    &frame.run_id,
+                    frame.sequence,
+                    data["itemId"].as_str().unwrap_or_default(),
+                    &data["interruption"],
+                    &serialized,
+                )
+                .await;
+            match persistence {
+                Ok(
+                    super::repository::PendingInterruptionPersistence::Inserted
+                    | super::repository::PendingInterruptionPersistence::ReenteredPending,
+                ) => {
+                    if let Err(error) =
+                        crate::routines::mark_agent_run_waiting(&repository.pool, &frame.run_id)
+                            .await
+                    {
+                        tracing::warn!(
+                            error_code = %error.code,
+                            run_id = %frame.run_id,
+                            "failed to mirror the pending agent interruption to its routine run"
+                        );
+                    }
+                }
+                Ok(super::repository::PendingInterruptionPersistence::ExistingPending)
+                | Ok(super::repository::PendingInterruptionPersistence::Terminal) => return Ok(()),
+                Ok(super::repository::PendingInterruptionPersistence::Rejected) => {
+                    fail_unpersisted_interruption(app, repository, frame).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        run_id = %frame.run_id,
+                        sequence = frame.sequence,
+                        "failed to persist a pending agent interruption atomically"
+                    );
+                    fail_unpersisted_interruption(app, repository, frame).await;
+                    return Ok(());
+                }
+            }
+            None
         }
         "usage.updated" => {
             repository.update_run_usage(&frame.run_id, &params).await?;
@@ -803,6 +847,45 @@ async fn persist_and_emit_event(
         });
     }
     emit_result
+}
+
+async fn fail_unpersisted_interruption(
+    app: &AppHandle,
+    repository: &AgentRepository,
+    frame: &RpcFrame,
+) {
+    let message = "June could not safely save this approval request. Please start a new run.";
+    let error_code = "agent_interruption_persist_failed";
+    if let Err(error) = repository
+        .update_run_status(
+            &frame.run_id,
+            "failed",
+            None,
+            None,
+            Some((error_code, message)),
+        )
+        .await
+    {
+        tracing::warn!(%error, run_id = %frame.run_id, "failed to settle an unpersisted interruption");
+    }
+    let _ = app.emit(
+        AGENT_RUNTIME_EVENT,
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "sessionId": frame.session_id,
+            "runId": frame.run_id,
+            "sequence": frame.sequence,
+            "eventId": Uuid::new_v4(),
+            "method": "run.failed",
+            "data": {
+                "completedAt": now(),
+                "message": message,
+                "failureKind": "runtime",
+                "retryable": false,
+                "errorCode": error_code,
+            }
+        }),
+    );
 }
 
 async fn cleanup_run_secrets(repository: &AgentRepository, run_id: &str) {
@@ -966,12 +1049,61 @@ fn approval_command(tool_name: &str, arguments: Option<&Value>) -> String {
     sanitize_log(&format!("{tool_name} {details}"))
 }
 
-fn interruption_stable_id(params: &Value, event_id: &str) -> String {
+struct ApprovalPresentation {
+    title: String,
+    description: String,
+    command: String,
+}
+
+fn approval_presentation(tool_name: &str, arguments: Option<&Value>) -> ApprovalPresentation {
+    let path = arguments
+        .and_then(Value::as_object)
+        .and_then(|arguments| arguments.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown path");
+    let specific = match tool_name {
+        "write_file" => Some((
+            "Create new file?",
+            "June wants to create a new file. This request will fail without changing anything if the path already exists.",
+            "Create",
+        )),
+        "patch_file" => Some(("Edit file?", "June wants to edit part of a file.", "Edit")),
+        "replace_file" => Some((
+            "Replace entire file?",
+            "June wants to replace all contents of this file. It will proceed only if the file is unchanged since June read it.",
+            "Replace",
+        )),
+        _ => None,
+    };
+    if let Some((title, description, operation)) = specific {
+        ApprovalPresentation {
+            title: title.into(),
+            description: description.into(),
+            command: sanitize_log(&format!("{operation}: {path}")),
+        }
+    } else {
+        ApprovalPresentation {
+            title: "Approval required".into(),
+            description: format!(
+                "June wants to run {tool_name}. Review the requested operation before approving."
+            ),
+            command: approval_command(tool_name, arguments),
+        }
+    }
+}
+
+fn interruption_stable_id(params: &Value) -> Result<String, AppError> {
     params
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or(event_id)
-        .to_string()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_interruption_invalid",
+                "The agent runtime returned an approval without a stable identity.",
+            )
+        })
 }
 
 fn sanitize_log(value: &str) -> String {
@@ -1134,32 +1266,61 @@ mod tests {
     }
 
     #[test]
-    fn approval_cards_preserve_sanitized_operation_details() {
-        let command = approval_command(
-            "write_file",
+    fn file_approval_cards_are_operation_specific_and_omit_edit_material() {
+        let secret = "private edit material".repeat(500);
+        for (tool, title) in [
+            ("write_file", "Create new file?"),
+            ("patch_file", "Edit file?"),
+            ("replace_file", "Replace entire file?"),
+        ] {
+            let presentation = approval_presentation(
+                tool,
+                Some(&json!({
+                    "path": "/workspace/report.md",
+                    "content": secret,
+                    "before": secret,
+                    "after": secret,
+                    "expectedRevision": "sha256:secret"
+                })),
+            );
+            assert_eq!(presentation.title, title);
+            assert!(presentation.command.contains("/workspace/report.md"));
+            assert!(!presentation.command.contains("private edit material"));
+            assert!(!presentation.command.contains("sha256:secret"));
+        }
+        let replacement = approval_presentation("replace_file", None);
+        assert!(replacement.description.contains("replace all contents"));
+        assert!(replacement
+            .description
+            .contains("unchanged since June read it"));
+    }
+
+    #[test]
+    fn generic_approval_cards_keep_sanitized_operation_details() {
+        let presentation = approval_presentation(
+            "run_shell",
             Some(&json!({
-                "path": "/workspace/report.md",
-                "content": "safe content",
+                "command": "echo safe",
                 "token": "[redacted]"
             })),
         );
 
-        assert!(command.contains("write_file"));
-        assert!(command.contains("/workspace/report.md"));
-        assert!(command.contains("safe content"));
-        assert!(command.contains("[redacted]"));
+        assert_eq!(presentation.title, "Approval required");
+        assert!(presentation.command.contains("run_shell"));
+        assert!(presentation.command.contains("echo safe"));
+        assert!(!presentation.command.contains("[redacted]"));
     }
 
     #[test]
     fn interruption_persistence_uses_the_stable_sdk_id_across_transport_replays() {
         let params = json!({ "id": "sdk-interruption-1" });
         assert_eq!(
-            interruption_stable_id(&params, "transport-event-a"),
-            interruption_stable_id(&params, "transport-event-b")
+            interruption_stable_id(&params).unwrap(),
+            interruption_stable_id(&params).unwrap()
         );
         assert_eq!(
-            interruption_stable_id(&json!({}), "transport-event-c"),
-            "transport-event-c"
+            interruption_stable_id(&json!({})).unwrap_err().code,
+            "agent_interruption_invalid"
         );
     }
 

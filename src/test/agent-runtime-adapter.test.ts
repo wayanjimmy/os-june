@@ -5,6 +5,7 @@ import {
   createAgentRuntimeProjection,
   mergeAgentRuntimeRun,
   mergeAgentRuntimeSnapshot,
+  resolveAgentRuntimeInterruption,
 } from "../lib/agent-runtime-adapter";
 import {
   AGENT_RUNTIME_PROTOCOL_VERSION,
@@ -90,6 +91,68 @@ describe("agent runtime adapter", () => {
       error: "Patch target did not match.",
     });
     expect(afterInterruption.items).toEqual([]);
+  });
+
+  it("accepts a resumed sidecar sequence epoch for a waiting run", () => {
+    const waiting = createAgentRuntimeProjection({
+      run: {
+        id: "run-1",
+        sessionId: "session-1",
+        status: "waiting_for_user",
+        model: "auto",
+      },
+    });
+    waiting.lastSequenceByRun["run-1"] = 20;
+
+    const resumed = applyAgentRuntimeEvent(waiting, {
+      ...frame,
+      eventId: "resumed-start",
+      sequence: 1,
+      method: "run.started",
+      data: { model: "auto", resumed: true },
+    });
+    const interrupted = applyAgentRuntimeEvent(resumed, {
+      ...frame,
+      eventId: "resumed-interruption",
+      sequence: 2,
+      method: "interruption.requested",
+      data: {
+        itemId: "interruption:run-1:approval-2",
+        interruption: {
+          id: "approval-2",
+          sessionId: "session-1",
+          runId: "run-1",
+          status: "pending",
+          createdAt: "2026-07-22T12:00:11Z",
+          kind: "approval",
+          toolName: "write_file",
+          title: "Create new file?",
+          description: "Review the operation.",
+          command: "Create: note.md",
+          allowAlways: false,
+        },
+      },
+    });
+
+    expect(resumed.lastSequenceByRun["run-1"]).toBe(1);
+    expect(interrupted.lastSequenceByRun["run-1"]).toBe(2);
+    expect(interrupted.run?.status).toBe("waiting_for_user");
+    expect(interrupted.items).toMatchObject([
+      { kind: "interruption", interruption: { id: "approval-2" } },
+    ]);
+
+    const resolved = resolveAgentRuntimeInterruption(
+      interrupted,
+      { sessionId: "session-1", runId: "run-1", interruptionId: "approval-2" },
+      { kind: "approval", choice: "once" },
+    );
+    expect(resolved.run?.status).toBe("waiting_for_user");
+    expect(resolved.items).toMatchObject([
+      {
+        kind: "interruption",
+        interruption: { id: "approval-2", status: "resolved", resolution: "once" },
+      },
+    ]);
   });
 
   it("does not apply lifecycle state from an older run to the current run", () => {
@@ -471,10 +534,10 @@ describe("agent runtime adapter", () => {
           runId: "run-1",
           status: "pending",
           createdAt: "2026-07-22T12:00:02Z",
-          toolName: "write_file",
-          title: "File change requested",
+          toolName: "replace_file",
+          title: "Replace entire file?",
           description: "June wants to update the project.",
-          command: "write_file README.md",
+          command: "Replace: README.md",
           allowAlways: true,
         },
       },
@@ -528,7 +591,8 @@ describe("agent runtime adapter", () => {
           {
             type: "approval",
             id: "approval-1",
-            command: "write_file README.md",
+            title: "Replace entire file?",
+            command: "Replace: README.md",
             allowPermanent: true,
             status: "pending",
           },

@@ -25,3 +25,14 @@ require an Unrestricted session and the normal write approval.
 Follow Obsidian Markdown conventions: use YAML frontmatter only when the note
 already uses it or the user asks for it, preserve valid frontmatter, and link
 related notes with `[[Note Name]]` wikilinks.
+
+Use `write_file` only for a new path. Use `patch_file` for an existing note and
+keep its exact Markdown and frontmatter structure intact. If a patch returns
+`agent_patch_ambiguous`, reread the note and make a smaller, fresh exact patch
+that occurs once. Never use `write_file` or `replace_file` merely as a fallback
+for a failed patch.
+
+Use `replace_file` only when the user intends a complete rewrite or the task is
+intrinsically a complete rewrite. Read the file immediately beforehand and pass
+the fresh revision returned by `read_file`. Preserve Markdown, frontmatter,
+UTF-8 BOM, and line endings.

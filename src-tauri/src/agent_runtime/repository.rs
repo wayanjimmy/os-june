@@ -4,9 +4,17 @@ use super::domain::{
 };
 use chrono::{SecondsFormat, Utc};
 use sqlx::{query::query, row::Row};
-use sqlx_sqlite::{SqlitePool, SqliteRow};
+use sqlx_sqlite::{SqlitePool, SqliteRow, SqliteTransaction};
 use std::collections::BTreeSet;
 use uuid::Uuid;
+
+pub enum PendingInterruptionPersistence {
+    Inserted,
+    ExistingPending,
+    ReenteredPending,
+    Rejected,
+    Terminal,
+}
 
 #[derive(Clone)]
 pub struct AgentRepository {
@@ -682,6 +690,136 @@ impl AgentRepository {
         }))
     }
 
+    pub async fn persist_pending_interruption(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        sequence: i64,
+        external_id: &str,
+        interruption: &serde_json::Value,
+        serialized_state: &serde_json::Value,
+    ) -> Result<PendingInterruptionPersistence, sqlx::Error> {
+        let now = now();
+        let mut transaction = self.pool.begin().await?;
+        let run = query("SELECT session_id, status, last_sequence FROM agent_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let persisted_session_id: String = run.get("session_id");
+        let status: String = run.get("status");
+        let last_sequence: i64 = run.get("last_sequence");
+        if persisted_session_id != session_id {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Rejected);
+        }
+        if matches!(
+            status.as_str(),
+            "completed" | "cancelled" | "failed" | "interrupted"
+        ) {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Terminal);
+        }
+        if let Some(existing) =
+            query("SELECT run_id, payload_json FROM agent_items WHERE external_id = ?")
+                .bind(external_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+        {
+            let existing_run_id: Option<String> = existing.get("run_id");
+            let existing_payload: String = existing.get("payload_json");
+            let existing_payload: serde_json::Value = serde_json::from_str(&existing_payload)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            let same_pending = existing_run_id.as_deref() == Some(run_id)
+                && existing_payload.get("id") == interruption.get("id")
+                && existing_payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("pending");
+            if !same_pending {
+                transaction.rollback().await?;
+                return Ok(PendingInterruptionPersistence::Rejected);
+            }
+            if status == "waiting_for_user" {
+                transaction.rollback().await?;
+                return Ok(PendingInterruptionPersistence::ExistingPending);
+            }
+            if status != "running" || sequence <= last_sequence {
+                transaction.rollback().await?;
+                return Ok(PendingInterruptionPersistence::Rejected);
+            }
+            let updated = query(
+                "UPDATE agent_runs
+                 SET status = 'waiting_for_user', last_sequence = ?, updated_at = ?,
+                     interrupted_state_json = ?, error_code = NULL, error_message = NULL
+                 WHERE id = ? AND status = 'running' AND last_sequence < ?",
+            )
+            .bind(sequence)
+            .bind(&now)
+            .bind(serialized_state.to_string())
+            .bind(run_id)
+            .bind(sequence)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            if updated == 0 {
+                transaction.rollback().await?;
+                return Ok(PendingInterruptionPersistence::Rejected);
+            }
+            update_session_waiting(&mut transaction, session_id, run_id, &now).await?;
+            transaction.commit().await?;
+            return Ok(PendingInterruptionPersistence::ReenteredPending);
+        }
+        if sequence <= last_sequence {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Rejected);
+        }
+
+        let display_sequence: i64 = query(
+            "SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence
+             FROM agent_items WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?
+        .get("next_sequence");
+        query(
+            "INSERT INTO agent_items
+             (id, session_id, run_id, sequence, kind, payload_json, external_id, created_at)
+             VALUES (?, ?, ?, ?, 'interruption', ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(session_id)
+        .bind(run_id)
+        .bind(display_sequence)
+        .bind(interruption.to_string())
+        .bind(external_id)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await?;
+        let updated = query(
+            "UPDATE agent_runs
+             SET status = 'waiting_for_user', last_sequence = ?, updated_at = ?,
+                 interrupted_state_json = ?, error_code = NULL, error_message = NULL
+             WHERE id = ? AND last_sequence < ?
+               AND status NOT IN ('completed', 'cancelled', 'failed', 'interrupted')",
+        )
+        .bind(sequence)
+        .bind(&now)
+        .bind(serialized_state.to_string())
+        .bind(run_id)
+        .bind(sequence)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if updated == 0 {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Rejected);
+        }
+        update_session_waiting(&mut transaction, session_id, run_id, &now).await?;
+        transaction.commit().await?;
+        Ok(PendingInterruptionPersistence::Inserted)
+    }
+
     pub async fn items(&self, session_id: &str) -> Result<Vec<AgentItemDto>, sqlx::Error> {
         let rows = query(
             "SELECT id, session_id, run_id, sequence, kind, payload_json, external_id, created_at
@@ -992,6 +1130,28 @@ impl AgentRepository {
             updated_at,
         })
     }
+}
+
+async fn update_session_waiting(
+    transaction: &mut SqliteTransaction<'_>,
+    session_id: &str,
+    run_id: &str,
+    now: &str,
+) -> Result<(), sqlx::Error> {
+    query(
+        "UPDATE agent_sessions SET status = 'waiting_for_user', updated_at = ?, last_error = NULL
+         WHERE id = ? AND ? = (
+             SELECT id FROM agent_runs WHERE session_id = ?
+             ORDER BY started_at DESC, rowid DESC LIMIT 1
+         )",
+    )
+    .bind(now)
+    .bind(session_id)
+    .bind(run_id)
+    .bind(session_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 fn now() -> String {

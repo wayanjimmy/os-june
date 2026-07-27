@@ -31,6 +31,7 @@ import {
   createAgentRuntimeProjection,
   mergeAgentRuntimeRun,
   mergeAgentRuntimeSnapshot,
+  resolveAgentRuntimeInterruption,
   type AgentRuntimeProjection,
 } from "../../lib/agent-runtime-adapter";
 import type {
@@ -134,7 +135,7 @@ import {
   type JuneHomeConversationContext,
   type JuneHomeTaskRequest,
 } from "../../lib/june-home";
-import type { AgentChatTurn } from "../../lib/agent-chat-runtime";
+import type { AgentChatPart, AgentChatTurn } from "../../lib/agent-chat-runtime";
 import {
   clearHomeTaskHandoffActive,
   compareHomeTurnOrder,
@@ -1473,18 +1474,26 @@ export function AgentWorkspace({
   }
 
   async function respondToApproval(
-    interruptionId: string,
+    part: Extract<AgentChatPart, { type: "approval" }>,
     choice: "once" | "session" | "always" | "deny",
   ) {
+    if (!part.sessionId || !part.runId) {
+      setError("This approval is no longer attached to an active run.");
+      return;
+    }
+    const interruptionId = part.id;
     setApprovalSubmitting((current) => ({ ...current, [interruptionId]: choice }));
     try {
-      const run = await agentRuntimeBindings.resolveInterruption({
+      const request = {
+        sessionId: part.sessionId,
+        runId: part.runId,
         interruptionId,
-        resolution: { kind: "approval", choice },
-      });
-      if (run && selectedIdRef.current === run.sessionId) {
-        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
-      }
+        resolution: { kind: "approval" as const, choice },
+      };
+      await agentRuntimeBindings.resolveInterruption(request);
+      setProjection((current) =>
+        resolveAgentRuntimeInterruption(current, request, request.resolution),
+      );
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
@@ -1496,16 +1505,27 @@ export function AgentWorkspace({
     }
   }
 
-  async function respondToClarification(interruptionId: string, answer: string) {
+  async function respondToClarification(
+    part: Extract<AgentChatPart, { type: "clarify" }>,
+    answer: string,
+  ) {
+    if (!part.sessionId || !part.runId) {
+      setError("This question is no longer attached to an active run.");
+      return;
+    }
+    const interruptionId = part.id;
     setClarifySubmitting((current) => ({ ...current, [interruptionId]: answer }));
     try {
-      const run = await agentRuntimeBindings.resolveInterruption({
+      const request = {
+        sessionId: part.sessionId,
+        runId: part.runId,
         interruptionId,
-        resolution: { kind: "clarification", answer },
-      });
-      if (run && selectedIdRef.current === run.sessionId) {
-        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
-      }
+        resolution: { kind: "clarification" as const, answer },
+      };
+      await agentRuntimeBindings.resolveInterruption(request);
+      setProjection((current) =>
+        resolveAgentRuntimeInterruption(current, request, request.resolution),
+      );
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
@@ -1517,18 +1537,29 @@ export function AgentWorkspace({
     }
   }
 
-  async function respondToSecret(interruptionId: string, secret: string) {
+  async function respondToSecret(
+    part: Extract<AgentChatPart, { type: "secret" }>,
+    secret: string,
+  ) {
+    if (!part.sessionId || !part.runId) {
+      setError("This secret request is no longer attached to an active run.");
+      return;
+    }
+    const interruptionId = part.id;
     setSecretSubmitting((current) => ({ ...current, [interruptionId]: true }));
     try {
-      const run = await agentRuntimeBindings.resolveInterruption({
+      const request = {
+        sessionId: part.sessionId,
+        runId: part.runId,
         interruptionId,
         resolution: secret
-          ? { kind: "secret", secret, choice: "once" }
-          : { kind: "secret", choice: "deny" },
-      });
-      if (run && selectedIdRef.current === run.sessionId) {
-        setProjection((current) => ({ ...current, run: mergeAgentRuntimeRun(current.run, run) }));
-      }
+          ? ({ kind: "secret", secret, choice: "once" } as const)
+          : ({ kind: "secret", choice: "deny" } as const),
+      };
+      await agentRuntimeBindings.resolveInterruption(request);
+      setProjection((current) =>
+        resolveAgentRuntimeInterruption(current, request, request.resolution),
+      );
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
@@ -1901,10 +1932,10 @@ export function AgentWorkspace({
                         onThinkingOpenChange={(key, open) =>
                           setThinkingOpen((current) => ({ ...current, [key]: open }))
                         }
-                        onApproval={(part, choice) => void respondToApproval(part.id, choice)}
-                        onClarify={(part, answer) => void respondToClarification(part.id, answer)}
+                        onApproval={(part, choice) => void respondToApproval(part, choice)}
+                        onClarify={(part, answer) => void respondToClarification(part, answer)}
                         onSudo={() => undefined}
-                        onSecret={(part, secret) => void respondToSecret(part.id, secret)}
+                        onSecret={(part, secret) => void respondToSecret(part, secret)}
                         homeTaskHandoff={homeHandoffsByTurnId.get(turn.id)}
                         onOpenHomeTaskSession={onOpenHomeTaskSession}
                         onRetryHomeTask={retryHomeTask}
@@ -2012,10 +2043,10 @@ export function AgentWorkspace({
                     onThinkingOpenChange={(key, open) =>
                       setThinkingOpen((current) => ({ ...current, [key]: open }))
                     }
-                    onApproval={(part, choice) => void respondToApproval(part.id, choice)}
-                    onClarify={(part, answer) => void respondToClarification(part.id, answer)}
+                    onApproval={(part, choice) => void respondToApproval(part, choice)}
+                    onClarify={(part, answer) => void respondToClarification(part, answer)}
                     onSudo={() => undefined}
-                    onSecret={(part, secret) => void respondToSecret(part.id, secret)}
+                    onSecret={(part, secret) => void respondToSecret(part, secret)}
                     onRetryUpstreamFailure={(turnId) => void retryFailure(turnId)}
                     onBranch={(itemId) => void branchFrom(itemId)}
                     branching={branchingItemId === turn.id}

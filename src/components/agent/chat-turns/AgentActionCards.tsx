@@ -479,7 +479,7 @@ export function ApprovalPart({
 
   return (
     <CollapsibleActionCard
-      title="Approval required"
+      title={part.title || "Approval required"}
       description={part.description}
       command={part.command ? <pre>{part.command}</pre> : null}
       // The command is always shown; the only expandable body is the optional

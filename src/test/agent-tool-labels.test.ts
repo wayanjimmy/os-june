@@ -24,6 +24,7 @@ describe("toolActivityLabel", () => {
     expect(toolActivityLabel("fetch_url", { url: "https://example.com" })).toBe("Browsing");
     expect(toolActivityLabel("read_file", { path: "src/App.tsx" })).toBe("Reading files");
     expect(toolActivityLabel("write_file", { path: "src/App.tsx" })).toBe("Editing files");
+    expect(toolActivityLabel("replace_file", { path: "src/App.tsx" })).toBe("Editing files");
   });
 
   it("labels the june_video MCP tools as video work, not a raw tool name", () => {

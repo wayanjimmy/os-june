@@ -52,6 +52,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0040](adr/0040-plugin-capabilities-as-host-tools.md) - June-owned plugin capabilities are in-loop host tools (brokered helpers for risky engines), never June-managed MCP servers
 - [adr/0041](adr/0041-june-owned-bundled-agent-skills.md) - June-owned bundled agent skills ship as read-only app resources beneath managed and user-global overrides
 - [adr/0042](adr/0042-sandboxed-host-file-read-write-policy.md) - Sandboxed host file tools may read user-accessible paths but confine every mutation to the session workspace
+- [adr/0043](adr/0043-safe-host-text-file-mutations.md) - Host text-file creation, patching, and replacement are distinct, revision-aware atomic operations
 
 ## Enforceable rules (spec/)
 

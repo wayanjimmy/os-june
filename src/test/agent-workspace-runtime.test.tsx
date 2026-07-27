@@ -35,6 +35,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openDialog }));
 
 import { AgentWorkspace } from "../components/agent/AgentWorkspace";
+import { ApprovalPart } from "../components/agent/chat-turns/AgentActionCards";
 import { markAgentNewSessionPending } from "../components/agent/session-persistence";
 import { agentComposerClearance } from "../components/agent/composer/layout";
 import { AGENT_NEW_SESSION_EVENT } from "../lib/agent-events";
@@ -159,6 +160,47 @@ describe("AgentWorkspace runtime wiring", () => {
       }
       return Promise.resolve(undefined);
     });
+  });
+
+  it("renders the generic title for an old approval part without a title", () => {
+    render(
+      <ApprovalPart
+        onApproval={vi.fn()}
+        part={{
+          type: "approval",
+          id: "old-approval",
+          command: "write_file README.md",
+          description: "Review this file change before continuing.",
+          allowPermanent: false,
+          status: "pending",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Approval required")).toBeInTheDocument();
+    expect(screen.getByText("Review this file change before continuing.")).toBeInTheDocument();
+  });
+
+  it("renders the explicit whole-file replacement warning", () => {
+    render(
+      <ApprovalPart
+        onApproval={vi.fn()}
+        part={{
+          type: "approval",
+          id: "replace-approval",
+          title: "Replace entire file?",
+          command: "Replace: worklog.md",
+          description:
+            "June wants to replace all contents of this file. It will proceed only if the file is unchanged since June read it.",
+          allowPermanent: false,
+          status: "pending",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Replace entire file?")).toBeInTheDocument();
+    expect(screen.getByText(/replace all contents/)).toBeInTheDocument();
+    expect(screen.queryByText(/private note content/)).toBeNull();
   });
 
   it("reserves the overlap between the transcript and fixed composer", () => {
@@ -1368,6 +1410,8 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("resolve_agent_interruption", {
         request: {
+          sessionId: session.id,
+          runId: "run-2",
           interruptionId: "clarify-1",
           resolution: { kind: "clarification", answer: "June" },
         },
@@ -1440,6 +1484,8 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("resolve_agent_interruption", {
         request: {
+          sessionId: session.id,
+          runId: "run-patch",
           interruptionId: "approval-patch",
           resolution: { kind: "approval", choice: "once" },
         },

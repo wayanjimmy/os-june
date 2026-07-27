@@ -1,3 +1,4 @@
+use os_june_lib::agent_runtime::repository::PendingInterruptionPersistence;
 use os_june_lib::agent_runtime::{
     import_legacy_agent_state, legacy_import_completed, AgentItemPayload, AgentRepository,
     LegacyImportOptions, MessagePayload, ToolPayload,
@@ -97,6 +98,156 @@ async fn run_configuration_and_streamed_reasoning_survive_resume_and_hydration()
         AgentItemPayload::Reasoning(text) if text.text == "First second"
     ));
     assert_eq!(repository.get_run(&run.id).await.unwrap().last_sequence, 2);
+}
+
+#[tokio::test]
+async fn repeated_provider_interruption_ids_are_scoped_to_their_runs() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool.clone());
+    let session = repository
+        .create_session(
+            "Repeated approvals",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .expect("session");
+    let first = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("first run");
+    let second = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("second run");
+    let interruption = |run_id: &str| {
+        serde_json::json!({
+            "id": "provider-reused-id",
+            "sessionId": session.id,
+            "runId": run_id,
+            "status": "pending",
+            "kind": "approval"
+        })
+    };
+
+    for run in [&first, &second] {
+        let outcome = repository
+            .persist_pending_interruption(
+                &session.id,
+                &run.id,
+                1,
+                &format!("interruption:{}:provider-reused-id", run.id),
+                &interruption(&run.id),
+                &serde_json::json!("serialized"),
+            )
+            .await
+            .expect("pending interruption");
+        assert!(matches!(outcome, PendingInterruptionPersistence::Inserted));
+    }
+
+    let rows: i64 = query(
+        "SELECT COUNT(*) AS count FROM agent_items
+         WHERE kind = 'interruption' AND json_extract(payload_json, '$.id') = 'provider-reused-id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("count");
+    assert_eq!(rows, 2);
+    assert_eq!(
+        repository.get_run(&first.id).await.unwrap().status,
+        "waiting_for_user"
+    );
+    assert_eq!(
+        repository.get_run(&second.id).await.unwrap().status,
+        "waiting_for_user"
+    );
+
+    query("UPDATE agent_runs SET status = 'running', last_sequence = 0 WHERE id = ?")
+        .bind(&first.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let reentered = repository
+        .persist_pending_interruption(
+            &session.id,
+            &first.id,
+            2,
+            &format!("interruption:{}:provider-reused-id", first.id),
+            &interruption(&first.id),
+            &serde_json::json!("updated serialized state"),
+        )
+        .await
+        .expect("reentered pending interruption");
+    assert!(matches!(
+        reentered,
+        PendingInterruptionPersistence::ReenteredPending
+    ));
+    let first_after_reentry = repository.get_run(&first.id).await.unwrap();
+    assert_eq!(first_after_reentry.status, "waiting_for_user");
+    assert_eq!(first_after_reentry.last_sequence, 2);
+    assert_eq!(
+        first_after_reentry.interrupted_state,
+        Some(serde_json::json!("updated serialized state"))
+    );
+}
+
+#[tokio::test]
+async fn rejected_interruption_does_not_commit_a_waiting_run_without_an_item() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool);
+    let session = repository
+        .create_session(
+            "Stale approval",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .expect("session");
+    let run = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("run");
+    repository
+        .append_item(
+            &session.id,
+            Some(&run.id),
+            2,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: "synthetic".into(),
+                attachments: Vec::new(),
+            }),
+            Some("synthetic-user-message"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = repository
+        .persist_pending_interruption(
+            &session.id,
+            &run.id,
+            1,
+            &format!("interruption:{}:stale", run.id),
+            &serde_json::json!({ "id": "stale", "status": "pending" }),
+            &serde_json::json!("serialized"),
+        )
+        .await
+        .expect("stale interruption outcome");
+
+    assert!(matches!(outcome, PendingInterruptionPersistence::Rejected));
+    assert_ne!(
+        repository.get_run(&run.id).await.unwrap().status,
+        "waiting_for_user"
+    );
+    assert!(repository
+        .items(&session.id)
+        .await
+        .unwrap()
+        .iter()
+        .all(|item| !matches!(item.payload, AgentItemPayload::Interruption(_))));
 }
 
 #[tokio::test]

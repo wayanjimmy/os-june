@@ -9,6 +9,7 @@ import {
   type AgentRunDto,
   type AgentRuntimeEvent,
   type AgentSessionDto,
+  type ResolveAgentInterruptionRequest,
 } from "./agent-runtime-contract";
 import { stripProjectContext } from "./agent-project-context";
 
@@ -51,6 +52,41 @@ export function createAgentRuntimeProjection(
     items: [...(input.items ?? [])].sort(compareAgentItems),
     lastSequenceByRun: {},
     processedEventIds: new Set(),
+  };
+}
+
+export function resolveAgentRuntimeInterruption(
+  projection: AgentRuntimeProjection,
+  scope: Pick<ResolveAgentInterruptionRequest, "sessionId" | "runId" | "interruptionId">,
+  resolution: ResolveAgentInterruptionRequest["resolution"],
+): AgentRuntimeProjection {
+  const resolvedAt = new Date().toISOString();
+  return {
+    ...projection,
+    items: projection.items.map((item) => {
+      if (
+        item.kind !== "interruption" ||
+        item.interruption.sessionId !== scope.sessionId ||
+        item.interruption.runId !== scope.runId ||
+        item.interruption.id !== scope.interruptionId
+      ) {
+        return item;
+      }
+      const interruption = { ...item.interruption, status: "resolved" as const, resolvedAt };
+      if (interruption.kind === "approval" && resolution.kind === "approval") {
+        return {
+          ...item,
+          interruption: { ...interruption, resolution: resolution.choice },
+        };
+      }
+      if (interruption.kind === "clarification" && resolution.kind === "clarification") {
+        return {
+          ...item,
+          interruption: { ...interruption, answer: resolution.answer },
+        };
+      }
+      return { ...item, interruption };
+    }),
   };
 }
 
@@ -131,7 +167,16 @@ export function applyAgentRuntimeEvent(
     throw new Error(`Unsupported agent runtime protocol version: ${event.protocolVersion}`);
   }
   if (projection.processedEventIds.has(event.eventId)) return projection;
-  if (event.sequence <= (projection.lastSequenceByRun[event.runId] ?? -1)) return projection;
+  const resumedSequenceEpoch =
+    event.method === "run.started" &&
+    event.data.resumed === true &&
+    projection.run?.id === event.runId &&
+    !terminalRunStatuses.has(projection.run.status);
+  if (
+    !resumedSequenceEpoch &&
+    event.sequence <= (projection.lastSequenceByRun[event.runId] ?? -1)
+  )
+    return projection;
 
   const next: AgentRuntimeProjection = {
     ...projection,
@@ -483,6 +528,7 @@ function interruptionToPart(
       type: "clarify",
       id: interruption.id,
       sessionId: interruption.sessionId,
+      runId: interruption.runId,
       question: interruption.question,
       choices: interruption.choices,
       answer: interruption.answer,
@@ -493,6 +539,8 @@ function interruptionToPart(
     return {
       type: "secret",
       id: interruption.id,
+      sessionId: interruption.sessionId,
+      runId: interruption.runId,
       reason: interruption.reason,
       status: interruption.status === "pending" ? "pending" : "resolved",
     };
@@ -501,6 +549,8 @@ function interruptionToPart(
     type: "approval",
     id: interruption.id,
     sessionId: interruption.sessionId,
+    runId: interruption.runId,
+    title: interruption.title,
     command: interruption.command ?? interruption.toolName,
     description: interruption.description || interruption.title,
     allowPermanent: interruption.allowAlways,

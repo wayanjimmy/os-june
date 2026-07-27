@@ -51,6 +51,8 @@ pub struct StartRunRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveInterruptionRequest {
+    pub session_id: String,
+    pub run_id: String,
     pub interruption_id: String,
     pub resolution: Value,
 }
@@ -785,8 +787,16 @@ pub async fn resolve_agent_interruption(
     request: ResolveInterruptionRequest,
 ) -> Result<Value, AppError> {
     let repository = repository(&app).await?;
-    let row = sqlx::query::query("SELECT id, run_id, session_id, payload_json FROM agent_items WHERE kind = 'interruption' AND json_extract(payload_json, '$.id') = ? ORDER BY created_at DESC LIMIT 1")
-        .bind(&request.interruption_id).fetch_one(&repository.pool).await?;
+    let row = sqlx::query::query("SELECT id, run_id, session_id, payload_json FROM agent_items WHERE kind = 'interruption' AND session_id = ? AND run_id = ? AND json_extract(payload_json, '$.id') = ? LIMIT 1")
+        .bind(&request.session_id)
+        .bind(&request.run_id)
+        .bind(&request.interruption_id)
+        .fetch_optional(&repository.pool)
+        .await?
+        .ok_or_else(|| AppError::new(
+            "agent_interruption_expired",
+            "This interruption can no longer be resumed.",
+        ))?;
     use sqlx::row::Row;
     let run_id: String = row.get("run_id");
     let session_id: String = row.get("session_id");
@@ -1643,56 +1653,7 @@ async fn tool_descriptors(
     safety_mode: AgentSafetyMode,
     workspace: &str,
 ) -> Result<Value, AppError> {
-    let mut tools = json!([
-        { "name": "search_june", "description": "Search June notes, transcripts, and dictations.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "list_memories", "description": "Recall durable facts, preferences, and decisions from June's memory store. Pass projectId to include that project's memories.", "parameters": { "type": "object", "properties": { "projectId": { "type": "string" }, "includeGlobal": { "type": "boolean", "default": true }, "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 8 }, "offset": { "type": "integer", "minimum": 0, "default": 0 } }, "required": [], "additionalProperties": false } },
-        { "name": "save_memory", "description": "Save a durable fact, preference, or decision in June's memory store. Pass projectId when it belongs to the current project.", "parameters": { "type": "object", "properties": { "content": { "type": "string", "maxLength": 4000 }, "projectId": { "type": "string" } }, "required": ["content"], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "forget_memory", "description": "Permanently forget one June memory by id when the user asks June to forget it.", "parameters": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "generate_image", "description": "Generate an image from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" } }, "required": ["prompt"], "additionalProperties": false } },
-        { "name": "edit_image", "description": "Edit an image file in the June session workspace and show the result in the conversation.", "parameters": { "type": "object", "properties": { "sourcePath": { "type": "string" }, "instruction": { "type": "string" } }, "required": ["sourcePath", "instruction"], "additionalProperties": false } },
-        { "name": "generate_video", "description": "Generate a short video from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" }, "duration": { "type": "string" }, "aspectRatio": { "type": "string" }, "audio": { "type": "boolean" } }, "required": ["prompt"], "additionalProperties": false } },
-        { "name": "get_obsidian_vault", "description": "Discover the current Obsidian vault selected in June. Re-query for each distinct task. If no current path is returned, do not guess one. A returned path is discovery, not write authorization.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "start_recording", "description": "Start a visible June recording only when the user explicitly asks to begin recording now.", "parameters": { "type": "object", "properties": { "sourceMode": { "type": "string", "enum": ["microphoneOnly", "microphonePlusSystem"] } }, "required": [], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "stop_recording", "description": "Stop the recording currently visible in June.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "recording_status", "description": "Check whether June is currently recording and return the active recording metadata.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "start_session", "description": "Start an attended June Browser use session.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "close_session", "description": "Close an attended June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": false } },
-        { "name": "navigate", "description": "Navigate a June Browser use session to a URL.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "url": { "type": "string" } }, "required": ["session_id", "url"], "additionalProperties": true } },
-        { "name": "snapshot", "description": "Read the visible page and interactive references from a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "screenshot", "description": "Capture a screenshot from a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "click", "description": "Click an interactive reference in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "ref": { "type": "string" } }, "required": ["session_id", "ref"], "additionalProperties": true } },
-        { "name": "fill", "description": "Fill an interactive reference in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "ref": { "type": "string" }, "value": { "type": "string" } }, "required": ["session_id", "ref", "value"], "additionalProperties": true } },
-        { "name": "press", "description": "Press a key in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "key": { "type": "string" } }, "required": ["session_id", "key"], "additionalProperties": true } },
-        { "name": "back", "description": "Navigate back in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "list_tabs", "description": "List tabs owned by a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "open_tab", "description": "Open a task-owned tab in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "url": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
-        { "name": "switch_tab", "description": "Switch the active task-owned tab in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "tab_id": {} }, "required": ["session_id", "tab_id"], "additionalProperties": true } },
-        { "name": "close_tab", "description": "Close a task-owned tab in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "tab_id": {} }, "required": ["session_id", "tab_id"], "additionalProperties": true } },
-        { "name": "accept_shared_tab", "description": "Accept a one-use browser tab share code supplied by the user.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "share_code": { "type": "string" } }, "required": ["session_id", "share_code"], "additionalProperties": true } },
-        { "name": "web_search", "description": "Search the public web.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "web_fetch", "description": "Fetch a public web page.", "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false } },
-        { "name": "list_files", "description": "List files in a directory.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": [], "additionalProperties": false } },
-        { "name": "read_file", "description": "Read a UTF-8 text file.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
-        { "name": "write_file", "description": "Write a UTF-8 text file.", "parameters": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" } }, "required": ["path", "content"], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "patch_file", "description": "Replace one exact text occurrence in a file.", "parameters": { "type": "object", "properties": { "path": { "type": "string" }, "before": { "type": "string" }, "after": { "type": "string" } }, "required": ["path", "before", "after"], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "import_file", "description": "Copy a user file into this session workspace.", "parameters": { "type": "object", "properties": { "sourcePath": { "type": "string" } }, "required": ["sourcePath"], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "preview_file", "description": "Read file metadata and a bounded text preview.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
-        { "name": "search_files", "description": "Search text files.", "parameters": { "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "run_shell", "description": "Run a shell command in the session workspace. Values in secretEnv must be opaque references returned by request_secret.", "parameters": { "type": "object", "properties": { "command": { "type": "string" }, "secretEnv": { "type": "object", "additionalProperties": { "type": "string" } } }, "required": ["command"], "additionalProperties": false }, "requiresApproval": true },
-        { "name": "list_skills", "description": "List available June skills.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "load_skill", "description": "Load instructions for one June skill.", "parameters": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }
-        ,{ "name": "list_routines", "description": "List June routines and their schedules.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } }
-        ,{ "name": "create_routine", "description": "Create a June routine after the user has confirmed its instructions and timing.", "parameters": { "type": "object", "properties": { "name": { "type": "string" }, "prompt": { "type": "string" }, "schedule": { "type": "string", "description": "RFC 3339, every <n>m/h/d, or a five-field cron expression." }, "safetyMode": { "type": "string", "enum": ["sandboxed", "unrestricted"] } }, "required": ["prompt", "schedule", "safetyMode"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "update_routine", "description": "Update an existing June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" }, "name": { "type": "string" }, "prompt": { "type": "string" }, "schedule": { "type": "string" }, "safetyMode": { "type": "string", "enum": ["sandboxed", "unrestricted"] } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "pause_routine", "description": "Pause a June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "resume_routine", "description": "Resume a paused June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "delete_routine", "description": "Delete a June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "request_clarification", "description": "Pause and ask the user a question when their answer is required to continue.", "parameters": { "type": "object", "properties": { "question": { "type": "string" }, "choices": { "type": "array", "items": { "type": "string" } } }, "required": ["question", "choices"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "request_secret", "description": "Securely request a secret from the user. The result is an opaque one-use reference for a safety-controlled tool, never the secret value.", "parameters": { "type": "object", "properties": { "reason": { "type": "string" } }, "required": ["reason"], "additionalProperties": false }, "requiresApproval": true }
-        ,{ "name": "computer_use", "description": "Operate the attended computer-use session through June's permission and approval broker.", "parameters": { "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true }, "requiresApproval": true }
-        ,{ "name": "notion_call", "description": "Call an enabled read-only Notion tool through June's connected account.", "parameters": { "type": "object", "properties": { "toolName": { "type": "string" }, "arguments": { "type": "object" } }, "required": ["toolName", "arguments"], "additionalProperties": false } }
-        ,{ "name": "notion_action", "description": "Call an enabled Notion action through June's approval broker.", "parameters": { "type": "object", "properties": { "toolName": { "type": "string" }, "arguments": { "type": "object" } }, "required": ["toolName", "arguments"], "additionalProperties": false }, "requiresApproval": true }
-    ]);
+    let mut tools = builtin_tool_descriptors();
     let subsystem = crate::agent_mcp::AgentMcpSubsystem::new(
         crate::agent_mcp::AgentMcpRepository::new(repository.pool.clone()),
         crate::agent_mcp::KeychainMcpSecretStore,
@@ -1733,6 +1694,60 @@ async fn tool_descriptors(
         ),
     }
     Ok(tools)
+}
+
+fn builtin_tool_descriptors() -> Value {
+    json!([
+        { "name": "search_june", "description": "Search June notes, transcripts, and dictations.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
+        { "name": "list_memories", "description": "Recall durable facts, preferences, and decisions from June's memory store. Pass projectId to include that project's memories.", "parameters": { "type": "object", "properties": { "projectId": { "type": "string" }, "includeGlobal": { "type": "boolean", "default": true }, "limit": { "type": "integer", "minimum": 1, "maximum": 20, "default": 8 }, "offset": { "type": "integer", "minimum": 0, "default": 0 } }, "required": [], "additionalProperties": false } },
+        { "name": "save_memory", "description": "Save a durable fact, preference, or decision in June's memory store. Pass projectId when it belongs to the current project.", "parameters": { "type": "object", "properties": { "content": { "type": "string", "maxLength": 4000 }, "projectId": { "type": "string" } }, "required": ["content"], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "forget_memory", "description": "Permanently forget one June memory by id when the user asks June to forget it.", "parameters": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "generate_image", "description": "Generate an image from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" } }, "required": ["prompt"], "additionalProperties": false } },
+        { "name": "edit_image", "description": "Edit an image file in the June session workspace and show the result in the conversation.", "parameters": { "type": "object", "properties": { "sourcePath": { "type": "string" }, "instruction": { "type": "string" } }, "required": ["sourcePath", "instruction"], "additionalProperties": false } },
+        { "name": "generate_video", "description": "Generate a short video from a text description and show it in the conversation.", "parameters": { "type": "object", "properties": { "prompt": { "type": "string" }, "duration": { "type": "string" }, "aspectRatio": { "type": "string" }, "audio": { "type": "boolean" } }, "required": ["prompt"], "additionalProperties": false } },
+        { "name": "get_obsidian_vault", "description": "Discover the current Obsidian vault selected in June. Re-query for each distinct task. If no current path is returned, do not guess one. A returned path is discovery, not write authorization.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
+        { "name": "start_recording", "description": "Start a visible June recording only when the user explicitly asks to begin recording now.", "parameters": { "type": "object", "properties": { "sourceMode": { "type": "string", "enum": ["microphoneOnly", "microphonePlusSystem"] } }, "required": [], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "stop_recording", "description": "Stop the recording currently visible in June.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "recording_status", "description": "Check whether June is currently recording and return the active recording metadata.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
+        { "name": "start_session", "description": "Start an attended June Browser use session.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
+        { "name": "close_session", "description": "Close an attended June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": false } },
+        { "name": "navigate", "description": "Navigate a June Browser use session to a URL.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "url": { "type": "string" } }, "required": ["session_id", "url"], "additionalProperties": true } },
+        { "name": "snapshot", "description": "Read the visible page and interactive references from a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
+        { "name": "screenshot", "description": "Capture a screenshot from a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
+        { "name": "click", "description": "Click an interactive reference in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "ref": { "type": "string" } }, "required": ["session_id", "ref"], "additionalProperties": true } },
+        { "name": "fill", "description": "Fill an interactive reference in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "ref": { "type": "string" }, "value": { "type": "string" } }, "required": ["session_id", "ref", "value"], "additionalProperties": true } },
+        { "name": "press", "description": "Press a key in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "key": { "type": "string" } }, "required": ["session_id", "key"], "additionalProperties": true } },
+        { "name": "back", "description": "Navigate back in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
+        { "name": "list_tabs", "description": "List tabs owned by a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
+        { "name": "open_tab", "description": "Open a task-owned tab in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "url": { "type": "string" } }, "required": ["session_id"], "additionalProperties": true } },
+        { "name": "switch_tab", "description": "Switch the active task-owned tab in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "tab_id": {} }, "required": ["session_id", "tab_id"], "additionalProperties": true } },
+        { "name": "close_tab", "description": "Close a task-owned tab in a June Browser use session.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "tab_id": {} }, "required": ["session_id", "tab_id"], "additionalProperties": true } },
+        { "name": "accept_shared_tab", "description": "Accept a one-use browser tab share code supplied by the user.", "parameters": { "type": "object", "properties": { "session_id": { "type": "string" }, "share_code": { "type": "string" } }, "required": ["session_id", "share_code"], "additionalProperties": true } },
+        { "name": "web_search", "description": "Search the public web.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
+        { "name": "web_fetch", "description": "Fetch a public web page.", "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false } },
+        { "name": "list_files", "description": "List files in a directory.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": [], "additionalProperties": false } },
+        { "name": "read_file", "description": "Read a UTF-8 text file with its exact-byte revision and line-ending style.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
+        { "name": "write_file", "description": "Create a new UTF-8 text file. This fails if the path already exists; use patch_file for a focused edit to an existing file.", "parameters": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" } }, "required": ["path", "content"], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "patch_file", "description": "Edit an existing UTF-8 text file by replacing exactly one unique occurrence. Reread and make a fresh smaller patch if the target is not unique.", "parameters": { "type": "object", "properties": { "path": { "type": "string" }, "before": { "type": "string" }, "after": { "type": "string" } }, "required": ["path", "before", "after"], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "replace_file", "description": "Replace all contents of an existing UTF-8 text file only when a complete rewrite is intended and the exact expectedRevision from a fresh read_file is still current. This is not a fallback for a failed patch.", "parameters": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" }, "expectedRevision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }, "required": ["path", "content", "expectedRevision"], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "import_file", "description": "Copy a user file into this session workspace.", "parameters": { "type": "object", "properties": { "sourcePath": { "type": "string" } }, "required": ["sourcePath"], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "preview_file", "description": "Read file metadata and a bounded text preview.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
+        { "name": "search_files", "description": "Search text files.", "parameters": { "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
+        { "name": "run_shell", "description": "Run a shell command in the session workspace. Values in secretEnv must be opaque references returned by request_secret.", "parameters": { "type": "object", "properties": { "command": { "type": "string" }, "secretEnv": { "type": "object", "additionalProperties": { "type": "string" } } }, "required": ["command"], "additionalProperties": false }, "requiresApproval": true },
+        { "name": "list_skills", "description": "List available June skills.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
+        { "name": "load_skill", "description": "Load instructions for one June skill.", "parameters": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }
+        ,{ "name": "list_routines", "description": "List June routines and their schedules.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } }
+        ,{ "name": "create_routine", "description": "Create a June routine after the user has confirmed its instructions and timing.", "parameters": { "type": "object", "properties": { "name": { "type": "string" }, "prompt": { "type": "string" }, "schedule": { "type": "string", "description": "RFC 3339, every <n>m/h/d, or a five-field cron expression." }, "safetyMode": { "type": "string", "enum": ["sandboxed", "unrestricted"] } }, "required": ["prompt", "schedule", "safetyMode"], "additionalProperties": false }, "requiresApproval": true }
+        ,{ "name": "update_routine", "description": "Update an existing June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" }, "name": { "type": "string" }, "prompt": { "type": "string" }, "schedule": { "type": "string" }, "safetyMode": { "type": "string", "enum": ["sandboxed", "unrestricted"] } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
+        ,{ "name": "pause_routine", "description": "Pause a June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
+        ,{ "name": "resume_routine", "description": "Resume a paused June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
+        ,{ "name": "delete_routine", "description": "Delete a June routine.", "parameters": { "type": "object", "properties": { "routineId": { "type": "string" } }, "required": ["routineId"], "additionalProperties": false }, "requiresApproval": true }
+        ,{ "name": "request_clarification", "description": "Pause and ask the user a question when their answer is required to continue.", "parameters": { "type": "object", "properties": { "question": { "type": "string" }, "choices": { "type": "array", "items": { "type": "string" } } }, "required": ["question", "choices"], "additionalProperties": false }, "requiresApproval": true }
+        ,{ "name": "request_secret", "description": "Securely request a secret from the user. The result is an opaque one-use reference for a safety-controlled tool, never the secret value.", "parameters": { "type": "object", "properties": { "reason": { "type": "string" } }, "required": ["reason"], "additionalProperties": false }, "requiresApproval": true }
+        ,{ "name": "computer_use", "description": "Operate the attended computer-use session through June's permission and approval broker.", "parameters": { "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true }, "requiresApproval": true }
+        ,{ "name": "notion_call", "description": "Call an enabled read-only Notion tool through June's connected account.", "parameters": { "type": "object", "properties": { "toolName": { "type": "string" }, "arguments": { "type": "object" } }, "required": ["toolName", "arguments"], "additionalProperties": false } }
+        ,{ "name": "notion_action", "description": "Call an enabled Notion action through June's approval broker.", "parameters": { "type": "object", "properties": { "toolName": { "type": "string" }, "arguments": { "type": "object" } }, "required": ["toolName", "arguments"], "additionalProperties": false }, "requiresApproval": true }
+    ])
 }
 
 fn history_item(item: AgentItemDto) -> Option<Value> {
@@ -2139,6 +2154,45 @@ fn attachment_mime_type(path: &std::path::Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_tool_descriptors_separate_create_patch_and_replace_contracts() {
+        let tools = builtin_tool_descriptors();
+        let descriptor = |name: &str| {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap()
+        };
+
+        let write = descriptor("write_file");
+        assert_eq!(write["requiresApproval"], true);
+        assert!(write["description"].as_str().unwrap().contains("new"));
+        assert!(write["parameters"]["properties"]
+            .get("expectedRevision")
+            .is_none());
+
+        let patch = descriptor("patch_file");
+        assert_eq!(patch["requiresApproval"], true);
+        assert!(patch["description"]
+            .as_str()
+            .unwrap()
+            .contains("exactly one"));
+
+        let replacement = descriptor("replace_file");
+        assert_eq!(replacement["requiresApproval"], true);
+        assert_eq!(
+            replacement["parameters"]["required"],
+            json!(["path", "content", "expectedRevision"])
+        );
+        assert_eq!(replacement["parameters"]["additionalProperties"], false);
+        assert!(replacement["description"]
+            .as_str()
+            .unwrap()
+            .contains("not a fallback"));
+    }
 
     #[test]
     fn sandboxed_runs_ignore_caller_controlled_workspace_paths() {

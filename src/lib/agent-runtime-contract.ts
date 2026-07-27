@@ -198,8 +198,9 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
         eventId: string;
         method: "run.started";
         data: {
-          startedAt: string;
+          startedAt?: string;
           model: string;
+          resumed?: boolean;
           removedItemIds?: string[];
           contextSummary?: AgentContextSummaryItemDto;
         };
@@ -283,6 +284,8 @@ export type StartAgentRunRequest = {
 };
 
 export type ResolveAgentInterruptionRequest = {
+  sessionId: string;
+  runId: string;
   interruptionId: string;
   resolution:
     | { kind: "approval"; choice: "once" | "session" | "always" | "deny" }

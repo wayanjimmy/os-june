@@ -2,9 +2,11 @@ use super::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{query::query, row::Row};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
@@ -176,6 +178,7 @@ pub async fn dispatch_tool(
         "read_file" => read_file(context, &arguments).await,
         "write_file" => write_file(context, &arguments).await,
         "patch_file" => patch_file(context, &arguments).await,
+        "replace_file" => replace_file(context, &arguments).await,
         "import_file" => import_file(context, &arguments).await,
         "preview_file" => preview_file(context, &arguments).await,
         "search_files" => search_files(context, &arguments).await,
@@ -782,39 +785,294 @@ async fn read_file(context: &ToolContext, arguments: &Value) -> Result<Value, Ap
             "File exceeds the 1 MB read limit.",
         ));
     }
+    let revision = file_revision(&bytes);
+    let line_ending = detect_line_ending(&bytes).as_str();
     let content = String::from_utf8(bytes)
         .map_err(|_| AppError::new("agent_file_not_text", "File is not UTF-8 text."))?;
-    Ok(json!({ "path": path, "content": content }))
+    Ok(json!({ "path": path, "content": content, "revision": revision, "lineEnding": line_ending }))
 }
 
 async fn write_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
     let path = resolve_write_path(context, required_string(arguments, "path")?, false)?;
-    let content = required_string(arguments, "content")?;
+    let content = string_argument(arguments, "content")?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
     }
-    tokio::fs::write(&path, content).await.map_err(io_error)?;
-    record_artifact(context, &path, "created", None).await?;
-    Ok(json!({ "path": path, "sizeBytes": content.len() }))
+    create_text_file(&path, content.as_bytes())?;
+    let artifact_recorded = record_artifact_best_effort(context, &path, "created").await;
+    Ok(
+        json!({ "path": path, "sizeBytes": content.len(), "revision": file_revision(content.as_bytes()), "artifactRecorded": artifact_recorded }),
+    )
 }
 
 async fn patch_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
     let path = resolve_write_path(context, required_string(arguments, "path")?, true)?;
     let before = required_string(arguments, "before")?;
-    let after = required_string(arguments, "after")?;
-    let content = tokio::fs::read_to_string(&path).await.map_err(io_error)?;
-    let occurrences = content.matches(before).count();
+    let after = string_argument(arguments, "after")?;
+    let result = patch_text_file(&path, before, after)?;
+    let artifact_recorded = record_artifact_best_effort(context, &path, "updated").await;
+    Ok(
+        json!({ "path": path, "updated": true, "sizeBytes": result.size_bytes, "revision": result.revision, "artifactRecorded": artifact_recorded }),
+    )
+}
+
+async fn replace_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
+    let path = resolve_write_path(context, required_string(arguments, "path")?, true)?;
+    let content = string_argument(arguments, "content")?;
+    let expected_revision = required_string(arguments, "expectedRevision")?;
+    let result = replace_text_file(&path, content, expected_revision)?;
+    let artifact_recorded = record_artifact_best_effort(context, &path, "updated").await;
+    Ok(
+        json!({ "path": path, "updated": true, "sizeBytes": result.size_bytes, "revision": result.revision, "artifactRecorded": artifact_recorded }),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineEnding {
+    Lf,
+    Crlf,
+    Mixed,
+    None,
+}
+
+impl LineEnding {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "lf",
+            Self::Crlf => "crlf",
+            Self::Mixed => "mixed",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MutationResult {
+    size_bytes: usize,
+    revision: String,
+}
+
+fn file_revision(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn valid_revision(revision: &str) -> bool {
+    revision.len() == 71
+        && revision.starts_with("sha256:")
+        && revision[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn detect_line_ending(bytes: &[u8]) -> LineEnding {
+    let mut lf = false;
+    let mut crlf = false;
+    let mut standalone_cr = false;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            if index > 0 && bytes[index - 1] == b'\r' {
+                crlf = true;
+            } else {
+                lf = true;
+            }
+        } else if *byte == b'\r' && bytes.get(index + 1) != Some(&b'\n') {
+            standalone_cr = true;
+        }
+    }
+    match (lf, crlf, standalone_cr) {
+        (false, false, false) => LineEnding::None,
+        (true, false, false) => LineEnding::Lf,
+        (false, true, false) => LineEnding::Crlf,
+        _ => LineEnding::Mixed,
+    }
+}
+
+fn create_text_file(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::new("agent_file_write_failed", "File has no parent directory."))?;
+    let temp_path = parent.join(format!(".june-create-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(io_error)?;
+    let result = file
+        .write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(io_error)
+        .and_then(|()| {
+            drop(file);
+            crate::filesystem::publish_new_file(&temp_path, path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    || path.try_exists().unwrap_or(false)
+                {
+                    AppError::new("agent_file_exists", "The file already exists.")
+                } else {
+                    io_error(error)
+                }
+            })
+        });
+    if temp_path.exists() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn normalize_newlines(content: &str, line_ending: LineEnding) -> String {
+    match line_ending {
+        LineEnding::Lf => content.replace("\r\n", "\n"),
+        LineEnding::Crlf => content.replace("\r\n", "\n").replace('\n', "\r\n"),
+        LineEnding::Mixed | LineEnding::None => content.to_string(),
+    }
+}
+
+fn replace_text_file(
+    path: &Path,
+    content: &str,
+    expected_revision: &str,
+) -> Result<MutationResult, AppError> {
+    if !valid_revision(expected_revision) {
+        return Err(AppError::new(
+            "agent_file_revision_invalid",
+            "expectedRevision must be an exact sha256 revision returned by read_file.",
+        ));
+    }
+    let original = fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::new("agent_file_not_found", "The file does not exist.")
+        } else {
+            io_error(error)
+        }
+    })?;
+    if file_revision(&original) != expected_revision {
+        return Err(AppError::new(
+            "agent_file_revision_conflict",
+            "The file changed since June read it. Read it again before replacing it.",
+        ));
+    }
+    std::str::from_utf8(&original)
+        .map_err(|_| AppError::new("agent_file_not_text", "File is not UTF-8 text."))?;
+    let line_ending = detect_line_ending(&original);
+    if line_ending == LineEnding::Mixed {
+        return Err(AppError::new(
+            "agent_file_line_endings_mixed",
+            "The file has mixed line endings and cannot be safely replaced.",
+        ));
+    }
+    let has_bom = original.starts_with(&[0xef, 0xbb, 0xbf]);
+    let normalized = normalize_newlines(content.trim_start_matches('\u{feff}'), line_ending);
+    let mut replacement = Vec::with_capacity(normalized.len() + usize::from(has_bom) * 3);
+    if has_bom {
+        replacement.extend_from_slice(&[0xef, 0xbb, 0xbf]);
+    }
+    replacement.extend_from_slice(normalized.as_bytes());
+    stage_and_replace(path, &replacement, expected_revision)
+}
+
+fn patch_text_file(path: &Path, before: &str, after: &str) -> Result<MutationResult, AppError> {
+    let original = fs::read(path).map_err(io_error)?;
+    let original_revision = file_revision(&original);
+    let has_bom = original.starts_with(&[0xef, 0xbb, 0xbf]);
+    let body = if has_bom { &original[3..] } else { &original };
+    let content = std::str::from_utf8(body)
+        .map_err(|_| AppError::new("agent_file_not_text", "File is not UTF-8 text."))?;
+    let line_ending = detect_line_ending(&original);
+    let before = normalize_newlines(before.trim_start_matches('\u{feff}'), line_ending);
+    let after = normalize_newlines(after.trim_start_matches('\u{feff}'), line_ending);
+    let occurrences = content.matches(&before).count();
     if occurrences != 1 {
         return Err(AppError::new(
             "agent_patch_ambiguous",
-            format!("Patch target must occur exactly once, but occurred {occurrences} times."),
+            format!("Patch target occurred {occurrences} times. Reread the file and use a fresh, smaller exact patch that occurs once."),
         ));
     }
-    tokio::fs::write(&path, content.replacen(before, after, 1))
-        .await
-        .map_err(io_error)?;
-    record_artifact(context, &path, "updated", None).await?;
-    Ok(json!({ "path": path, "updated": true }))
+    let replaced = content.replacen(&before, &after, 1);
+    let mut replacement = Vec::with_capacity(replaced.len() + usize::from(has_bom) * 3);
+    if has_bom {
+        replacement.extend_from_slice(&[0xef, 0xbb, 0xbf]);
+    }
+    replacement.extend_from_slice(replaced.as_bytes());
+    stage_and_replace(path, &replacement, &original_revision)
+}
+
+fn stage_and_replace(
+    path: &Path,
+    replacement: &[u8],
+    expected_revision: &str,
+) -> Result<MutationResult, AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::new("agent_file_write_failed", "File has no parent directory."))?;
+    let permissions = fs::metadata(path).map_err(io_error)?.permissions();
+    let temp_path = parent.join(format!(".june-write-{}.tmp", uuid::Uuid::new_v4()));
+    let backup_path = parent.join(format!(".june-backup-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut staged = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(io_error)?;
+        staged.write_all(replacement).map_err(io_error)?;
+        staged.set_permissions(permissions).map_err(io_error)?;
+        staged.sync_all().map_err(io_error)?;
+        drop(staged);
+        let current = fs::read(path).map_err(io_error)?;
+        if file_revision(&current) != expected_revision {
+            return Err(AppError::new(
+                "agent_file_revision_conflict",
+                "The file changed before the edit could be applied. Read it again and retry.",
+            ));
+        }
+        match crate::filesystem::replace_existing_file(&temp_path, path, &backup_path) {
+            crate::filesystem::ReplaceExistingFileOutcome::Replaced => {}
+            crate::filesystem::ReplaceExistingFileOutcome::RecoveryRequired(error) => {
+                return Err(AppError {
+                    code: "agent_file_recovery_required".into(),
+                    message: format!(
+                        "Windows could not finish replacing the file ({error}). Recovery copies were preserved. Target: {}. Staged replacement: {}. Backup: {}.",
+                        path.display(),
+                        temp_path.display(),
+                        backup_path.display(),
+                    ),
+                    details: Some(json!({
+                        "targetPath": path,
+                        "stagedPath": temp_path,
+                        "backupPath": backup_path,
+                    })),
+                });
+            }
+            crate::filesystem::ReplaceExistingFileOutcome::NotReplaced(error) => {
+                return Err(io_error(error));
+            }
+        }
+        Ok(MutationResult {
+            size_bytes: replacement.len(),
+            revision: file_revision(replacement),
+        })
+    })();
+    if result
+        .as_ref()
+        .is_err_and(|error| error.code != "agent_file_recovery_required")
+    {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+async fn record_artifact_best_effort(context: &ToolContext, path: &Path, action: &str) -> bool {
+    match record_artifact(context, path, action, None).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                error_code = %error.code,
+                run_id = %context.run_id,
+                action,
+                "file mutation succeeded but artifact recording failed"
+            );
+            false
+        }
+    }
 }
 
 async fn import_file(context: &ToolContext, arguments: &Value) -> Result<Value, AppError> {
@@ -1327,6 +1585,14 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, AppError>
             )
         })
 }
+fn string_argument<'a>(value: &'a Value, key: &str) -> Result<&'a str, AppError> {
+    value.get(key).and_then(Value::as_str).ok_or_else(|| {
+        AppError::new(
+            "agent_tool_arguments_invalid",
+            format!("{key} is required."),
+        )
+    })
+}
 fn truncate(mut value: String) -> String {
     if value.len() > MAX_TOOL_OUTPUT_BYTES {
         value.truncate(MAX_TOOL_OUTPUT_BYTES);
@@ -1582,5 +1848,140 @@ mod tests {
         assert!(result.matches.contains("second.txt:2:needle two"));
         assert!(!result.matches.contains("binary.bin"));
         assert!(!result.matches.contains("hidden.txt"));
+    }
+
+    #[test]
+    fn exact_crlf_revision_and_metadata_include_all_bytes() {
+        let bytes = b"\xef\xbb\xbffirst\r\nsecond\r\n";
+        assert_eq!(detect_line_ending(bytes), LineEnding::Crlf);
+        assert_eq!(
+            file_revision(bytes),
+            "sha256:7d00111004b3faa8a6cb23f25bf6fecddb5e885636e3c3b6c8ba8a4d8c21bcf1"
+        );
+    }
+
+    #[test]
+    fn create_only_refuses_existing_file_without_changing_it_and_creates_new_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let existing = directory.path().join("existing.md");
+        fs::write(&existing, b"original").unwrap();
+        let error = create_text_file(&existing, b"replacement").unwrap_err();
+        assert_eq!(error.code, "agent_file_exists");
+        assert_eq!(fs::read(&existing).unwrap(), b"original");
+
+        let created = directory.path().join("created.md");
+        create_text_file(&created, b"new").unwrap();
+        assert_eq!(fs::read(created).unwrap(), b"new");
+    }
+
+    #[test]
+    fn replacement_rejects_missing_invalid_and_stale_files_and_succeeds_when_current() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        let missing = replace_text_file(
+            &path,
+            "new",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, "agent_file_not_found");
+
+        fs::write(&path, b"old\n").unwrap();
+        let invalid = replace_text_file(&path, "new", "bad").unwrap_err();
+        assert_eq!(invalid.code, "agent_file_revision_invalid");
+        let stale = replace_text_file(
+            &path,
+            "new",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap_err();
+        assert_eq!(stale.code, "agent_file_revision_conflict");
+        assert_eq!(fs::read(&path).unwrap(), b"old\n");
+
+        let revision = file_revision(b"old\n");
+        let result = replace_text_file(&path, "new\n", &revision).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new\n");
+        assert_eq!(result.revision, file_revision(b"new\n"));
+    }
+
+    #[test]
+    fn replacement_preserves_crlf_bom_and_mixed_files_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let crlf = directory.path().join("crlf.md");
+        let original = b"\xef\xbb\xbfold\r\ntext\r\n";
+        fs::write(&crlf, original).unwrap();
+        replace_text_file(&crlf, "new\ntext\n", &file_revision(original)).unwrap();
+        assert_eq!(fs::read(&crlf).unwrap(), b"\xef\xbb\xbfnew\r\ntext\r\n");
+
+        let mixed = directory.path().join("mixed.md");
+        let original = b"one\r\ntwo\n";
+        fs::write(&mixed, original).unwrap();
+        let error = replace_text_file(&mixed, "changed", &file_revision(original)).unwrap_err();
+        assert_eq!(error.code, "agent_file_line_endings_mixed");
+        assert_eq!(fs::read(mixed).unwrap(), original);
+    }
+
+    #[test]
+    fn staged_revision_conflict_preserves_external_edit_and_removes_temp_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        fs::write(&path, b"external edit\n").unwrap();
+
+        let error = stage_and_replace(
+            &path,
+            b"stale replacement\n",
+            &file_revision(b"older content\n"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "agent_file_revision_conflict");
+        assert_eq!(fs::read(&path).unwrap(), b"external edit\n");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn patch_adapts_lf_anchors_to_crlf_and_ambiguous_patches_do_not_mutate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        fs::write(&path, b"one\r\ntwo\r\nthree\r\n").unwrap();
+        patch_text_file(&path, "one\ntwo", "one\nchanged").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"one\r\nchanged\r\nthree\r\n");
+
+        for before in ["missing", "one"] {
+            let original = if before == "one" {
+                b"one\none\n".as_slice()
+            } else {
+                b"one\n".as_slice()
+            };
+            fs::write(&path, original).unwrap();
+            let error = patch_text_file(&path, before, "changed").unwrap_err();
+            assert_eq!(error.code, "agent_patch_ambiguous");
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert!(error.message.contains("Reread"));
+            assert!(!error.message.contains("replace"));
+        }
+    }
+
+    #[test]
+    fn patch_preserves_bom_and_accepts_an_empty_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        fs::write(&path, b"\xef\xbb\xbfone\r\ntwo\r\n").unwrap();
+
+        patch_text_file(&path, "\u{feff}one\ntwo\n", "").unwrap();
+
+        assert_eq!(fs::read(path).unwrap(), b"\xef\xbb\xbf");
+    }
+
+    #[test]
+    fn patch_uses_raw_exact_matching_for_mixed_line_endings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        let original = b"one\r\ntwo\nthree\r\n";
+        fs::write(&path, original).unwrap();
+
+        patch_text_file(&path, "one\r\ntwo\n", "one\r\nchanged\n").unwrap();
+
+        assert_eq!(fs::read(path).unwrap(), b"one\r\nchanged\nthree\r\n");
     }
 }
