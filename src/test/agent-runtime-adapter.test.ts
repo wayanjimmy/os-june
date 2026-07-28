@@ -155,6 +155,72 @@ describe("agent runtime adapter", () => {
     ]);
   });
 
+  it("scopes repeated provider interruption ids to their runs", () => {
+    const projection = createAgentRuntimeProjection({
+      run: {
+        id: "run-2",
+        sessionId: "session-1",
+        status: "running",
+        model: "auto",
+      },
+      items: [
+        {
+          id: "interruption:run-1:provider-reused-id",
+          sessionId: "session-1",
+          runId: "run-1",
+          sequence: 2,
+          createdAt: "2026-07-22T12:00:00Z",
+          kind: "interruption",
+          interruption: {
+            id: "provider-reused-id",
+            sessionId: "session-1",
+            runId: "run-1",
+            status: "resolved",
+            createdAt: "2026-07-22T12:00:00Z",
+            kind: "approval",
+            toolName: "write_file",
+            title: "Create new file?",
+            description: "Review the operation.",
+            allowAlways: false,
+          },
+        },
+      ],
+    });
+    const requested: AgentRuntimeEvent = {
+      protocolVersion: AGENT_RUNTIME_PROTOCOL_VERSION,
+      sessionId: "session-1",
+      runId: "run-2",
+      eventId: "run-2-interruption",
+      sequence: 3,
+      method: "interruption.requested",
+      data: {
+        itemId: "interruption:run-2:provider-reused-id",
+        interruption: {
+          id: "provider-reused-id",
+          sessionId: "session-1",
+          runId: "run-2",
+          status: "pending",
+          createdAt: "2026-07-22T12:01:00Z",
+          kind: "approval",
+          toolName: "write_file",
+          title: "Create new file?",
+          description: "Review the operation.",
+          allowAlways: false,
+        },
+      },
+    };
+
+    const withBothRuns = applyAgentRuntimeEvent(projection, requested);
+    const replayed = applyAgentRuntimeEvent(withBothRuns, {
+      ...requested,
+      eventId: "run-2-interruption-replay",
+      sequence: 4,
+    });
+
+    expect(withBothRuns.items.map((item) => item.runId)).toEqual(["run-1", "run-2"]);
+    expect(replayed.items.map((item) => item.runId)).toEqual(["run-1", "run-2"]);
+  });
+
   it("does not apply lifecycle state from an older run to the current run", () => {
     const current = createAgentRuntimeProjection({
       run: {

@@ -1012,6 +1012,12 @@ fn stage_and_replace(
         .ok_or_else(|| AppError::new("agent_file_write_failed", "File has no parent directory."))?;
     let source = File::open(path).map_err(io_error)?;
     let permissions = source.metadata().map_err(io_error)?.permissions();
+    if permissions.readonly() {
+        return Err(AppError::new(
+            "agent_file_read_only",
+            "The file is read-only and cannot be changed.",
+        ));
+    }
     let temp_path = parent.join(format!(".june-write-{}.tmp", uuid::Uuid::new_v4()));
     let backup_path = parent.join(format!(".june-backup-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -1020,9 +1026,10 @@ fn stage_and_replace(
             .create_new(true)
             .open(&temp_path)
             .map_err(io_error)?;
-        staged.write_all(replacement).map_err(io_error)?;
         staged.set_permissions(permissions).map_err(io_error)?;
-        crate::filesystem::preserve_replacement_metadata(&source, &staged).map_err(io_error)?;
+        crate::filesystem::preserve_replacement_metadata(&source, path, &staged, &temp_path)
+            .map_err(io_error)?;
+        staged.write_all(replacement).map_err(io_error)?;
         staged.sync_all().map_err(io_error)?;
         drop(staged);
         let current = fs::read(path).map_err(io_error)?;
@@ -2048,6 +2055,26 @@ mod tests {
         assert_eq!(error.code, "agent_file_revision_conflict");
         assert_eq!(fs::read(&path).unwrap(), b"external edit\n");
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn replacement_rejects_read_only_files_before_staging_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        fs::write(&path, b"original\n").unwrap();
+        let original_permissions = fs::metadata(&path).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let error =
+            stage_and_replace(&path, b"replacement\n", &file_revision(b"original\n")).unwrap_err();
+
+        assert_eq!(error.code, "agent_file_read_only");
+        assert_eq!(fs::read(&path).unwrap(), b"original\n");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+
+        fs::set_permissions(path, original_permissions).unwrap();
     }
 
     #[test]

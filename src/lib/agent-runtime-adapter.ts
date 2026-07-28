@@ -281,7 +281,10 @@ export function applyAgentRuntimeEvent(
       next.items = upsertItem(
         next.items.filter(
           (item) =>
-            item.kind !== "interruption" || item.interruption.id !== event.data.interruption.id,
+            item.kind !== "interruption" ||
+            item.sessionId !== event.sessionId ||
+            item.runId !== event.runId ||
+            item.interruption.id !== event.data.interruption.id,
         ),
         {
           id: event.data.itemId,

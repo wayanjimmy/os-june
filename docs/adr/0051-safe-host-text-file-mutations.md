@@ -46,7 +46,8 @@ style. They stage a new file in the target directory, sync it, reread and check
 the target's original revision immediately before using the platform-aware
 atomic replacement helper. Windows replacement merges the target's ACLs and
 metadata; macOS staging uses `fcopyfile` to preserve copyable target ACLs and
-extended attributes. Temporary files are removed after ordinary failures.
+extended attributes. Read-only targets fail before any replacement is staged.
+Temporary files are removed after ordinary failures.
 On an ambiguous Windows partial-replacement error, staged and backup recovery
 files remain beside the target rather than risking deletion of the only intact
 copy. Artifact bookkeeping runs only after a successful mutation and is

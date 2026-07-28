@@ -10,7 +10,12 @@ pub(crate) enum ReplaceExistingFileOutcome {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn preserve_replacement_metadata(source: &File, staged: &File) -> io::Result<()> {
+pub(crate) fn preserve_replacement_metadata(
+    source: &File,
+    _source_path: &Path,
+    staged: &File,
+    _staged_path: &Path,
+) -> io::Result<()> {
     // Copy ACLs and extended attributes without copying the data fork or file
     // timestamps. The staged replacement owns those values.
     let result = unsafe {
@@ -28,10 +33,79 @@ pub(crate) fn preserve_replacement_metadata(source: &File, staged: &File) -> io:
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 pub(crate) fn preserve_replacement_metadata(
     _source: &fs::File,
+    source_path: &Path,
     _staged: &fs::File,
+    staged_path: &Path,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Security::{
+        GetFileSecurityW, SetFileSecurityW, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+
+    let source: Vec<u16> = source_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let staged: Vec<u16> = staged_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut required = 0;
+    unsafe {
+        GetFileSecurityW(
+            PCWSTR(source.as_ptr()),
+            DACL_SECURITY_INFORMATION.0,
+            None,
+            0,
+            &mut required,
+        );
+    }
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let word_count = (required as usize).div_ceil(word_size);
+    let mut descriptor_storage = vec![0_usize; word_count];
+    let descriptor = PSECURITY_DESCRIPTOR(descriptor_storage.as_mut_ptr().cast());
+    let descriptor_capacity = (descriptor_storage.len() * word_size) as u32;
+    let read = unsafe {
+        GetFileSecurityW(
+            PCWSTR(source.as_ptr()),
+            DACL_SECURITY_INFORMATION.0,
+            Some(descriptor),
+            descriptor_capacity,
+            &mut required,
+        )
+    };
+    if !read.as_bool() {
+        return Err(io::Error::last_os_error());
+    }
+    let applied = unsafe {
+        SetFileSecurityW(
+            PCWSTR(staged.as_ptr()),
+            DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    if applied.as_bool() {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
+pub(crate) fn preserve_replacement_metadata(
+    _source: &fs::File,
+    _source_path: &Path,
+    _staged: &fs::File,
+    _staged_path: &Path,
 ) -> io::Result<()> {
     Ok(())
 }
