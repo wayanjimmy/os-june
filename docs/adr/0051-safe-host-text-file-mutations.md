@@ -13,7 +13,7 @@ editing, could replace concurrent user changes, and could leave a partial file
 after an interrupted write. Obsidian notes also commonly use CRLF or a UTF-8
 BOM that a text edit must not silently normalize away.
 
-ADR-0042's read and mutation path policy remains binding. This decision changes
+ADR-0050's read and mutation path policy remains binding. This decision changes
 mutation semantics within the paths that policy permits.
 
 ## Decision

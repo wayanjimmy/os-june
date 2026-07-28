@@ -7,7 +7,7 @@ date: 2026-07-27
 
 ## Context
 
-ADR-0011 introduced read-only app resources for selected skills because June's
+ADR-0011 established read-only app resources for selected skills because June's
 then-pinned Hermes runtime did not contain them. ADR-0034 used that mechanism
 for the distinct `june-obsidian` skill, which carries the task-time discovery,
 safety, and Markdown behavior for the Obsidian plugin.

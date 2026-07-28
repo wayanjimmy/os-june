@@ -7,7 +7,7 @@ date: 2026-07-27
 
 ## Context
 
-ADR-0038 moved machine access into Rust-owned host tools and stated that
+ADR-0038 placed machine access in Rust-owned host tools and stated that
 Windows file tools enforce workspace roots. The initial implementation applied
 that rule to reads and writes alike. This contradicted the Runtime mode promise
 that Sandboxed sessions can read user files but can only change their own

@@ -66,7 +66,7 @@ export class RuntimeService {
         return this.cancel(request.sessionId, request.runId);
       case "history.compact":
         this.requireInitialized();
-        return this.compact(request.params);
+        return this.compact(request.sessionId, request.runId, request.params);
       case "runtime.shutdown":
         return this.shutdown();
       default:
@@ -88,18 +88,50 @@ export class RuntimeService {
     };
   }
 
-  private async start(sessionId: string, runId: string, params: JsonObject): Promise<JsonValue> {
+  private start(sessionId: string, runId: string, params: JsonObject): JsonValue {
     this.assertRunAvailable(sessionId, runId);
     const parsed = params as RunStartParams;
     validateRunStart(parsed);
+    const controller = new AbortController();
+    const active: ActiveRun = { controller, steering: [], steeringIds: new Set() };
+    this.activeRuns.set(runKey(sessionId, runId), active);
+    setImmediate(() => {
+      void this.settle(
+        sessionId,
+        runId,
+        this.startAcceptedRun(sessionId, runId, parsed, active),
+      );
+    });
+    return { accepted: true };
+  }
+
+  private async startAcceptedRun(
+    sessionId: string,
+    runId: string,
+    parsed: RunStartParams,
+    active: ActiveRun,
+  ): Promise<EngineResult> {
+    throwIfAborted(active.controller.signal);
     const compaction = await compactHistory({
       history: parsed.history,
       contextWindow: parsed.contextWindow,
       ...(parsed.maxOutputTokens === undefined ? {} : { maxOutputTokens: parsed.maxOutputTokens }),
+      onFallback: (error) =>
+        this.logCompactionFallback(error, sessionId, runId),
+      summarize: (history) =>
+        this.engine.summarize({
+          sessionId,
+          runId,
+          model: parsed.model,
+          history,
+          contextWindow: parsed.contextWindow,
+          ...(parsed.maxOutputTokens === undefined
+            ? {}
+            : { maxOutputTokens: parsed.maxOutputTokens }),
+          signal: active.controller.signal,
+        }),
     });
-    const controller = new AbortController();
-    const active: ActiveRun = { controller, steering: [], steeringIds: new Set() };
-    this.activeRuns.set(runKey(sessionId, runId), active);
+    throwIfAborted(active.controller.signal);
     this.emit("run.started", {
       model: parsed.model,
       compacted: compaction.compacted,
@@ -110,19 +142,14 @@ export class RuntimeService {
         : { contextSummary: compaction.summary as unknown as JsonValue }),
     }, sessionId, runId);
     const runParams: RunStartParams = { ...parsed, history: compaction.history };
-    void this.settle(
+    return this.engine.start({
       sessionId,
       runId,
-      this.engine.start({
-        sessionId,
-        runId,
-        params: runParams,
-        signal: controller.signal,
-        emit: (event) => this.forwardEngineEvent(event, sessionId, runId),
-        takeSteering: () => active.steering.splice(0),
-      }),
-    );
-    return { accepted: true, compacted: compaction.compacted };
+      params: runParams,
+      signal: active.controller.signal,
+      emit: (event) => this.forwardEngineEvent(event, sessionId, runId),
+      takeSteering: () => active.steering.splice(0),
+    });
   }
 
   private resume(sessionId: string, runId: string, params: JsonObject): JsonValue {
@@ -173,18 +200,62 @@ export class RuntimeService {
     return { cancelled: true };
   }
 
-  private async compact(params: JsonObject): Promise<JsonValue> {
+  private async compact(
+    sessionId: string,
+    runId: string,
+    params: JsonObject,
+  ): Promise<JsonValue> {
     const history = params.history;
     if (!Array.isArray(history)) {
       throw new ProtocolError(-32602, "history.compact requires history");
     }
+    const model = typeof params.model === "string" ? params.model.trim() : "";
+    const maxOutputTokens =
+      typeof params.maxOutputTokens === "number" ? params.maxOutputTokens : undefined;
     const result = await compactHistory({
       history: history as RunStartParams["history"],
       contextWindow:
         typeof params.contextWindow === "number" ? params.contextWindow : 128_000,
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+      onFallback: (error) =>
+        this.logCompactionFallback(error, sessionId, runId),
+      ...(model
+        ? {
+            summarize: (items) =>
+              this.engine.summarize({
+                sessionId,
+                runId,
+                model,
+                history: items,
+                contextWindow:
+                  typeof params.contextWindow === "number"
+                    ? params.contextWindow
+                    : 128_000,
+                ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+              }),
+          }
+        : {}),
       force: true,
     });
     return result as unknown as JsonValue;
+  }
+
+  private logCompactionFallback(
+    error: unknown,
+    sessionId: string,
+    runId: string,
+  ): void {
+    void this.log(
+      "warn",
+      "Model context summary failed; using deterministic fallback",
+      {
+        error: errorMessage(error),
+        errorType: error instanceof Error ? error.name : typeof error,
+        fallback: true,
+      },
+      sessionId,
+      runId,
+    );
   }
 
   private async shutdown(): Promise<JsonValue> {
@@ -197,6 +268,10 @@ export class RuntimeService {
   private async settle(sessionId: string, runId: string, resultPromise: Promise<EngineResult>): Promise<void> {
     try {
       const result = await resultPromise;
+      if (this.activeRuns.get(runKey(sessionId, runId))?.controller.signal.aborted) {
+        this.emit("run.cancelled", { history: result.history as unknown as JsonValue }, sessionId, runId);
+        return;
+      }
       if (result.interruptions.length > 0) {
         for (const interruption of result.interruptions) {
           this.emit("interruption.requested", {
@@ -205,10 +280,6 @@ export class RuntimeService {
           }, sessionId, runId);
         }
         this.emitUsage(result.usage, sessionId, runId);
-        return;
-      }
-      if (this.activeRuns.get(runKey(sessionId, runId))?.controller.signal.aborted) {
-        this.emit("run.cancelled", { history: result.history as unknown as JsonValue }, sessionId, runId);
         return;
       }
       if (result.finalOutput !== undefined) {
@@ -305,4 +376,11 @@ function runKey(sessionId: string, runId: string): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || /aborted|cancelled/i.test(error.message));
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  const error = new Error("Agent run cancelled");
+  error.name = "AbortError";
+  throw error;
 }
