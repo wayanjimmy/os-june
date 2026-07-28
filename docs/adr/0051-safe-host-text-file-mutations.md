@@ -44,7 +44,9 @@ so a provider-reused call id or stale card cannot authorize another run.
 Patch and replacement preserve permissions, UTF-8 BOM, and uniform line-ending
 style. They stage a new file in the target directory, sync it, reread and check
 the target's original revision immediately before using the platform-aware
-atomic replacement helper. Temporary files are removed after ordinary failures.
+atomic replacement helper. Windows replacement merges the target's ACLs and
+metadata; macOS staging uses `fcopyfile` to preserve copyable target ACLs and
+extended attributes. Temporary files are removed after ordinary failures.
 On an ambiguous Windows partial-replacement error, staged and backup recovery
 files remain beside the target rather than risking deletion of the only intact
 copy. Artifact bookkeeping runs only after a successful mutation and is

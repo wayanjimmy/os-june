@@ -1,9 +1,39 @@
 use std::{fs, io, path::Path};
 
+#[cfg(target_os = "macos")]
+use std::{fs::File, os::fd::AsRawFd};
+
 pub(crate) enum ReplaceExistingFileOutcome {
     Replaced,
     NotReplaced(io::Error),
     RecoveryRequired(io::Error),
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn preserve_replacement_metadata(source: &File, staged: &File) -> io::Result<()> {
+    // Copy ACLs and extended attributes without copying the data fork or file
+    // timestamps. The staged replacement owns those values.
+    let result = unsafe {
+        libc::fcopyfile(
+            source.as_raw_fd(),
+            staged.as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_ACL | libc::COPYFILE_XATTR,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn preserve_replacement_metadata(
+    _source: &fs::File,
+    _staged: &fs::File,
+) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(windows)]

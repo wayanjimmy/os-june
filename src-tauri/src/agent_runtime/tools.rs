@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{query::query, row::Row};
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
     process::Stdio,
@@ -1010,7 +1010,8 @@ fn stage_and_replace(
     let parent = path
         .parent()
         .ok_or_else(|| AppError::new("agent_file_write_failed", "File has no parent directory."))?;
-    let permissions = fs::metadata(path).map_err(io_error)?.permissions();
+    let source = File::open(path).map_err(io_error)?;
+    let permissions = source.metadata().map_err(io_error)?.permissions();
     let temp_path = parent.join(format!(".june-write-{}.tmp", uuid::Uuid::new_v4()));
     let backup_path = parent.join(format!(".june-backup-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -1021,6 +1022,7 @@ fn stage_and_replace(
             .map_err(io_error)?;
         staged.write_all(replacement).map_err(io_error)?;
         staged.set_permissions(permissions).map_err(io_error)?;
+        crate::filesystem::preserve_replacement_metadata(&source, &staged).map_err(io_error)?;
         staged.sync_all().map_err(io_error)?;
         drop(staged);
         let current = fs::read(path).map_err(io_error)?;
@@ -1925,6 +1927,109 @@ mod tests {
         let error = replace_text_file(&mixed, "changed", &file_revision(original)).unwrap_err();
         assert_eq!(error.code, "agent_file_line_endings_mixed");
         assert_eq!(fs::read(mixed).unwrap(), original);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn patch_and_replacement_preserve_macos_acl_and_extended_attributes() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt, process::Command};
+
+        fn acl(path: &Path) -> String {
+            let output = Command::new("/bin/ls")
+                .env("LC_ALL", "C")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "ls failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn extended_attribute(path: &Path) -> Vec<u8> {
+            let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+            let name = c"com.opensoftware.june-test";
+            let size = unsafe {
+                libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0, 0, 0)
+            };
+            assert!(
+                size >= 0,
+                "getxattr failed: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut value = vec![0_u8; size as usize];
+            let read = unsafe {
+                libc::getxattr(
+                    path.as_ptr(),
+                    name.as_ptr(),
+                    value.as_mut_ptr().cast(),
+                    value.len(),
+                    0,
+                    0,
+                )
+            };
+            assert_eq!(
+                read,
+                size,
+                "getxattr failed: {}",
+                std::io::Error::last_os_error()
+            );
+            value
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.md");
+        fs::write(&path, b"old text\n").unwrap();
+        let path_string = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let xattr_value = b"preserve me";
+        let set_xattr = unsafe {
+            libc::setxattr(
+                path_string.as_ptr(),
+                c"com.opensoftware.june-test".as_ptr(),
+                xattr_value.as_ptr().cast(),
+                xattr_value.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(
+            set_xattr,
+            0,
+            "setxattr failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let set_acl = Command::new("/bin/chmod")
+            .env("LC_ALL", "C")
+            .args(["+a", "everyone allow readattr"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            set_acl.status.success(),
+            "chmod failed: {}",
+            String::from_utf8_lossy(&set_acl.stderr)
+        );
+        let original_acl = acl(&path);
+        assert!(original_acl.contains("everyone allow readattr"));
+
+        patch_text_file(&path, "old", "patched").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"patched text\n");
+        assert_eq!(extended_attribute(&path), xattr_value);
+        assert_eq!(acl(&path), original_acl);
+
+        let revision = file_revision(&fs::read(&path).unwrap());
+        replace_text_file(&path, "replacement\n", &revision).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement\n");
+        assert_eq!(extended_attribute(&path), xattr_value);
+        assert_eq!(acl(&path), original_acl);
     }
 
     #[test]
