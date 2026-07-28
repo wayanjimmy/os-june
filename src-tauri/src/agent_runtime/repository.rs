@@ -16,6 +16,13 @@ pub enum PendingInterruptionPersistence {
     Terminal,
 }
 
+pub enum InterruptionResolutionClaim {
+    RecordedWaiting,
+    DispatchBatch(Vec<serde_json::Value>),
+    InvalidBatch,
+    Rejected,
+}
+
 #[derive(Clone)]
 pub struct AgentRepository {
     pub(crate) pool: SqlitePool,
@@ -825,6 +832,314 @@ impl AgentRepository {
         update_session_waiting(&mut transaction, session_id, run_id, &now).await?;
         transaction.commit().await?;
         Ok(PendingInterruptionPersistence::Inserted)
+    }
+
+    pub async fn persist_pending_interruption_batch(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        sequence: i64,
+        interruptions: &[(String, serde_json::Value)],
+        serialized_state: &serde_json::Value,
+    ) -> Result<PendingInterruptionPersistence, sqlx::Error> {
+        let unique_external_ids = interruptions
+            .iter()
+            .map(|(external_id, _)| external_id)
+            .collect::<BTreeSet<_>>();
+        let batch_id = interruptions
+            .first()
+            .and_then(|(_, value)| value.get("batchId"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let mut interruption_ids = BTreeSet::new();
+        let valid_payloads = !batch_id.trim().is_empty()
+            && serialized_state
+                .as_str()
+                .is_some_and(|state| !state.is_empty())
+            && interruptions.iter().all(|(_, value)| {
+                let id = value
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                !id.is_empty()
+                    && interruption_ids.insert(id.to_string())
+                    && value.get("kind").and_then(serde_json::Value::as_str) == Some("approval")
+                    && value.get("status").and_then(serde_json::Value::as_str) == Some("pending")
+                    && value.get("batchId").and_then(serde_json::Value::as_str) == Some(batch_id)
+                    && value.get("batchSize").and_then(serde_json::Value::as_u64)
+                        == Some(interruptions.len() as u64)
+            });
+        if interruptions.len() < 2
+            || unique_external_ids.len() != interruptions.len()
+            || !valid_payloads
+        {
+            return Ok(PendingInterruptionPersistence::Rejected);
+        }
+        let now = now();
+        let mut transaction = self.pool.begin().await?;
+        let run = query(
+            "SELECT session_id, status, last_sequence, interrupted_state_json
+             FROM agent_runs WHERE id = ?",
+        )
+        .bind(run_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let persisted_session_id: String = run.get("session_id");
+        let status: String = run.get("status");
+        let last_sequence: i64 = run.get("last_sequence");
+        if persisted_session_id != session_id {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Rejected);
+        }
+        if matches!(
+            status.as_str(),
+            "completed" | "cancelled" | "failed" | "interrupted"
+        ) {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Terminal);
+        }
+        if status == "waiting_for_user" {
+            let existing = query(
+                "SELECT external_id, payload_json FROM agent_items
+                 WHERE session_id = ? AND run_id = ? AND kind = 'interruption'
+                   AND json_extract(payload_json, '$.batchId') = ?",
+            )
+            .bind(session_id)
+            .bind(run_id)
+            .bind(batch_id)
+            .fetch_all(&mut *transaction)
+            .await?;
+            let interrupted_state: Option<String> = run.get("interrupted_state_json");
+            let same_state =
+                interrupted_state.as_deref() == Some(serialized_state.to_string().as_str());
+            let same_batch = existing.len() == interruptions.len()
+                && interruptions.iter().all(|(external_id, incoming)| {
+                    existing.iter().any(|row| {
+                        let persisted_external_id: Option<String> = row.get("external_id");
+                        let persisted_payload: String = row.get("payload_json");
+                        let Ok(persisted) =
+                            serde_json::from_str::<serde_json::Value>(&persisted_payload)
+                        else {
+                            return false;
+                        };
+                        persisted_external_id.as_deref() == Some(external_id)
+                            && persisted.get("id") == incoming.get("id")
+                            && persisted.get("kind") == incoming.get("kind")
+                            && persisted.get("batchId") == incoming.get("batchId")
+                            && persisted.get("batchSize") == incoming.get("batchSize")
+                            && matches!(
+                                persisted.get("status").and_then(serde_json::Value::as_str),
+                                Some("pending" | "resolved")
+                            )
+                    })
+                });
+            if same_state && same_batch {
+                transaction.rollback().await?;
+                return Ok(PendingInterruptionPersistence::ExistingPending);
+            }
+        }
+        if sequence <= last_sequence {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Rejected);
+        }
+        for (external_id, _) in interruptions {
+            if query("SELECT 1 FROM agent_items WHERE external_id = ?")
+                .bind(external_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .is_some()
+            {
+                transaction.rollback().await?;
+                return Ok(PendingInterruptionPersistence::Rejected);
+            }
+        }
+        let first_sequence: i64 = query(
+            "SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence FROM agent_items WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?
+        .get("next_sequence");
+        for (offset, (external_id, interruption)) in interruptions.iter().enumerate() {
+            query(
+                "INSERT INTO agent_items
+                 (id, session_id, run_id, sequence, kind, payload_json, external_id, created_at)
+                 VALUES (?, ?, ?, ?, 'interruption', ?, ?, ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(session_id)
+            .bind(run_id)
+            .bind(first_sequence + offset as i64)
+            .bind(interruption.to_string())
+            .bind(external_id)
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let updated = query(
+            "UPDATE agent_runs
+             SET status = 'waiting_for_user', last_sequence = ?, updated_at = ?,
+                 interrupted_state_json = ?, error_code = NULL, error_message = NULL
+             WHERE id = ? AND session_id = ?
+               AND status NOT IN ('completed', 'cancelled', 'failed', 'interrupted')
+               AND last_sequence < ?",
+        )
+        .bind(sequence)
+        .bind(&now)
+        .bind(serialized_state.to_string())
+        .bind(run_id)
+        .bind(session_id)
+        .bind(sequence)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if updated == 0 {
+            transaction.rollback().await?;
+            return Ok(PendingInterruptionPersistence::Rejected);
+        }
+        update_session_waiting(&mut transaction, session_id, run_id, &now).await?;
+        transaction.commit().await?;
+        Ok(PendingInterruptionPersistence::Inserted)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_interruption_resolution(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        item_id: &str,
+        original_payload: &str,
+        resolved_payload: &str,
+        batch_id: &str,
+        batch_size: i64,
+    ) -> Result<InterruptionResolutionClaim, sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
+        let original: serde_json::Value = match serde_json::from_str(original_payload) {
+            Ok(value) => value,
+            Err(_) => return Ok(InterruptionResolutionClaim::InvalidBatch),
+        };
+        let resolved: serde_json::Value = match serde_json::from_str(resolved_payload) {
+            Ok(value) => value,
+            Err(_) => return Ok(InterruptionResolutionClaim::InvalidBatch),
+        };
+        let original_batch_matches = if batch_size == 1 {
+            original.get("batchId").is_none() && original.get("batchSize").is_none()
+                || original.get("batchId").and_then(serde_json::Value::as_str) == Some(batch_id)
+                    && original
+                        .get("batchSize")
+                        .and_then(serde_json::Value::as_i64)
+                        == Some(1)
+        } else {
+            original.get("batchId").and_then(serde_json::Value::as_str) == Some(batch_id)
+                && original
+                    .get("batchSize")
+                    .and_then(serde_json::Value::as_i64)
+                    == Some(batch_size)
+        };
+        if batch_id.trim().is_empty()
+            || batch_size <= 0
+            || !original_batch_matches
+            || resolved.get("batchId").and_then(serde_json::Value::as_str) != Some(batch_id)
+            || resolved
+                .get("batchSize")
+                .and_then(serde_json::Value::as_i64)
+                != Some(batch_size)
+        {
+            transaction.rollback().await?;
+            return Ok(InterruptionResolutionClaim::InvalidBatch);
+        }
+        let claimed = query(
+            "UPDATE agent_items SET payload_json = ?
+             WHERE id = ? AND session_id = ? AND run_id = ? AND payload_json = ?
+               AND json_extract(payload_json, '$.status') = 'pending'
+               AND EXISTS (SELECT 1 FROM agent_runs
+                           WHERE id = ? AND session_id = ? AND status = 'waiting_for_user')",
+        )
+        .bind(resolved_payload)
+        .bind(item_id)
+        .bind(session_id)
+        .bind(run_id)
+        .bind(original_payload)
+        .bind(run_id)
+        .bind(session_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if claimed == 0 {
+            transaction.rollback().await?;
+            return Ok(InterruptionResolutionClaim::Rejected);
+        }
+
+        let rows = query(
+            "SELECT payload_json FROM agent_items
+             WHERE session_id = ? AND run_id = ? AND kind = 'interruption'
+               AND json_extract(payload_json, '$.batchId') = ?
+             ORDER BY sequence ASC",
+        )
+        .bind(session_id)
+        .bind(run_id)
+        .bind(batch_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut payloads = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload: String = row.get("payload_json");
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                transaction.rollback().await?;
+                return Ok(InterruptionResolutionClaim::InvalidBatch);
+            };
+            payloads.push(value);
+        }
+        let mut ids = BTreeSet::new();
+        let valid = payloads.len() as i64 == batch_size
+            && payloads.iter().all(|value| {
+                let id = value
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let status = value.get("status").and_then(serde_json::Value::as_str);
+                !id.is_empty()
+                    && ids.insert(id.to_string())
+                    && value.get("batchId").and_then(serde_json::Value::as_str) == Some(batch_id)
+                    && value.get("batchSize").and_then(serde_json::Value::as_i64)
+                        == Some(batch_size)
+                    && (batch_size == 1
+                        || value.get("kind").and_then(serde_json::Value::as_str)
+                            == Some("approval"))
+                    && matches!(status, Some("pending" | "resolved"))
+                    && (status != Some("resolved")
+                        || matches!(
+                            value.get("decision").and_then(serde_json::Value::as_str),
+                            Some("approve" | "reject")
+                        ))
+            });
+        if !valid {
+            transaction.rollback().await?;
+            return Ok(InterruptionResolutionClaim::InvalidBatch);
+        }
+        if payloads
+            .iter()
+            .any(|value| value.get("status").and_then(serde_json::Value::as_str) == Some("pending"))
+        {
+            transaction.commit().await?;
+            return Ok(InterruptionResolutionClaim::RecordedWaiting);
+        }
+        let reset = query(
+            "UPDATE agent_runs SET last_sequence = 0, updated_at = ?
+             WHERE id = ? AND session_id = ? AND status = 'waiting_for_user'",
+        )
+        .bind(now())
+        .bind(run_id)
+        .bind(session_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if reset == 0 {
+            transaction.rollback().await?;
+            return Ok(InterruptionResolutionClaim::Rejected);
+        }
+        transaction.commit().await?;
+        Ok(InterruptionResolutionClaim::DispatchBatch(payloads))
     }
 
     pub async fn items(&self, session_id: &str) -> Result<Vec<AgentItemDto>, sqlx::Error> {

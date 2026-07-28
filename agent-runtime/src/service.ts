@@ -273,9 +273,24 @@ export class RuntimeService {
         return;
       }
       if (result.interruptions.length > 0) {
+        if (
+          result.interruptions.length > 1 &&
+          result.interruptions.every(({ kind }) => kind === "approval")
+        ) {
+          this.emit("interruption.requested", {
+            batchId: crypto.randomUUID(),
+            batchSize: result.interruptions.length,
+            serializedState: result.serializedState ?? "",
+            interruptions: result.interruptions,
+          }, sessionId, runId);
+          this.emitUsage(result.usage, sessionId, runId);
+          return;
+        }
         for (const interruption of result.interruptions) {
           this.emit("interruption.requested", {
             ...interruption,
+            batchId: crypto.randomUUID(),
+            batchSize: 1,
             serializedState: result.serializedState ?? "",
           }, sessionId, runId);
         }

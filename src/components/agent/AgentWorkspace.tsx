@@ -432,6 +432,7 @@ export function AgentWorkspace({
   >({});
   const [clarifySubmitting, setClarifySubmitting] = useState<Record<string, string>>({});
   const [secretSubmitting, setSecretSubmitting] = useState<Record<string, true>>({});
+  const interruptionSubmissionsRef = useRef(new Set<string>());
   const [retryingFailureIds, setRetryingFailureIds] = useState<Record<string, true>>({});
   const [branchingItemId, setBranchingItemId] = useState<string>();
   const [thinkingOpen, setThinkingOpen] = useState<Record<string, boolean>>({});
@@ -1813,6 +1814,9 @@ export function AgentWorkspace({
       return;
     }
     const interruptionId = part.id;
+    const submissionKey = `${part.runId}\u0000${interruptionId}`;
+    if (interruptionSubmissionsRef.current.has(submissionKey)) return;
+    interruptionSubmissionsRef.current.add(submissionKey);
     setApprovalSubmitting((current) => ({ ...current, [interruptionId]: choice }));
     try {
       const request = {
@@ -1828,6 +1832,7 @@ export function AgentWorkspace({
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
+      interruptionSubmissionsRef.current.delete(submissionKey);
       setApprovalSubmitting((current) => {
         const next = { ...current };
         delete next[interruptionId];
@@ -1845,6 +1850,9 @@ export function AgentWorkspace({
       return;
     }
     const interruptionId = part.id;
+    const submissionKey = `${part.runId}\u0000${interruptionId}`;
+    if (interruptionSubmissionsRef.current.has(submissionKey)) return;
+    interruptionSubmissionsRef.current.add(submissionKey);
     setClarifySubmitting((current) => ({ ...current, [interruptionId]: answer }));
     try {
       const request = {
@@ -1860,6 +1868,7 @@ export function AgentWorkspace({
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
+      interruptionSubmissionsRef.current.delete(submissionKey);
       setClarifySubmitting((current) => {
         const next = { ...current };
         delete next[interruptionId];
@@ -1868,15 +1877,15 @@ export function AgentWorkspace({
     }
   }
 
-  async function respondToSecret(
-    part: Extract<AgentChatPart, { type: "secret" }>,
-    secret: string,
-  ) {
+  async function respondToSecret(part: Extract<AgentChatPart, { type: "secret" }>, secret: string) {
     if (!part.sessionId || !part.runId) {
       setError("This secret request is no longer attached to an active run.");
       return;
     }
     const interruptionId = part.id;
+    const submissionKey = `${part.runId}\u0000${interruptionId}`;
+    if (interruptionSubmissionsRef.current.has(submissionKey)) return;
+    interruptionSubmissionsRef.current.add(submissionKey);
     setSecretSubmitting((current) => ({ ...current, [interruptionId]: true }));
     try {
       const request = {
@@ -1894,6 +1903,7 @@ export function AgentWorkspace({
     } catch (cause) {
       setError(messageFromError(cause));
     } finally {
+      interruptionSubmissionsRef.current.delete(submissionKey);
       setSecretSubmitting((current) => {
         const next = { ...current };
         delete next[interruptionId];

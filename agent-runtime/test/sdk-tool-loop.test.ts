@@ -670,6 +670,118 @@ test("resumes a serialized approval and continues after the host tool result", a
   assert.equal(resumed.interruptions.length, 0);
 });
 
+test("resolves parallel approvals once when an approved host tool fails", async () => {
+  const invokedPaths: string[] = [];
+  const engine = new OpenAIAgentsEngine(async (input) => {
+    if (input.name !== MODEL_CHAT_COMPLETIONS_TOOL) {
+      assert.equal(input.name, "write_file");
+      assert.ok(isRecord(input.arguments));
+      const path = input.arguments.path;
+      assert.equal(typeof path, "string");
+      invokedPaths.push(path);
+      if (path === "one.md") {
+        throw new ProtocolError(-32603, "Deterministic host failure.", {
+          failureKind: "tool",
+          retryable: false,
+          errorCode: "test_write_failed",
+        });
+      }
+      return { path, written: true };
+    }
+    return streamPage("parallel-approval", {
+      id: "completion-parallel-approval",
+      object: "chat.completion.chunk",
+      created: 6,
+      model: "private-auto",
+      choices: [
+        {
+          index: 0,
+          finish_reason: "tool_calls",
+          delta: {
+            role: "assistant",
+            tool_calls: ["one.md", "two.md", "three.md"].map((path, index) => ({
+              index,
+              id: `call-write-${index + 1}`,
+              type: "function",
+              function: {
+                name: "write_file",
+                arguments: JSON.stringify({ path, content: `${index + 1}` }),
+              },
+            })),
+          },
+        },
+      ],
+    });
+  });
+  await engine.initialize({ clientName: "June", clientVersion: "test" });
+  const commonParams = {
+    model: "private-auto",
+    instructions: "Write all three files.",
+    workspace: "/tmp/june-workspace",
+    safetyMode: "sandboxed" as const,
+    tools: [
+      {
+        name: "write_file",
+        description: "Write a file.",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" }, content: { type: "string" } },
+          required: ["path", "content"],
+          additionalProperties: false,
+        },
+        requiresApproval: true,
+      },
+    ],
+    skills: [],
+    contextWindow: 16_000,
+  };
+  const paused = await engine.start({
+    sessionId: "session-parallel-approval",
+    runId: "run-parallel-approval",
+    signal: new AbortController().signal,
+    emit: () => {},
+    takeSteering: () => [],
+    params: { ...commonParams, input: "Create three files.", history: [] },
+  });
+
+  assert.equal(paused.interruptions.length, 3);
+  assert.equal(new Set(paused.interruptions.map(({ id }) => id)).size, 3);
+  assert.ok(paused.serializedState);
+  const interruptionByPath = new Map(
+    paused.interruptions.map((interruption) => {
+      assert.ok(isRecord(interruption.arguments));
+      assert.equal(typeof interruption.arguments.path, "string");
+      return [interruption.arguments.path, interruption.id];
+    }),
+  );
+
+  await assert.rejects(
+    engine.resume({
+      sessionId: "session-parallel-approval",
+      runId: "run-parallel-approval",
+      signal: new AbortController().signal,
+      emit: () => {},
+      takeSteering: () => [],
+      params: {
+        ...commonParams,
+        serializedState: paused.serializedState,
+        resolutions: [
+          { interruptionId: interruptionByPath.get("one.md")!, decision: "approve" },
+          { interruptionId: interruptionByPath.get("two.md")!, decision: "reject" },
+          { interruptionId: interruptionByPath.get("three.md")!, decision: "approve" },
+        ],
+      },
+    }),
+    (error: unknown) =>
+      error instanceof ToolCallError &&
+      error.error instanceof ProtocolError &&
+      isRecord(error.error.data) &&
+      error.error.data.errorCode === "test_write_failed",
+  );
+  assert.deepEqual(new Set(invokedPaths), new Set(["one.md", "three.md"]));
+  assert.equal(invokedPaths.length, 2);
+});
+
 function streamPage(streamId: string, chunk: JsonObject) {
   return { streamId, chunks: [chunk], done: true };
 }

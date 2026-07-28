@@ -1,4 +1,6 @@
-use os_june_lib::agent_runtime::repository::PendingInterruptionPersistence;
+use os_june_lib::agent_runtime::repository::{
+    InterruptionResolutionClaim, PendingInterruptionPersistence,
+};
 use os_june_lib::agent_runtime::{
     import_legacy_agent_state, legacy_import_completed, AgentItemPayload, AgentRepository,
     LegacyImportOptions, MessagePayload, ToolPayload,
@@ -190,6 +192,245 @@ async fn repeated_provider_interruption_ids_are_scoped_to_their_runs() {
     assert_eq!(
         first_after_reentry.interrupted_state,
         Some(serde_json::json!("updated serialized state"))
+    );
+}
+
+#[tokio::test]
+async fn sibling_approval_decisions_dispatch_once_as_a_complete_batch() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool);
+    let session = repository
+        .create_session(
+            "Approval batch",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .expect("session");
+    let run = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("run");
+
+    let mut pending_payloads = Vec::new();
+    let mut pending_batch = Vec::new();
+    for (index, choice) in ["approve", "reject", "approve"].into_iter().enumerate() {
+        let interruption_id = format!("approval-{}", index + 1);
+        let payload = serde_json::json!({
+            "id": interruption_id,
+            "sessionId": session.id,
+            "runId": run.id,
+            "status": "pending",
+            "kind": "approval",
+            "batchId": "batch-1",
+            "batchSize": 3
+        });
+        pending_batch.push((
+            format!("interruption:{}:{interruption_id}", run.id),
+            payload.clone(),
+        ));
+        pending_payloads.push((payload, choice));
+    }
+    let outcome = repository
+        .persist_pending_interruption_batch(
+            &session.id,
+            &run.id,
+            1,
+            &pending_batch,
+            &serde_json::json!("serialized batch state"),
+        )
+        .await
+        .expect("pending interruption batch");
+    assert!(matches!(outcome, PendingInterruptionPersistence::Inserted));
+    assert_eq!(repository.items(&session.id).await.unwrap().len(), 3);
+    assert_eq!(
+        repository.get_run(&run.id).await.unwrap().status,
+        "waiting_for_user"
+    );
+    let replay = repository
+        .persist_pending_interruption_batch(
+            &session.id,
+            &run.id,
+            1,
+            &pending_batch,
+            &serde_json::json!("serialized batch state"),
+        )
+        .await
+        .expect("pending batch replay");
+    assert!(matches!(
+        replay,
+        PendingInterruptionPersistence::ExistingPending
+    ));
+
+    for (index, (pending, choice)) in pending_payloads.iter().enumerate() {
+        let mut resolved = pending.clone();
+        resolved["status"] = serde_json::json!("resolved");
+        resolved["decision"] = serde_json::json!(choice);
+        let claim = repository
+            .claim_interruption_resolution(
+                &session.id,
+                &run.id,
+                &repository.items(&session.id).await.expect("items")[index].id,
+                &pending.to_string(),
+                &resolved.to_string(),
+                "batch-1",
+                3,
+            )
+            .await
+            .expect("resolution claim");
+
+        if index < 2 {
+            assert!(matches!(
+                claim,
+                InterruptionResolutionClaim::RecordedWaiting
+            ));
+            let waiting = repository.get_run(&run.id).await.expect("waiting run");
+            assert_eq!(waiting.status, "waiting_for_user");
+            assert_eq!(waiting.last_sequence, 1);
+            let replay = repository
+                .persist_pending_interruption_batch(
+                    &session.id,
+                    &run.id,
+                    1,
+                    &pending_batch,
+                    &serde_json::json!("serialized batch state"),
+                )
+                .await
+                .expect("partially resolved batch replay");
+            assert!(matches!(
+                replay,
+                PendingInterruptionPersistence::ExistingPending
+            ));
+        } else {
+            let InterruptionResolutionClaim::DispatchBatch(payloads) = claim else {
+                panic!("final decision did not claim the complete batch");
+            };
+            assert_eq!(payloads.len(), 3);
+            let decisions = payloads
+                .iter()
+                .map(|payload| {
+                    payload
+                        .get("decision")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                decisions,
+                vec![
+                    Some("approve".into()),
+                    Some("reject".into()),
+                    Some("approve".into())
+                ]
+            );
+            assert_eq!(repository.get_run(&run.id).await.unwrap().last_sequence, 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn incomplete_declared_approval_batch_is_invalid() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool);
+    let session = repository
+        .create_session(
+            "Incomplete approval batch",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .expect("session");
+    let run = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("run");
+    let pending = serde_json::json!({
+        "id": "approval-1",
+        "sessionId": session.id,
+        "runId": run.id,
+        "status": "pending",
+        "kind": "approval",
+        "batchId": "incomplete-batch",
+        "batchSize": 2
+    });
+    repository
+        .persist_pending_interruption(
+            &session.id,
+            &run.id,
+            1,
+            &format!("interruption:{}:approval-1", run.id),
+            &pending,
+            &serde_json::json!("serialized batch state"),
+        )
+        .await
+        .expect("pending interruption");
+    let item = repository.items(&session.id).await.unwrap().remove(0);
+    let mut resolved = pending.clone();
+    resolved["status"] = serde_json::json!("resolved");
+    resolved["decision"] = serde_json::json!("approve");
+
+    let claim = repository
+        .claim_interruption_resolution(
+            &session.id,
+            &run.id,
+            &item.id,
+            &pending.to_string(),
+            &resolved.to_string(),
+            "incomplete-batch",
+            2,
+        )
+        .await
+        .expect("resolution claim");
+
+    assert!(matches!(claim, InterruptionResolutionClaim::InvalidBatch));
+    let waiting = repository.get_run(&run.id).await.unwrap();
+    assert_eq!(waiting.status, "waiting_for_user");
+    assert_eq!(waiting.last_sequence, 1);
+}
+
+#[tokio::test]
+async fn malformed_batch_persistence_inserts_nothing_and_does_not_wait() {
+    let pool = memory_database().await;
+    let repository = AgentRepository::new(pool);
+    let session = repository
+        .create_session(
+            "Rejected approval batch",
+            "private-auto",
+            os_june_lib::agent_runtime::AgentSafetyMode::Unrestricted,
+            None,
+        )
+        .await
+        .expect("session");
+    let run = repository
+        .create_run(&session.id, "private-auto", None)
+        .await
+        .expect("run");
+    let payload = serde_json::json!({ "id": "approval-1", "kind": "approval" });
+    let duplicate_external_id = format!("interruption:{}:approval-1", run.id);
+    let malformed = vec![
+        (duplicate_external_id.clone(), payload.clone()),
+        (duplicate_external_id, payload.clone()),
+        (format!("interruption:{}:approval-3", run.id), payload),
+    ];
+
+    let outcome = repository
+        .persist_pending_interruption_batch(
+            &session.id,
+            &run.id,
+            1,
+            &malformed,
+            &serde_json::json!("serialized batch state"),
+        )
+        .await
+        .expect("rejected batch");
+
+    assert!(matches!(outcome, PendingInterruptionPersistence::Rejected));
+    assert!(repository.items(&session.id).await.unwrap().is_empty());
+    assert_ne!(
+        repository.get_run(&run.id).await.unwrap().status,
+        "waiting_for_user"
     );
 }
 

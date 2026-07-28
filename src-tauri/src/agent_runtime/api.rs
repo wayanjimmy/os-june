@@ -831,6 +831,12 @@ pub async fn resolve_agent_interruption(
     }
     let run = repository.get_run(&run_id).await?;
     if run.status != "waiting_for_user" {
+        if run.status == "running" {
+            return Err(AppError::new(
+                "agent_interruption_busy",
+                "This interruption is already being resumed.",
+            ));
+        }
         return Err(AppError::new(
             "agent_interruption_expired",
             "This interruption can no longer be resumed.",
@@ -935,13 +941,6 @@ pub async fn resolve_agent_interruption(
     params["workspace"] = json!(workspace_string);
     params["safetyMode"] = json!(session.safety_mode.as_db());
     params["serializedState"] = json!(serialized_state);
-    params["resolutions"] = if let Some(answer) = clarification_answer.as_deref() {
-        json!([{ "interruptionId": request.interruption_id, "kind": "clarification", "answer": answer }])
-    } else if interruption_kind == "secret" {
-        json!([{ "interruptionId": request.interruption_id, "kind": "secret", "decision": if approved { "approve" } else { "reject" } }])
-    } else {
-        json!([{ "interruptionId": request.interruption_id, "kind": "approval", "decision": if approved { "approve" } else { "reject" } }])
-    };
     let secret_ref = if interruption_kind == "secret" {
         match secret_value {
             Some(value) => {
@@ -959,51 +958,76 @@ pub async fn resolve_agent_interruption(
     if let Some(answer) = clarification_answer.as_deref() {
         interruption["answer"] = json!(answer);
     }
+    interruption["decision"] = json!(if approved { "approve" } else { "reject" });
+    if interruption_kind == "approval" {
+        interruption["resolution"] = request
+            .resolution
+            .get("choice")
+            .cloned()
+            .unwrap_or_else(|| json!("deny"));
+    }
     if let Some(secret_ref) = secret_ref.as_deref() {
         interruption["secretRef"] = json!(secret_ref);
     }
-    let resolved_interruption_json = interruption.to_string();
-    // Persist the visible resolution and reset sequencing as one unit. The
-    // sidecar can emit resumed events immediately after accepting the request,
-    // so both must be in place before dispatch, but neither may be left behind
-    // when preparation or persistence fails.
-    let persist_result: Result<bool, sqlx::Error> = async {
-        let mut transaction = repository.pool.begin().await?;
-        let claimed = sqlx::query::query(
-            "UPDATE agent_items SET payload_json = ?
-             WHERE id = ? AND payload_json = ?
-               AND json_extract(payload_json, '$.status') = 'pending'",
-        )
-        .bind(&resolved_interruption_json)
-        .bind(&item_id)
-        .bind(&original_interruption_json)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-        if claimed == 0 {
-            transaction.rollback().await?;
-            return Ok(false);
-        }
-        let reset = sqlx::query::query(
-            "UPDATE agent_runs SET last_sequence = 0, updated_at = ?
-             WHERE id = ? AND status = 'waiting_for_user'",
-        )
-        .bind(chrono::Utc::now().to_rfc3339())
-        .bind(&run.id)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-        if reset == 0 {
-            transaction.rollback().await?;
-            return Ok(false);
-        }
-        transaction.commit().await?;
-        Ok(true)
+    let valid_batch_id = interruption
+        .get("batchId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let valid_batch_size = interruption
+        .get("batchSize")
+        .and_then(Value::as_i64)
+        .filter(|size| *size > 0);
+    let valid_batch = valid_batch_id.zip(valid_batch_size);
+    let batch_id = valid_batch.map_or_else(|| item_id.clone(), |(id, _)| id.to_string());
+    let batch_size = valid_batch.map_or(1, |(_, size)| size);
+    if valid_batch.is_none() {
+        interruption["batchId"] = json!(batch_id);
+        interruption["batchSize"] = json!(1);
     }
-    .await;
-    match persist_result {
-        Ok(true) => {}
-        Ok(false) => {
+    let resolved_interruption_json = interruption.to_string();
+    let batch_payloads = match repository
+        .claim_interruption_resolution(
+            &session_id,
+            &run_id,
+            &item_id,
+            &original_interruption_json,
+            &resolved_interruption_json,
+            &batch_id,
+            batch_size,
+        )
+        .await
+    {
+        Ok(super::repository::InterruptionResolutionClaim::DispatchBatch(payloads)) => payloads,
+        Ok(super::repository::InterruptionResolutionClaim::RecordedWaiting) => {
+            return Ok(run_json(repository.get_run(&run.id).await?));
+        }
+        Ok(super::repository::InterruptionResolutionClaim::InvalidBatch) => {
+            if let Some(secret_ref) = secret_ref.as_deref() {
+                if let Err(cleanup_error) = super::secrets::delete(secret_ref).await {
+                    tracing::warn!(
+                        error_code = %cleanup_error.code,
+                        "failed to remove a staged secret from an invalid interruption batch"
+                    );
+                }
+            }
+            repository
+                .update_run_status(
+                    &run.id,
+                    "interrupted",
+                    None,
+                    None,
+                    Some((
+                        "agent_interruption_batch_invalid",
+                        "The agent runtime returned an incomplete or inconsistent approval batch.",
+                    )),
+                )
+                .await?;
+            return Err(AppError::new(
+                "agent_interruption_batch_invalid",
+                "This approval batch is incomplete or inconsistent and cannot be resumed.",
+            ));
+        }
+        Ok(super::repository::InterruptionResolutionClaim::Rejected) => {
             if let Some(secret_ref) = secret_ref.as_deref() {
                 if let Err(cleanup_error) = super::secrets::delete(secret_ref).await {
                     tracing::warn!(
@@ -1028,7 +1052,19 @@ pub async fn resolve_agent_interruption(
             }
             return Err(error.into());
         }
-    }
+    };
+    let resolutions = batch_payloads
+        .iter()
+        .map(|value| {
+            let kind = value["kind"].clone();
+            match value["kind"].as_str() {
+                Some("clarification") => json!({ "interruptionId": value["id"], "kind": kind, "answer": value["answer"] }),
+                Some("secret") => json!({ "interruptionId": value["id"], "kind": kind, "decision": value["decision"] }),
+                _ => json!({ "interruptionId": value["id"], "kind": "approval", "decision": value["decision"] }),
+            }
+        })
+        .collect::<Vec<_>>();
+    params["resolutions"] = json!(resolutions);
     if let Err(error) = host
         .request("run.resume", &session.id, &run.id, params)
         .await

@@ -155,6 +155,100 @@ describe("agent runtime adapter", () => {
     ]);
   });
 
+  it("materializes every approval from one atomic batch event", () => {
+    const running = createAgentRuntimeProjection({
+      run: { id: "run-1", sessionId: "session-1", status: "running", model: "auto" },
+    });
+    const interruptions = ["1", "2", "3"].map((suffix) => ({
+      id: `approval-${suffix}`,
+      sessionId: "session-1",
+      runId: "run-1",
+      status: "pending" as const,
+      createdAt: "2026-07-28T12:00:00Z",
+      kind: "approval" as const,
+      toolName: "write_file",
+      title: "Create file?",
+      description: "Review the operation.",
+      allowAlways: false,
+      batchId: "batch-1",
+      batchSize: 3,
+    }));
+
+    const next = applyAgentRuntimeEvent(running, {
+      ...frame,
+      eventId: "approval-batch",
+      sequence: 7,
+      method: "interruption.requested",
+      data: {
+        items: interruptions.map((interruption) => ({
+          itemId: `interruption:run-1:${interruption.id}`,
+          interruption,
+        })),
+      },
+    });
+
+    expect(next.run?.status).toBe("waiting_for_user");
+    expect(next.lastSequenceByRun["run-1"]).toBe(7);
+    expect(next.items.map((item) => item.id)).toEqual([
+      "interruption:run-1:approval-1",
+      "interruption:run-1:approval-2",
+      "interruption:run-1:approval-3",
+    ]);
+  });
+
+  it("keeps a locally resolved interruption against a stale pending snapshot", () => {
+    const pending = {
+      id: "interruption:run-1:approval-1",
+      sessionId: "session-1",
+      runId: "run-1",
+      sequence: 4,
+      createdAt: "2026-07-28T12:00:00Z",
+      kind: "interruption" as const,
+      interruption: {
+        id: "approval-1",
+        sessionId: "session-1",
+        runId: "run-1",
+        status: "pending" as const,
+        createdAt: "2026-07-28T12:00:00Z",
+        kind: "approval" as const,
+        toolName: "write_file",
+        title: "Create file?",
+        description: "Review the operation.",
+        allowAlways: false,
+      },
+    };
+    const session = {
+      id: "session-1",
+      title: "Test",
+      status: "waiting_for_user" as const,
+      model: "auto",
+      safetyMode: "sandboxed" as const,
+      workspacePath: "/tmp",
+      source: "user" as const,
+      createdAt: "2026-07-28T12:00:00Z",
+      updatedAt: "2026-07-28T12:00:00Z",
+    };
+    const base = createAgentRuntimeProjection({
+      session,
+      run: { id: "run-1", sessionId: "session-1", status: "waiting_for_user", model: "auto" },
+      items: [pending],
+    });
+    const resolved = resolveAgentRuntimeInterruption(
+      base,
+      { sessionId: "session-1", runId: "run-1", interruptionId: "approval-1" },
+      { kind: "approval", choice: "once" },
+    );
+
+    const merged = mergeAgentRuntimeSnapshot(resolved, {
+      session,
+      run: base.run,
+      items: [pending],
+    });
+    expect(merged.items).toMatchObject([
+      { kind: "interruption", interruption: { status: "resolved", resolution: "once" } },
+    ]);
+  });
+
   it("scopes repeated provider interruption ids to their runs", () => {
     const projection = createAgentRuntimeProjection({
       run: {

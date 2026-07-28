@@ -767,88 +767,161 @@ async fn persist_and_emit_event(
             )))
         }
         "interruption.requested" => {
-            let serialized = params
-                .get("serializedState")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let kind = params
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("approval");
-            let interruption_id = match interruption_stable_id(&params) {
-                Ok(interruption_id) => interruption_id,
-                Err(error) => {
-                    tracing::warn!(
-                        error_code = %error.code,
-                        run_id = %frame.run_id,
-                        "agent runtime returned an interruption without a durable identity"
-                    );
+            if let Some(raw_interruptions) = params.get("interruptions") {
+                let batch_id = params.get("batchId").and_then(Value::as_str).unwrap_or("");
+                let batch_size = params.get("batchSize").and_then(Value::as_i64).unwrap_or(0);
+                let serialized = params
+                    .get("serializedState")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let Some(raw_interruptions) = raw_interruptions.as_array() else {
+                    fail_unpersisted_interruption(app, repository, frame).await;
+                    return Ok(());
+                };
+                let mut ids = std::collections::BTreeSet::new();
+                let valid = !batch_id.trim().is_empty()
+                    && !serialized.is_empty()
+                    && batch_size > 1
+                    && raw_interruptions.len() as i64 == batch_size
+                    && raw_interruptions.iter().all(|value| {
+                        value.get("kind").and_then(Value::as_str) == Some("approval")
+                            && interruption_stable_id(value)
+                                .is_ok_and(|id| !id.is_empty() && ids.insert(id))
+                    });
+                if !valid {
                     fail_unpersisted_interruption(app, repository, frame).await;
                     return Ok(());
                 }
-            };
-            persistence_external_id = format!("interruption:{}:{interruption_id}", frame.run_id);
-            let interruption = match kind {
-                "clarification" => {
-                    json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "clarification", "question": params.get("question").cloned().unwrap_or_else(|| json!("What would you like June to do?")), "choices": params.get("choices").cloned().unwrap_or_else(|| json!([])) })
+                let pending: Vec<(String, Value)> = raw_interruptions
+                    .iter()
+                    .map(|value| {
+                        let interruption_id = interruption_stable_id(value).expect("validated interruption id");
+                        let external_id = format!("interruption:{}:{interruption_id}", frame.run_id);
+                        let tool_name = value.get("toolName").and_then(Value::as_str).unwrap_or("unknown_tool");
+                        let presentation = approval_presentation(tool_name, value.get("arguments"));
+                        let interruption = json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "approval", "toolName": tool_name, "title": presentation.title, "description": presentation.description, "command": presentation.command, "allowAlways": false, "batchId": batch_id, "batchSize": batch_size });
+                        (external_id, interruption)
+                    })
+                    .collect();
+                match repository
+                    .persist_pending_interruption_batch(
+                        &frame.session_id,
+                        &frame.run_id,
+                        frame.sequence,
+                        &pending,
+                        &json!(serialized),
+                    )
+                    .await
+                {
+                    Ok(super::repository::PendingInterruptionPersistence::Inserted) => {
+                        if let Err(error) =
+                            crate::routines::mark_agent_run_waiting(&repository.pool, &frame.run_id)
+                                .await
+                        {
+                            tracing::warn!(error_code = %error.code, run_id = %frame.run_id, "failed to mirror the pending agent interruption batch to its routine run");
+                        }
+                    }
+                    Ok(
+                        super::repository::PendingInterruptionPersistence::ExistingPending
+                        | super::repository::PendingInterruptionPersistence::Terminal,
+                    ) => return Ok(()),
+                    Ok(_) | Err(_) => {
+                        fail_unpersisted_interruption(app, repository, frame).await;
+                        return Ok(());
+                    }
                 }
-                "secret" => {
-                    json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "secret", "reason": params.get("reason").cloned().unwrap_or_else(|| json!("June needs a secret before it can continue.")) })
-                }
-                _ => {
-                    let tool_name = params
-                        .get("toolName")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown_tool");
-                    let presentation = approval_presentation(tool_name, params.get("arguments"));
-                    json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "approval", "toolName": tool_name, "title": presentation.title, "description": presentation.description, "command": presentation.command, "allowAlways": false })
-                }
-            };
-            data = json!({ "itemId": persistence_external_id, "interruption": interruption });
-            let persistence = repository
-                .persist_pending_interruption(
-                    &frame.session_id,
-                    &frame.run_id,
-                    frame.sequence,
-                    data["itemId"].as_str().unwrap_or_default(),
-                    &data["interruption"],
-                    &serialized,
-                )
-                .await;
-            match persistence {
-                Ok(
-                    super::repository::PendingInterruptionPersistence::Inserted
-                    | super::repository::PendingInterruptionPersistence::ReenteredPending,
-                ) => {
-                    if let Err(error) =
-                        crate::routines::mark_agent_run_waiting(&repository.pool, &frame.run_id)
-                            .await
-                    {
+                data = json!({ "items": pending.into_iter().map(|(item_id, interruption)| json!({ "itemId": item_id, "interruption": interruption })).collect::<Vec<_>>() });
+                None
+            } else {
+                let serialized = params
+                    .get("serializedState")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let kind = params
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("approval");
+                let interruption_id = match interruption_stable_id(&params) {
+                    Ok(interruption_id) => interruption_id,
+                    Err(error) => {
                         tracing::warn!(
                             error_code = %error.code,
                             run_id = %frame.run_id,
-                            "failed to mirror the pending agent interruption to its routine run"
+                            "agent runtime returned an interruption without a durable identity"
                         );
+                        fail_unpersisted_interruption(app, repository, frame).await;
+                        return Ok(());
+                    }
+                };
+                let batch_id = params.get("batchId").cloned().unwrap_or(Value::Null);
+                let batch_size = params.get("batchSize").cloned().unwrap_or(json!(1));
+                persistence_external_id =
+                    format!("interruption:{}:{interruption_id}", frame.run_id);
+                let interruption = match kind {
+                    "clarification" => {
+                        json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "clarification", "question": params.get("question").cloned().unwrap_or_else(|| json!("What would you like June to do?")), "choices": params.get("choices").cloned().unwrap_or_else(|| json!([])) })
+                    }
+                    "secret" => {
+                        json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "secret", "reason": params.get("reason").cloned().unwrap_or_else(|| json!("June needs a secret before it can continue.")) })
+                    }
+                    _ => {
+                        let tool_name = params
+                            .get("toolName")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown_tool");
+                        let presentation =
+                            approval_presentation(tool_name, params.get("arguments"));
+                        json!({ "id": interruption_id, "sessionId": frame.session_id, "runId": frame.run_id, "status": "pending", "createdAt": created_at, "kind": "approval", "toolName": tool_name, "title": presentation.title, "description": presentation.description, "command": presentation.command, "allowAlways": false, "batchId": batch_id, "batchSize": batch_size })
+                    }
+                };
+                data = json!({ "itemId": persistence_external_id, "interruption": interruption });
+                let persistence = repository
+                    .persist_pending_interruption(
+                        &frame.session_id,
+                        &frame.run_id,
+                        frame.sequence,
+                        data["itemId"].as_str().unwrap_or_default(),
+                        &data["interruption"],
+                        &serialized,
+                    )
+                    .await;
+                match persistence {
+                    Ok(
+                        super::repository::PendingInterruptionPersistence::Inserted
+                        | super::repository::PendingInterruptionPersistence::ReenteredPending,
+                    ) => {
+                        if let Err(error) =
+                            crate::routines::mark_agent_run_waiting(&repository.pool, &frame.run_id)
+                                .await
+                        {
+                            tracing::warn!(
+                                error_code = %error.code,
+                                run_id = %frame.run_id,
+                                "failed to mirror the pending agent interruption to its routine run"
+                            );
+                        }
+                    }
+                    Ok(super::repository::PendingInterruptionPersistence::ExistingPending)
+                    | Ok(super::repository::PendingInterruptionPersistence::Terminal) => {
+                        return Ok(())
+                    }
+                    Ok(super::repository::PendingInterruptionPersistence::Rejected) => {
+                        fail_unpersisted_interruption(app, repository, frame).await;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            run_id = %frame.run_id,
+                            sequence = frame.sequence,
+                            "failed to persist a pending agent interruption atomically"
+                        );
+                        fail_unpersisted_interruption(app, repository, frame).await;
+                        return Ok(());
                     }
                 }
-                Ok(super::repository::PendingInterruptionPersistence::ExistingPending)
-                | Ok(super::repository::PendingInterruptionPersistence::Terminal) => return Ok(()),
-                Ok(super::repository::PendingInterruptionPersistence::Rejected) => {
-                    fail_unpersisted_interruption(app, repository, frame).await;
-                    return Ok(());
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        run_id = %frame.run_id,
-                        sequence = frame.sequence,
-                        "failed to persist a pending agent interruption atomically"
-                    );
-                    fail_unpersisted_interruption(app, repository, frame).await;
-                    return Ok(());
-                }
+                None
             }
-            None
         }
         "usage.updated" => {
             repository.update_run_usage(&frame.run_id, &params).await?;

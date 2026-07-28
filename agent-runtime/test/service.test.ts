@@ -99,6 +99,30 @@ test("serializes an approval interruption for durable host persistence", async (
   assert.equal(interruption?.params.id, "approval-1");
 });
 
+test("assigns one durable batch to sibling approval interruptions", async () => {
+  const engine = new FakeEngine({
+    history: [],
+    usage: {},
+    interruptions: ["1", "2", "3"].map((id) => ({
+      id: `approval-${id}`,
+      kind: "approval" as const,
+      toolName: "write_file",
+      arguments: { path: `${id}.md` },
+    })),
+    serializedState: "{\"batch\":true}",
+  });
+  const { service, frames } = harness(engine);
+  await initialize(service);
+  await service.handle(request("run.start", runParams));
+  await nextTurn();
+
+  const interruptions = frames().filter((frame) => frame.method === "interruption.requested");
+  assert.equal(interruptions.length, 1);
+  assert.equal(interruptions[0]?.params.batchSize, 3);
+  assert.equal(interruptions[0]?.params.serializedState, "{\"batch\":true}");
+  assert.deepEqual(interruptions[0]?.params.interruptions, engine.result.interruptions);
+});
+
 test("cancels an active run with its abort signal", async () => {
   const engine = new WaitingEngine();
   const { service, frames } = harness(engine);

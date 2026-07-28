@@ -55,6 +55,16 @@ best-effort: a bookkeeping failure is logged and surfaced as non-fatal result
 metadata rather than incorrectly reporting that an already-applied mutation
 failed.
 
+### Addendum: approval decision batches (2026-07-28)
+
+Approval siblings emitted by one model generation are persisted as one
+decision batch. June records each choice independently, remains waiting until
+every declared sibling has a durable decision, and then dispatches all sibling
+resolutions once against their shared serialized state. This prevents a
+deterministic failure in an earlier approved tool from stranding later
+approvals through one-at-a-time resume attempts. Clarification, secret, mixed,
+and legacy interruptions remain singleton batches.
+
 ## Consequences
 
 - Creation cannot accidentally destroy an existing file.

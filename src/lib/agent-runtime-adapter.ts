@@ -101,6 +101,24 @@ export function mergeAgentRuntimeSnapshot(
   input: { session: AgentSessionDto; run?: AgentRunDto; items: AgentItemDto[] },
 ): AgentRuntimeProjection {
   const snapshot = createAgentRuntimeProjection(input);
+  snapshot.items = snapshot.items.map((incoming) => {
+    if (incoming.kind !== "interruption") return incoming;
+    const currentItem = current.items.find(
+      (item) =>
+        item.kind === "interruption" &&
+        item.interruption.sessionId === incoming.interruption.sessionId &&
+        item.interruption.runId === incoming.interruption.runId &&
+        item.interruption.id === incoming.interruption.id,
+    );
+    if (
+      currentItem?.kind === "interruption" &&
+      currentItem.interruption.status !== "pending" &&
+      incoming.interruption.status === "pending"
+    ) {
+      return currentItem;
+    }
+    return incoming;
+  });
   const run = input.run;
   if (!run || (run.status !== "running" && run.status !== "waiting_for_user")) return snapshot;
   if (
@@ -278,24 +296,26 @@ export function applyAgentRuntimeEvent(
     }
     case "interruption.requested":
       if (next.run?.id === event.runId && terminalRunStatuses.has(next.run.status)) break;
-      next.items = upsertItem(
-        next.items.filter(
-          (item) =>
-            item.kind !== "interruption" ||
-            item.sessionId !== event.sessionId ||
-            item.runId !== event.runId ||
-            item.interruption.id !== event.data.interruption.id,
-        ),
-        {
-          id: event.data.itemId,
+      for (const incoming of "items" in event.data ? event.data.items : [event.data]) {
+        next.items = upsertItem(
+          next.items.filter(
+            (item) =>
+              item.kind !== "interruption" ||
+              item.sessionId !== event.sessionId ||
+              item.runId !== event.runId ||
+              item.interruption.id !== incoming.interruption.id,
+          ),
+          {
+          id: incoming.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
           sequence: event.sequence,
-          createdAt: event.data.interruption.createdAt,
+          createdAt: incoming.interruption.createdAt,
           kind: "interruption",
-          interruption: event.data.interruption,
-        },
-      );
+          interruption: incoming.interruption,
+          },
+        );
+      }
       if (next.run?.id === event.runId) next.run = { ...next.run, status: "waiting_for_user" };
       break;
     case "usage.updated":

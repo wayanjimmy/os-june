@@ -136,6 +136,8 @@ type AgentInterruptionBase = {
   status: "pending" | "resolved" | "expired";
   createdAt: string;
   resolvedAt?: string;
+  batchId?: string;
+  batchSize?: number;
 };
 
 export type AgentApprovalInterruptionDto = AgentInterruptionBase & {
@@ -257,7 +259,9 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "interruption.requested";
-        data: { itemId: string; interruption: AgentInterruptionDto };
+        data:
+          | { itemId: string; interruption: AgentInterruptionDto }
+          | { items: Array<{ itemId: string; interruption: AgentInterruptionDto }> };
       }
     | { eventId: string; method: "usage.updated"; data: AgentUsageDto }
     | { eventId: string; method: "run.completed"; data: { completedAt: string } }
