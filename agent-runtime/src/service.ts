@@ -161,20 +161,32 @@ export class RuntimeService {
     const controller = new AbortController();
     const active: ActiveRun = { controller, steering: [], steeringIds: new Set() };
     this.activeRuns.set(runKey(sessionId, runId), active);
-    this.emit("run.started", { resumed: true, model: parsed.model }, sessionId, runId);
-    void this.settle(
-      sessionId,
-      runId,
-      this.engine.resume({
+    setImmediate(() => {
+      void this.settle(
         sessionId,
         runId,
-        params: parsed,
-        signal: controller.signal,
-        emit: (event) => this.forwardEngineEvent(event, sessionId, runId),
-        takeSteering: () => active.steering.splice(0),
-      }),
-    );
+        this.resumeAcceptedRun(sessionId, runId, parsed, active),
+      );
+    });
     return { accepted: true };
+  }
+
+  private async resumeAcceptedRun(
+    sessionId: string,
+    runId: string,
+    parsed: RunResumeParams,
+    active: ActiveRun,
+  ): Promise<EngineResult> {
+    throwIfAborted(active.controller.signal);
+    this.emit("run.started", { resumed: true, model: parsed.model }, sessionId, runId);
+    return this.engine.resume({
+      sessionId,
+      runId,
+      params: parsed,
+      signal: active.controller.signal,
+      emit: (event) => this.forwardEngineEvent(event, sessionId, runId),
+      takeSteering: () => active.steering.splice(0),
+    });
   }
 
   private steer(sessionId: string, runId: string, params: JsonObject): JsonValue {

@@ -208,7 +208,7 @@ test("dispatches durable approval resolutions through run.resume", async () => {
   const engine = new ResumeRecordingEngine();
   const { service, frames } = harness(engine);
   await initialize(service);
-  await service.handle(
+  const response = await service.handle(
     request("run.resume", {
       model: "private-auto",
       instructions: "You are June.",
@@ -221,6 +221,9 @@ test("dispatches durable approval resolutions through run.resume", async () => {
       resolutions: [{ interruptionId: "approval-1", decision: "approve" }],
     }),
   );
+  assert.deepEqual(response, { accepted: true });
+  assert.equal(engine.serializedState, "");
+  assert.equal(frames().some((frame) => frame.method === "run.started"), false);
   await nextTurn();
   assert.equal(engine.serializedState, "{\"state\":true}");
   assert.deepEqual(engine.resolutions, [{ interruptionId: "approval-1", decision: "approve" }]);
